@@ -1,0 +1,383 @@
+{
+  "cs2_subscribed_groups": {
+    "description": "预置推送目标群(QQ群号列表)",
+    "type": "list",
+    "default": [],
+    "hint": "运行时可叠加 /cs2 订阅 命令;JSON 里写成 [123456789, 987654321]"
+  },
+  "cs2_debug_groups": {
+    "description": "调试群(只有这些群或超管私聊才能用管理/调试命令)",
+    "type": "list",
+    "default": [],
+    "hint": "JSON 格式如 [123456789]"
+  },
+  "cs2_live_poll_interval": {
+    "description": "直播轮询间隔(分钟)",
+    "type": "int",
+    "default": 2,
+    "hint": "1~1440 分钟"
+  },
+  "cs2_matches_scan_interval": {
+    "description": "/matches 扫描间隔(分钟)",
+    "type": "int",
+    "default": 3,
+    "hint": "1~1440 分钟"
+  },
+  "cs2_request_min_gap": {
+    "description": "两次抓取之间的最小间隔(秒)",
+    "type": "float",
+    "default": 2.5,
+    "hint": "0~3600 秒,防 HLTV 限流"
+  },
+  "cs2_rpm_limit": {
+    "description": "出站请求每分钟硬上限",
+    "type": "int",
+    "default": 60,
+    "hint": "1~600;用于防止异常并发触发 429。默认 60 RPM"
+  },
+  "cs2_tpm_limit": {
+    "description": "LLM token 每分钟预留上限",
+    "type": "int",
+    "default": 150000,
+    "hint": "当前 CS2 查询链不调用 LLM,此值供未来 LLM 功能统一复用"
+  },
+  "cs2_use_curl_cffi": {
+    "description": "使用 curl_cffi(Chrome TLS 指纹伪装)作为优先抓取通道",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后优先用 curl_cffi 抓取 HLTV 页面、搜索与 logo,被 Cloudflare 拦截时自动回退 Playwright"
+  },
+  "cs2_proxy_url": {
+    "description": "代理地址(curl_cffi 通道使用)",
+    "type": "string",
+    "default": "",
+    "hint": "示例:http://127.0.0.1:7890;留空时自动沿用 HTTP_PROXY/HTTPS_PROXY"
+  },
+  "cs2_headful": {
+    "description": "Playwright 浏览器有头模式(调试用)",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后能看到 Chromium 窗口"
+  },
+  "cs2_nav_timeout": {
+    "description": "页面导航超时(毫秒)",
+    "type": "int",
+    "default": 45000,
+    "hint": "1000~120000 毫秒"
+  },
+  "cs2_challenge_retries": {
+    "description": "Cloudflare 挑战重试次数",
+    "type": "int",
+    "default": 3,
+    "hint": "1~10 次"
+  },
+  "cs2_challenge_grace_ms": {
+    "description": "Cloudflare 挑战页宽限窗口(毫秒)",
+    "type": "int",
+    "default": 1500,
+    "hint": "0~30000;挑战页上等待 selector 的超时,超时立刻 reload"
+  },
+  "cs2_fetch_budget_seconds": {
+    "description": "单次抓取占用导航档位的时间预算(秒)",
+    "type": "float",
+    "default": 60.0,
+    "hint": "5~600;超预算不再重试,防 HLTV 超时堵住队列"
+  },
+  "cs2_command_cooldown": {
+    "description": "命令冷却时间(秒)",
+    "type": "float",
+    "default": 5.0,
+    "hint": "0~300 秒"
+  },
+  "cs2_max_followed": {
+    "description": "超过此并发直播数时发容量告警",
+    "type": "int",
+    "default": 10,
+    "hint": "1~100"
+  },
+  "cs2_featured_refresh_hour": {
+    "description": "每日白名单刷新时刻(北京时间)",
+    "type": "int",
+    "default": 4,
+    "hint": "0~23 时"
+  },
+  "cs2_featured_sticky_days": {
+    "description": "白名单赛事保留天数(过期自动清理)",
+    "type": "int",
+    "default": 3,
+    "hint": ">=0 天"
+  },
+  "cs2_results_backstop": {
+    "description": "补报:重启/离线期间结束的比赛发现后补推",
+    "type": "bool",
+    "default": true
+  },
+  "cs2_backstop_window_min": {
+    "description": "补报时间窗口(分钟)",
+    "type": "int",
+    "default": 120,
+    "hint": ">=1 分钟"
+  },
+  "cs2_startup_backstop_window_min": {
+    "description": "首次启动补报时间窗口(分钟,更长以兜住关机过夜)",
+    "type": "int",
+    "default": 720,
+    "hint": ">=1 分钟"
+  },
+  "cs2_scan_cache_max_age": {
+    "description": "/matches 扫描可复用缓存的最大年龄(秒)",
+    "type": "int",
+    "default": 45,
+    "hint": "0~600;0=始终真抓"
+  },
+  "cs2_stuck_follow_hours": {
+    "description": "僵死追踪超时(小时)",
+    "type": "float",
+    "default": 4.0,
+    "hint": "1~48;追踪中的比赛离开直播列表超此时长则放弃"
+  },
+  "cs2_vrs_enabled": {
+    "description": "启用 Valve 世界排名(VRS)显示",
+    "type": "bool",
+    "default": true
+  },
+  "cs2_vrs_refresh_hour": {
+    "description": "VRS 每日全量刷新时刻(北京时间)",
+    "type": "int",
+    "default": 6,
+    "hint": "0~23 时"
+  },
+  "cs2_vrs_max_age_hours": {
+    "description": "VRS 数据超龄后允许后台补刷(小时)",
+    "type": "float",
+    "default": 20.0,
+    "hint": "1~720 小时"
+  },
+  "cs2_vrs_min_gap_hours": {
+    "description": "VRS 两次真抓的最小间隔(小时)",
+    "type": "float",
+    "default": 6.0,
+    "hint": "0.5~168 小时"
+  },
+  "cs2_vrs_fail_cooldown_min": {
+    "description": "VRS 抓取失败后冷却时间(分钟)",
+    "type": "int",
+    "default": 60,
+    "hint": ">=1 分钟"
+  },
+  "cs2_alert_after_failures": {
+    "description": "连续失败多少次后告警",
+    "type": "int",
+    "default": 5,
+    "hint": ">=1"
+  },
+  "cs2_delivery_max_attempts": {
+    "description": "投递最大重试次数",
+    "type": "int",
+    "default": 5,
+    "hint": "1~20"
+  },
+  "cs2_delivery_retry_base_seconds": {
+    "description": "投递重试基础间隔(秒)",
+    "type": "int",
+    "default": 30,
+    "hint": "1~86400;指数退避的基数"
+  },
+  "cs2_delivery_poll_seconds": {
+    "description": "投递轮询间隔(秒)",
+    "type": "float",
+    "default": 2.0,
+    "hint": "0.5~60"
+  },
+  "cs2_delivery_keep_days": {
+    "description": "投递记录保留天数",
+    "type": "int",
+    "default": 30,
+    "hint": "1~3650"
+  },
+  "cs2_mute_backoff_minutes": {
+    "description": "群禁言后静默期(分钟)",
+    "type": "int",
+    "default": 15,
+    "hint": "1~1440"
+  },
+  "cs2_mute_defer_max_hours": {
+    "description": "禁言期间战报最多顺延时长(小时)",
+    "type": "float",
+    "default": 6.0,
+    "hint": "0.5~72;超时直接丢弃"
+  },
+  "cs2_sub_any_tier": {
+    "description": "个人订阅追任何赛事级别(非仅顶级)",
+    "type": "bool",
+    "default": true
+  },
+  "cs2_sub_max_targets_per_user": {
+    "description": "每人每群订阅上限",
+    "type": "int",
+    "default": 20,
+    "hint": "1~200"
+  },
+  "cs2_sub_start_window_min": {
+    "description": "开赛前预解析阵容的窗口(分钟)",
+    "type": "int",
+    "default": 30,
+    "hint": "0~720;0=只在真开赛后解析"
+  },
+  "cs2_sub_lineup_resolve_cap": {
+    "description": "每扫描周期最多真抓多少场比赛页(封顶 ban 风险)",
+    "type": "int",
+    "default": 2,
+    "hint": "0~20"
+  },
+  "cs2_sub_player_team_refresh_hours": {
+    "description": "选手所属队复查间隔(小时)",
+    "type": "float",
+    "default": 24.0,
+    "hint": "1~720 小时"
+  },
+  "cs2_sub_start_skip_if_maps_done": {
+    "description": "错过开赛的地图数阈值(超过则不补发开赛卡)",
+    "type": "int",
+    "default": 1,
+    "hint": "1~5"
+  },
+  "cs2_roster_refresh_hours": {
+    "description": "本地名录全量刷新间隔(小时)",
+    "type": "float",
+    "default": 72.0,
+    "hint": "1~720 小时"
+  },
+  "cs2_ongoing_lead_days": {
+    "description": "赛事「正在进行」判定:距首个比赛日<=此天数的即将开赛赛事也算",
+    "type": "int",
+    "default": 3,
+    "hint": "0~30 天"
+  },
+  "cs2_event_warm_interval": {
+    "description": "赛事页预热刷新间隔(分钟)",
+    "type": "int",
+    "default": 5,
+    "hint": "1~1440"
+  },
+  "cs2_event_warm_cap": {
+    "description": "赛事页预热每轮最多抓取数",
+    "type": "int",
+    "default": 2,
+    "hint": "1~100"
+  },
+  "cs2_match_day_gap_hours": {
+    "description": "比赛日聚类:相邻间隔超过此时长即切新比赛日",
+    "type": "float",
+    "default": 6.0,
+    "hint": "1~24 小时"
+  },
+  "cs2_match_day_max_span_hours": {
+    "description": "比赛日最大跨度(小时,兜底防多线赛事连成整周)",
+    "type": "float",
+    "default": 20.0,
+    "hint": "6~48 小时"
+  },
+  "cs2_match_day_tail_hours": {
+    "description": "末场开赛后仍算进行中的余量(小时)",
+    "type": "float",
+    "default": 6.0,
+    "hint": "0~12 小时"
+  },
+  "cs2_recap_max_age_hours": {
+    "description": "空档期附带上一比赛日战报的最大年龄(小时)",
+    "type": "float",
+    "default": 24.0,
+    "hint": "0~96 小时"
+  },
+  "cs2_events_logo_fetch_cap": {
+    "description": "命令路径赛事 logo 发现上限(每轮)",
+    "type": "int",
+    "default": 8,
+    "hint": "1~100"
+  },
+  "cs2_events_logo_prewarm_cap": {
+    "description": "启动预热赛事 logo 发现上限",
+    "type": "int",
+    "default": 30,
+    "hint": "1~500"
+  },
+  "cs2_logo_fail_cooldown": {
+    "description": "logo 抓取失败后冷却秒数(0=不冷却)",
+    "type": "int",
+    "default": 1800,
+    "hint": ">=0;避免反复重撞 403 压垮 IP 信誉"
+  },
+  "cs2_cache_matches_ttl": {
+    "description": "/matches 页面缓存 TTL(秒)",
+    "type": "int",
+    "default": 180,
+    "hint": ">=0"
+  },
+  "cs2_cache_events_ttl": {
+    "description": "/events 页面缓存 TTL(秒)",
+    "type": "int",
+    "default": 21600,
+    "hint": ">=0"
+  },
+  "cs2_cache_results_ttl": {
+    "description": "/results 页面缓存 TTL(秒)",
+    "type": "int",
+    "default": 600,
+    "hint": ">=0"
+  },
+  "cs2_cache_event_page_ttl": {
+    "description": "赛事单页缓存 TTL(秒)",
+    "type": "int",
+    "default": 300,
+    "hint": ">=0"
+  },
+  "cs2_logo_keep_days": {
+    "description": "logo 缓存保留天数",
+    "type": "int",
+    "default": 45,
+    "hint": ">=1"
+  },
+  "cs2_cache_cleanup_hour": {
+    "description": "缓存清理时刻(北京时间)",
+    "type": "int",
+    "default": 5,
+    "hint": "0~23 时"
+  },
+  "cs2_stale_matches": {
+    "description": "/matches 陈旧缓存窗口(秒,先秒回旧副本再后台刷新)",
+    "type": "int",
+    "default": 1800,
+    "hint": ">=0;0=关闭 stale-while-revalidate"
+  },
+  "cs2_stale_results": {
+    "description": "/results 陈旧缓存窗口(秒)",
+    "type": "int",
+    "default": 3600,
+    "hint": ">=0"
+  },
+  "cs2_stale_events": {
+    "description": "/events 陈旧缓存窗口(秒)",
+    "type": "int",
+    "default": 172800,
+    "hint": ">=0"
+  },
+  "cs2_stale_event_page": {
+    "description": "赛事单页陈旧缓存窗口(秒)",
+    "type": "int",
+    "default": 3600,
+    "hint": ">=0"
+  },
+  "cs2_force_include_events": {
+    "description": "强制纳入白名单的赛事 ID 列表",
+    "type": "list",
+    "default": [],
+    "hint": "JSON 字符串数组,如 [\"6862\"]"
+  },
+  "cs2_force_exclude_events": {
+    "description": "强制排除的赛事 ID 列表",
+    "type": "list",
+    "default": [],
+    "hint": "JSON 字符串数组"
+  }
+}
