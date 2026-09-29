@@ -2,7 +2,7 @@ name: cs2_results
 author: "Almighty"
 desc: "HLTV CS2 顶级赛事逐图战报推送:直播时每打完一张地图即推送战报卡,支持赛程/赛事查询与战队/选手订阅"
 short_desc: "HLTV CS2 顶级赛事、赛程、战队与选手订阅战报"
-version: "1.1.0"
+version: "1.1.1"
 astrbot_version: ">=4.25.3,<5"
 support_platforms:
   - aiocqhttp
