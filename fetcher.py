@@ -19,9 +19,12 @@ import asyncio
 import html as html_lib
 import os
 import re
+import shutil
+import subprocess
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import AsyncIterator, Literal, Optional
 from urllib.parse import quote_plus, urlsplit
 
@@ -190,6 +193,7 @@ class Fetcher:
         self.cfg = cfg
         self._pw = None
         self._browser = None
+        self._xvfb_proc: subprocess.Popen[bytes] | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._gate = _FairPriorityGate(cfg.cs2_request_min_gap)
         self._closing = False
@@ -423,6 +427,12 @@ class Fetcher:
 
             from playwright.async_api import async_playwright
 
+            launch_env: dict[str, str] | None = None
+            if self.cfg.cs2_headful and os.name != "nt" and not os.environ.get("DISPLAY"):
+                display = await asyncio.to_thread(self._start_xvfb)
+                launch_env = os.environ.copy()
+                launch_env["DISPLAY"] = display
+
             pw = await async_playwright().start()
             args = ["--disable-blink-features=AutomationControlled"]
             if self.cfg.cs2_headful:
@@ -433,6 +443,7 @@ class Fetcher:
                     headless=not self.cfg.cs2_headful,
                     args=args,
                     ignore_default_args=["--enable-automation"],
+                    env=launch_env,
                 )
             except asyncio.CancelledError:
                 await pw.stop()
@@ -447,6 +458,45 @@ class Fetcher:
                 f"[cs2] Chromium 抓取浏览器已启动"
                 f"({'有头/屏幕外' if self.cfg.cs2_headful else '无头'})"
             )
+
+    def _start_xvfb(self) -> str:
+        """Start a private X server for headful Chromium when no DISPLAY exists."""
+        binary = shutil.which("Xvfb")
+        if not binary:
+            raise RuntimeError(
+                "cs2_headful=True 但系统未安装 Xvfb;"
+                "Debian/Ubuntu 可执行 apt-get install -y xvfb"
+            )
+        for number in range(99, 120):
+            display = f":{number}"
+            socket = Path(f"/tmp/.X11-unix/X{number}")
+            if socket.exists():
+                continue
+            proc = subprocess.Popen(
+                [
+                    binary,
+                    display,
+                    "-screen",
+                    "0",
+                    "1366x900x24",
+                    "-ac",
+                    "-nolisten",
+                    "tcp",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            for _ in range(30):
+                if proc.poll() is not None:
+                    raise RuntimeError(f"Xvfb 启动失败,DISPLAY={display}")
+                if socket.exists():
+                    self._xvfb_proc = proc
+                    logger.info(f"[cs2] 已为有头 Chromium 启动 Xvfb {display}")
+                    return display
+                time.sleep(0.1)
+            proc.terminate()
+        raise RuntimeError("找不到可用的 Xvfb DISPLAY")
 
     def _track_task(self, coro, *, name: str) -> asyncio.Task[None] | None:
         if self._closing:
@@ -484,6 +534,14 @@ class Fetcher:
                             await pw.stop()
                         except Exception as exc:
                             logger.warning(f"[cs2] Playwright 关闭失败: {exc}")
+                xvfb = self._xvfb_proc
+                self._xvfb_proc = None
+                if xvfb and xvfb.poll() is None:
+                    xvfb.terminate()
+                    try:
+                        await asyncio.to_thread(xvfb.wait, 5)
+                    except subprocess.TimeoutExpired:
+                        xvfb.kill()
 
     @asynccontextmanager
     async def _navigation_slot(self, priority: FetchPriority) -> AsyncIterator[None]:

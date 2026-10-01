@@ -73,7 +73,8 @@ class Config(BaseModel):
     cs2_force_exclude_events: list[str] = Field(default_factory=list)
 
     # —— 抓取(反爬)——
-    cs2_headful: bool = False  # 调试时可设 True 看浏览器窗口
+    # Linux 无 DISPLAY 时,插件会自动启动私有 Xvfb;需先安装系统包 xvfb。
+    cs2_headful: bool = False
     # 启用 curl_cffi(Chrome TLS 指纹伪装)作为优先抓取通道
     # 开启后优先抓 HLTV 页面、搜索与 logo;挑战/超时/异常自动回退 Playwright
     cs2_use_curl_cffi: bool = True

@@ -20,6 +20,8 @@
 ```bash
 pip install -r requirements.txt
 playwright install chromium
+# Linux 且开启有头模式时:
+apt-get install -y xvfb
 ```
 
 `playwright` 用于 HLTV 反爬回退通道,即使用 AstrBot 内置 T2I 渲染卡片也需要安装。
@@ -60,6 +62,8 @@ playwright install chromium
 - `cs2_proxy_url` 为空时,依次沿用 `HTTPS_PROXY`、`https_proxy`、`HTTP_PROXY`、
   `http_proxy` 环境变量。
 - `curl_cffi` 遇到 HTTP/Cloudflare 挑战、超时或响应类型异常时自动回退 Playwright。
+- `cs2_headful` 默认为关闭。若 HLTV 的 `/events` 对无头浏览器返回挑战,可开启该选项;
+  Linux 无桌面环境时插件会自动启动私有 `Xvfb`。
 - Docker 内的 `127.0.0.1` 指向容器自身。代理运行在宿主机时,请填写宿主机地址或使用
   宿主机的容器网络地址。
 

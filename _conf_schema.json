@@ -57,7 +57,7 @@
     "description": "Playwright 浏览器有头模式(调试用)",
     "type": "bool",
     "default": false,
-    "hint": "开启后能看到 Chromium 窗口"
+    "hint": "HLTV /events 反爬较严时建议开启;Linux 无 DISPLAY 会自动启动 Xvfb,需安装 xvfb"
   },
   "cs2_nav_timeout": {
     "description": "页面导航超时(毫秒)",
