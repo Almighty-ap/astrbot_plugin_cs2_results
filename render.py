@@ -1761,10 +1761,27 @@ def _swiss_score(mu: Matchup) -> str:
 
 
 def _swiss_mu(mu: Matchup) -> str:
-    """瑞士轮一场:两队标 + 中间比分/vs(仿 HLTV 只用队标不占名字,保持窄列)。
+    """瑞士轮一场:队标 + 队名 + 中间比分/vs。
     已结束的对阵:败者队标置灰调浅。"""
-    b1 = _slot_badge(mu.team1, 26, dim=(mu.finished and mu.winner == "team2"))
-    b2 = _slot_badge(mu.team2, 26, dim=(mu.finished and mu.winner == "team1"))
+    b1 = _slot_badge(mu.team1, 24, dim=(mu.finished and mu.winner == "team2"))
+    b2 = _slot_badge(mu.team2, 24, dim=(mu.finished and mu.winner == "team1"))
+    n1 = (
+        f'<span style="font-size:13px;font-weight:600;color:{INK};min-width:0;'
+        f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+        f"{_slot_name(mu.team1)}</span>"
+    )
+    n2 = (
+        f'<span style="font-size:13px;font-weight:600;color:{INK};min-width:0;'
+        f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;">'
+        f"{_slot_name(mu.team2)}</span>"
+    )
+    left = (
+        f'<span style="display:flex;align-items:center;gap:6px;min-width:0;">{b1}{n1}</span>'
+    )
+    right = (
+        f'<span style="display:flex;align-items:center;justify-content:flex-end;gap:6px;'
+        f'min-width:0;">{n2}{b2}</span>'
+    )
     live_bd = f"1.5px solid {ACCENT}" if mu.live else f"1px solid {BORDER}"
     bg = ACCENT_BG if mu.live else INNER
     # 已结束:胜方队标一侧叠赤陶像素渐变(外缘最浓、向中间消散);容器 relative 承托叠层
@@ -1782,8 +1799,9 @@ def _swiss_mu(mu: Matchup) -> str:
         f'<div style="position:relative;overflow:hidden;border:{live_bd};border-radius:11px;'
         f'background:{bg};">{wash}'
         f'<div style="position:relative;z-index:1;padding:8px 10px;'
-        f'display:grid;grid-template-columns:26px 1fr 26px;align-items:center;gap:8px;">'
-        f'{b1}<span style="display:flex;justify-content:center;">{_swiss_score(mu)}</span>{b2}'
+        f'display:grid;grid-template-columns:minmax(0,1fr) 44px minmax(0,1fr);'
+        f'align-items:center;gap:7px;">'
+        f'{left}<span style="display:flex;justify-content:center;">{_swiss_score(mu)}</span>{right}'
         f'<div style="grid-column:1 / -1;display:flex;justify-content:center;'
         f'border-top:1px solid {BORDER_S};margin-top:6px;padding-top:5px;'
         f'font-size:11px;color:{MUTE};font-variant-numeric:tabular-nums;white-space:nowrap;">'

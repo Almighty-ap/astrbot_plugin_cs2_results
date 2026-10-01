@@ -48,4 +48,6 @@ def test_upcoming_swiss_matchup_renders_beijing_time_bo_and_status() -> None:
     assert "第 1 轮 · 即将开始" in html
     assert "10月3日 周六 18:00" in html
     assert "BO3" in html
+    assert "Falcons" in html
+    assert "TYLOO" in html
     assert "第 1 轮 · 进行中" not in html
