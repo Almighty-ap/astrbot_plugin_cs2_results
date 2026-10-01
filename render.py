@@ -1770,12 +1770,24 @@ def _swiss_mu(mu: Matchup) -> str:
     # 已结束:胜方队标一侧叠赤陶像素渐变(外缘最浓、向中间消散);容器 relative 承托叠层
     won = mu.finished and mu.winner in ("team1", "team2")
     wash = _win_wash_swiss("left" if mu.winner == "team1" else "right") if won else ""
+    if mu.live:
+        schedule = f"LIVE · {_fmt_dt(mu.start_unix)}"
+    elif mu.finished:
+        schedule = f"已结束 · {_fmt_dt(mu.start_unix)}"
+    else:
+        schedule = _fmt_dt(mu.start_unix)
+    bo = f"BO{mu.best_of}" if mu.best_of else ""
+    foot = " · ".join(x for x in (schedule, bo) if x)
     return (
         f'<div style="position:relative;overflow:hidden;border:{live_bd};border-radius:11px;'
         f'background:{bg};">{wash}'
         f'<div style="position:relative;z-index:1;padding:8px 10px;'
         f'display:grid;grid-template-columns:26px 1fr 26px;align-items:center;gap:8px;">'
-        f'{b1}<span style="display:flex;justify-content:center;">{_swiss_score(mu)}</span>{b2}</div></div>'
+        f'{b1}<span style="display:flex;justify-content:center;">{_swiss_score(mu)}</span>{b2}'
+        f'<div style="grid-column:1 / -1;display:flex;justify-content:center;'
+        f'border-top:1px solid {BORDER_S};margin-top:6px;padding-top:5px;'
+        f'font-size:11px;color:{MUTE};font-variant-numeric:tabular-nums;white-space:nowrap;">'
+        f"{_esc(foot)}</div></div></div>"
     )
 
 
@@ -1889,7 +1901,14 @@ def _swiss_section(sw: SwissStage) -> str:
             f"{pool_html}</div>{elim_block}</div>"
         )
 
-        if col.status == "active":
+        matchups = [mu for c in col.cells for mu in c.matchups]
+        if any(mu.live for mu in matchups):
+            head_col, head_txt = ACCENT_D, f"第 {i + 1} 轮 · 进行中"
+        elif matchups and all(mu.finished for mu in matchups):
+            head_col, head_txt = MUTE, f"第 {i + 1} 轮 · 已结束"
+        elif matchups and any(mu.start_unix for mu in matchups):
+            head_col, head_txt = SUB, f"第 {i + 1} 轮 · 即将开始"
+        elif col.status == "active":
             head_col, head_txt = ACCENT_D, f"第 {i + 1} 轮 · 进行中"
         elif col.status == "finished":
             head_col, head_txt = MUTE, f"第 {i + 1} 轮"
