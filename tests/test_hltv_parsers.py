@@ -293,6 +293,51 @@ class HltvParserHappyPathTests(unittest.TestCase):
         self.assertEqual((main_final.start_unix, main_final.best_of), (0, 0))
         self.assertEqual((group_final.start_unix, group_final.best_of), (0, 0))
 
+    def test_swiss_ref_only_popup_uses_dom_team_names_and_matches_schedule(self) -> None:
+        html = """
+        <div class="swiss-visual-container">
+          <div class="swiss-visual-column active">
+            <div class="swiss-visual-matchups-wrapper">
+              <div class="swiss-visual-matchups-title">0:0</div>
+              <div class="swiss-visual-matchup"
+                   data-match-details-popup-json='{"ref":{"matchId":{"matchId":2398717},"resultId":null}}'>
+                <div class="swiss-visual-team">
+                  <img class="swiss-visual-team-logo" title="Falcons"
+                       src="https://img-cdn.hltv.org/teamlogo/falcons.png">
+                </div>
+                <div class="swiss-visual-team">
+                  <img class="swiss-visual-team-logo" title="TYLOO"
+                       src="https://img-cdn.hltv.org/teamlogo/tyloo.png">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        """
+
+        stage = self.hltv.parse_swiss(self.hltv.tree(html), set())
+
+        assert stage is not None
+        matchup = stage.columns[0].cells[0].matchups[0]
+        self.assertEqual(matchup.match_id, "2398717")
+        self.assertEqual(matchup.team1.name, "Falcons")
+        self.assertEqual(matchup.team2.name, "TYLOO")
+
+        self.hltv._enrich_swiss_schedule(
+            stage,
+            [
+                self.hltv._SchedEntry(
+                    start=1_788_000_000_000,
+                    bo=3,
+                    stage="",
+                    teams=frozenset(),
+                    match_id="2398717",
+                )
+            ],
+        )
+        self.assertEqual(matchup.start_unix, 1_788_000_000_000)
+        self.assertEqual(matchup.best_of, 3)
+
 
 class HltvParserDegradedInputContractTests(unittest.TestCase):
     @classmethod

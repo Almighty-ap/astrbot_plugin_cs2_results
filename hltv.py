@@ -1068,9 +1068,51 @@ def parse_swiss(t: HTMLParser, live_ids: set[str]) -> Optional[SwissStage]:
                 raw = m.attributes.get("data-match-details-popup-json")
                 if raw:
                     try:
-                        cell.matchups.append(_matchup(json.loads(raw), live_ids))
+                        data = json.loads(raw)
                     except (ValueError, KeyError):
                         continue
+                    if "team1" in data or "team2" in data:
+                        matchup = _matchup(data, live_ids)
+                    else:
+                        ref = data.get("ref")
+                        ref = ref if isinstance(ref, dict) else {}
+                        raw_mid = ref.get("matchId")
+                        if isinstance(raw_mid, dict):
+                            raw_mid = raw_mid.get("matchId")
+                        mid = (
+                            str(int(raw_mid))
+                            if isinstance(raw_mid, (int, float))
+                            else (str(raw_mid) if raw_mid else None)
+                        )
+                        match = data.get("match")
+                        match = match if isinstance(match, dict) else {}
+                        try:
+                            start = int(match.get("startTime") or 0)
+                        except (TypeError, ValueError):
+                            start = 0
+                        try:
+                            bo = int(match.get("numberOfMaps") or 0)
+                        except (TypeError, ValueError):
+                            bo = 0
+                        teams = [_swiss_cluster_team(s) for s in m.css(".swiss-visual-team")[:2]]
+                        while len(teams) < 2:
+                            teams.append(SlotTeam())
+                        purl = match.get("matchPageURL") or ""
+                        url = (
+                            (BASE + purl)
+                            if purl.startswith("/")
+                            else (purl or (f"{BASE}/matches/{mid}/x" if mid else ""))
+                        )
+                        matchup = Matchup(
+                            mid,
+                            url,
+                            start,
+                            bo,
+                            teams[0],
+                            teams[1],
+                            live=bool(mid and mid in live_ids),
+                        )
+                    cell.matchups.append(matchup)
                 else:
                     # 未定场次(本轮未抽签/上一轮未打完):配对尚不确定,HLTV 只是把队伍
                     # 两两排版,并非真实对阵。故只收集队伍当「分组池成员」,不当成对阵。
@@ -1364,6 +1406,7 @@ class _SchedEntry:
     bo: int  # BOx(bo3→3);缺失为 0
     stage: str  # 归一化阶段(quarterfinal/semifinal/grandfinal…)
     teams: frozenset  # 两队名(小写归一);待定场为空集
+    match_id: str = ""
 
 
 def _event_match_index(matches_html: Html, event_id: str) -> list[_SchedEntry]:
@@ -1386,8 +1429,31 @@ def _event_match_index(matches_html: Html, event_id: str) -> list[_SchedEntry]:
         bo = _bo_int(_txt(c.css_first(".match-meta")))
         stage = _norm_stage(_txt(c.css_first(".match-stage")))
         names = [n for n in (_norm(_txt(x)).lower() for x in c.css(".match-teamname")) if n]
-        by_id[mid] = _SchedEntry(start=start, bo=bo, stage=stage, teams=frozenset(names))
+        by_id[mid] = _SchedEntry(
+            match_id=mid,
+            start=start,
+            bo=bo,
+            stage=stage,
+            teams=frozenset(names),
+        )
     return list(by_id.values())
+
+
+def _enrich_swiss_schedule(swiss: Optional[SwissStage], entries: list[_SchedEntry]) -> None:
+    """用 /matches 回填瑞士轮对阵的开赛时间与 BO。"""
+    if not swiss or not entries:
+        return
+    by_id = {entry.match_id: entry for entry in entries if entry.match_id}
+    for col in swiss.columns:
+        for cell in col.cells:
+            for mu in cell.matchups:
+                entry = by_id.get(mu.match_id or "")
+                if entry is None:
+                    continue
+                if entry.start and not mu.start_unix:
+                    mu.start_unix = entry.start
+                if entry.bo:
+                    mu.best_of = entry.bo
 
 
 def _enrich_bracket_schedule(brackets: list[Bracket], entries: list[_SchedEntry]) -> None:
@@ -1494,8 +1560,10 @@ def parse_event_schedule(
     brackets.sort(key=lambda b: (b.is_pending(), 0))
     for b in brackets:
         _fill_cluster_logos(swiss, b)  # 晋级/淘汰带白队标 → 对阵里的深色版,避免浅底难读
-    if brackets and matches_html:
-        _enrich_bracket_schedule(brackets, _event_match_index(matches_html, event_id))
+    entries = _event_match_index(matches_html, event_id) if matches_html else []
+    if brackets and entries:
+        _enrich_bracket_schedule(brackets, entries)
+    _enrich_swiss_schedule(swiss, entries)
     groups = [] if swiss else parse_groups(t)
     return EventSchedule(
         event_id=event_id,
