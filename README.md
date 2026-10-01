@@ -5,6 +5,12 @@
 > 本项目移植自 [canxiaocai/cs2-event-bot](https://github.com/canxiaocai/cs2-event-bot)，
 > 原项目功能和卡片设计版权及许可归原作者所有。
 
+## 预览
+
+![赛事日程预览](docs/images/preview1.png)
+
+![逐图战报预览](docs/images/preview2.png)
+
 ## 功能
 
 - 顶级赛事直播时逐图推送战报卡,包含比分、半场、十人 Rating 和 VRS 变化。

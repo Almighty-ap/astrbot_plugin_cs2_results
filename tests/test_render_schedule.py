@@ -51,3 +51,11 @@ def test_upcoming_swiss_matchup_renders_beijing_time_bo_and_status() -> None:
     assert "Falcons" in html
     assert "TYLOO" in html
     assert "第 1 轮 · 进行中" not in html
+
+
+def test_help_footer_uses_current_repository_without_prefix_duplicate() -> None:
+    html = render.build_help_html(False, "2026-10-02 05:14")
+
+    assert "github.com/Almighty-ap/astrbot_plugin_cs2_results" in html
+    assert "github.com/canxiaocai/cs2-event-bot" not in html
+    assert "或 cs2 均可触发" not in html
