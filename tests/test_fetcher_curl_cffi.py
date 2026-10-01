@@ -150,6 +150,24 @@ def test_proxy_prefers_plugin_config_then_environment(
     assert from_env._curl_cffi_proxy() == "http://env-proxy:8080"
 
 
+def test_playwright_context_uses_same_proxy() -> None:
+    class _Browser:
+        async def new_context(self, **kwargs: object) -> dict[str, object]:
+            return kwargs
+
+    fetcher = Fetcher(
+        Config(
+            cs2_use_curl_cffi=True,
+            cs2_proxy_url="http://mihomo:7890",
+        )
+    )
+    fetcher._browser = _Browser()
+
+    context = asyncio.run(fetcher._new_context())
+
+    assert context["proxy"] == {"server": "http://mihomo:7890"}
+
+
 def test_logo_fetch_does_not_start_browser_when_curl_succeeds(
     monkeypatch: pytest.MonkeyPatch,
     curl_cffi_stub: type[_FakeSession],

@@ -552,10 +552,12 @@ class Fetcher:
         browser = self._browser
         if browser is None:
             raise RuntimeError("fetcher browser is not started")
+        proxy_url = self._curl_cffi_proxy()
         return await browser.new_context(
             user_agent=UA,
             locale="en-US",
             viewport={"width": 1366, "height": 900},
+            proxy={"server": proxy_url} if proxy_url else None,
         )
 
     @staticmethod
