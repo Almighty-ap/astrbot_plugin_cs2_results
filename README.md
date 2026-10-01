@@ -102,3 +102,10 @@ ruff check .
 - 数据仅用于个人学习和非商业群内使用,请保留默认抓取间隔。
 - NapCat 为非官方 QQ 协议实现,使用前请自行评估账号风险。
 - 原项目使用 MIT License,字体 Hanken Grotesk 使用 SIL OFL 1.1。
+
+## 致谢
+
+衷心感谢 [canxiaocai](https://github.com/canxiaocai) 开发并开源
+[cs2-event-bot](https://github.com/canxiaocai/cs2-event-bot)。原项目完成了 HLTV
+赛事跟踪、战报渲染、订阅投递和赛事查询等核心设计，本 AstrBot 移植版是在其基础上
+适配 AstrBot 与 NapCat 而成的。
