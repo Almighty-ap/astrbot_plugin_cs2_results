@@ -185,3 +185,32 @@ def test_group_leave_and_mute_notices_are_handled(monkeypatch: pytest.MonkeyPatc
     assert pruned == [(10001, 123)]
     assert worker.muted == [(10001, 60)]
     assert worker.cleared == [10001]
+
+
+def test_ongoing_event_detection_refreshes_empty_whitelist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {"whitelist": set(), "refreshed": False}
+
+    def whitelist_event_ids() -> set[str]:
+        return set(state["whitelist"])
+
+    async def refresh_whitelist() -> None:
+        state["refreshed"] = True
+        state["whitelist"] = {"8244"}
+
+    monkeypatch.setattr(main, "cfg", main.Config(), raising=False)
+    monkeypatch.setattr(main.store, "whitelist_event_ids", whitelist_event_ids)
+    monkeypatch.setattr(main, "refresh_whitelist", refresh_whitelist)
+    monkeypatch.setattr(
+        main,
+        "fetcher",
+        SimpleNamespace(get_html=AsyncMock(return_value="<html></html>")),
+        raising=False,
+    )
+    monkeypatch.setattr(main.hltv, "tree", lambda html: html)
+    monkeypatch.setattr(main.hltv, "featured_event_ids", lambda _tree: {"8244"})
+    monkeypatch.setattr(main.hltv, "parse_events", lambda _tree: [])
+
+    assert asyncio.run(main._ongoing_event_ids()) == {"8244"}
+    assert state["refreshed"] is True

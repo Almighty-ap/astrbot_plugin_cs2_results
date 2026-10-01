@@ -2004,6 +2004,12 @@ async def _ongoing_event_ids(*, priority: FetchPriority = "user") -> set[str]:
        BLAST Bounty)。用 .big-event 卡的赛事起止时间(parse_events)判定。
 
     读每日缓存的 /events(几乎总是缓存命中,不额外打 HLTV)。见记忆 hltv-scraping-notes。"""
+    wl = store.whitelist_event_ids()
+    if not wl:
+        logger.info("[cs2] 顶赛事白名单为空,先刷新一次再判定正在进行赛事")
+        await refresh_whitelist()
+        wl = store.whitelist_event_ids()
+
     html = await fetcher.get_html(
         hltv.URL_EVENTS,
         wait_selector="#FEATURED, .events-month",
@@ -2014,7 +2020,6 @@ async def _ongoing_event_ids(*, priority: FetchPriority = "user") -> set[str]:
     if not html:
         logger.warning("[cs2] 判定正在进行赛事时抓 /events 失败,暂视为无进行中赛事")
         return set()
-    wl = store.whitelist_event_ids()
     excl = set(cfg.cs2_force_exclude_events)
     etree = hltv.tree(html)  # 建一次树,#FEATURED 与赛事列表两个解析器复用
     ids = {eid for eid in hltv.featured_event_ids(etree) if eid in wl and eid not in excl}
