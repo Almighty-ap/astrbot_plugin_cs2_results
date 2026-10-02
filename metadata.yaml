@@ -1,4 +1,5 @@
 name: cs2_results
+display_name: "CS2 战报推送"
 author: "Almighty"
 desc: "HLTV CS2 顶级赛事逐图战报与 RSS 资讯推送:支持赛程、订阅、新闻翻译总结和卡片渲染"
 short_desc: "HLTV CS2 赛事战报、赛程与 RSS 资讯订阅"
