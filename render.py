@@ -2167,6 +2167,104 @@ def _callout_row(title: str, text: str) -> str:
     )
 
 
+def _image_data_uri(data: Optional[bytes]) -> str:
+    if not data:
+        return ""
+    if data.startswith(b"\xff\xd8\xff"):
+        mime = "image/jpeg"
+    elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime = "image/png"
+    elif data.startswith((b"GIF87a", b"GIF89a")):
+        mime = "image/gif"
+    elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        mime = "image/webp"
+    else:
+        mime = "image/png"
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+
+
+def build_news_html(
+    *,
+    category: str,
+    title: str,
+    original_title: str,
+    summary: str,
+    image_bytes: Optional[bytes],
+    pub_time_text: str,
+    link: str,
+) -> str:
+    """Build the HLTV RSS news card using the shared warm visual language."""
+    image = _image_data_uri(image_bytes)
+    image_html = (
+        f'<img src="{image}" style="display:block;width:100%;max-height:430px;'
+        f'object-fit:cover;border-radius:18px;border:1px solid {BORDER};margin-top:26px;">'
+        if image
+        else ""
+    )
+    original = ""
+    if original_title and original_title.strip() != title.strip():
+        original = (
+            f'<div style="font-size:15px;color:{MUTE};font-weight:500;line-height:1.45;'
+            f'margin-top:8px;">{_esc(original_title)}</div>'
+        )
+    link_html = (
+        f'<span style="color:{ACCENT};font-weight:600;">hltv.org · 查看原文</span>'
+        if link
+        else f'<span style="color:{MUTE};">hltv.org</span>'
+    )
+    body = f"""
+  <div style="display:flex;align-items:center;gap:18px;">
+   {_help_badge(62)}
+   <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;">
+    <div style="font-size:28px;font-weight:700;color:{INK};letter-spacing:-0.3px;line-height:1.1;">
+     HLTV 资讯速递
+    </div>
+    <div style="font-size:15px;color:{SUB};font-weight:500;">Counter-Strike 新闻与转会动态</div>
+   </div>
+   <div style="display:inline-flex;align-items:center;background:{ACCENT_BG};border:1px solid rgba(196,112,78,0.22);
+        border-radius:999px;padding:7px 15px;font-size:14px;font-weight:700;color:{ACCENT_D};white-space:nowrap;">
+    {_esc(category)}
+   </div>
+  </div>
+  <div style="margin-top:34px;font-size:34px;line-height:1.25;font-weight:700;color:{INK};
+       letter-spacing:-0.45px;">{_esc(title)}</div>
+  {original}
+  <div style="margin-top:24px;background:{INNER};border:1px solid {BORDER};border-radius:18px;
+       padding:22px 24px;font-size:17px;line-height:1.75;color:{ROW};">
+   {_esc(summary)}
+  </div>
+  {image_html}
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-top:30px;
+       padding-top:18px;border-top:1px solid {BORDER};font-size:14px;color:{FAINT};">
+   <span>{_esc(pub_time_text)}</span>
+   {link_html}
+  </div>"""
+    return _shell(body, "42px 48px 38px")
+
+
+async def render_news_card(
+    *,
+    category: str,
+    title: str,
+    original_title: str,
+    summary: str,
+    image_bytes: Optional[bytes],
+    pub_time_text: str,
+    link: str,
+) -> bytes:
+    return await _render_png(
+        build_news_html(
+            category=category,
+            title=title,
+            original_title=original_title,
+            summary=summary,
+            image_bytes=image_bytes,
+            pub_time_text=pub_time_text,
+            link=link,
+        )
+    )
+
+
 def build_help_html(admin: bool, when_text: str) -> str:
     callout = (
         f'<div style="margin-top:24px;background:{ACCENT_BG};border:1px solid rgba(196,112,78,0.22);'
@@ -2196,8 +2294,16 @@ def build_help_html(admin: bool, when_text: str) -> str:
         + _cmd_row("/cs2 我的订阅", "查看你在本群订阅的战队 / 选手", False)
         + _cmd_row("/cs2 退订 …", "退订本群,或退订某战队 / 选手", True)
     )
-    sections = _help_section("查询", "Query", query_rows) + _help_section(
-        "订阅", "Subscribe", sub_rows
+    news_rows = (
+        _cmd_row("/cs2 资讯", "查看最新一条 HLTV 资讯卡片", False)
+        + _cmd_row("/cs2 资讯订阅", "订阅 HLTV RSS 自动推送", False)
+        + _cmd_row("/cs2 资讯退订", "取消 HLTV RSS 自动推送", False)
+        + _cmd_row("/cs2 资讯状态", "查看新闻与自动推送状态", True)
+    )
+    sections = (
+        _help_section("查询", "Query", query_rows)
+        + _help_section("订阅", "Subscribe", sub_rows)
+        + _help_section("资讯", "HLTV RSS", news_rows)
     )
     if admin:
         admin_rows = (
@@ -2205,7 +2311,8 @@ def build_help_html(admin: bool, when_text: str) -> str:
             + _cmd_row("/cs2 测试", "立即渲染一张战报卡,可带比赛 ID / URL", False, tag="仅调试群")
             + _cmd_row("/cs2 重试投递", "重新激活全部或指定比赛的死信", False, tag="仅调试群")
             + _cmd_row("/cs2 刷新名录", "强制刷新战队 / 选手名录(抓一次世界排行榜)", False, tag="仅调试群")
-            + _cmd_row("/cs2 刷新VRS", "强制刷新 Valve 世界排名总榜(平时每天自动抓一次)", True, tag="仅调试群")
+            + _cmd_row("/cs2 刷新VRS", "强制刷新 Valve 世界排名总榜(平时每天自动抓一次)", False, tag="仅调试群")
+            + _cmd_row("/cs2 资讯检查", "立即检查并推送 HLTV RSS 新资讯", True, tag="仅调试群")
         )
         sections += _help_section("管理 · 调试", "Admin", admin_rows)
 

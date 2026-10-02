@@ -43,6 +43,7 @@ PRIORITY_LIVE: FetchPriority = "live"
 PRIORITY_USER: FetchPriority = "user"
 PRIORITY_SCAN: FetchPriority = "scan"
 PRIORITY_WARM: FetchPriority = "warm"
+IMPERSONATE_CANDIDATES = ("firefox", "edge", "chrome_android", "chrome", "safari")
 
 _PRIORITY_RANK: dict[str, int] = {
     PRIORITY_LIVE: 0,
@@ -201,6 +202,7 @@ class Fetcher:
         self._refreshing: set[str] = set()  # background page refresh dedupe
         self._logo_refreshing: set[str] = set()  # background logo fetch dedupe
         self._logo_failed: dict[str, float] = {}  # url -> last-fail epoch (retry-cooldown)
+        self._working_impersonate: str | None = None
 
     @property
     def closed(self) -> bool:
@@ -416,6 +418,112 @@ class Fetcher:
         if self._is_cloudflare_challenge_html(body):
             return None
         return body
+
+    def _impersonate_candidates(self) -> list[str]:
+        if self._working_impersonate:
+            return [self._working_impersonate] + [
+                profile
+                for profile in IMPERSONATE_CANDIDATES
+                if profile != self._working_impersonate
+            ]
+        return list(IMPERSONATE_CANDIDATES)
+
+    async def fetch_impersonated_text(
+        self,
+        url: str,
+        *,
+        accept: str,
+        priority: FetchPriority = PRIORITY_SCAN,
+    ) -> Optional[str]:
+        """Fetch text/XML with a browser-fingerprint fallback chain and proxy."""
+        self._require_allowed_url(url, _PAGE_HOSTS)
+        normalized_priority = self._priority(priority)
+        proxy = self._curl_cffi_proxy()
+        headers = {"Accept": accept}
+        last_error: Exception | None = None
+        for profile in self._impersonate_candidates():
+            try:
+                from curl_cffi.requests import AsyncSession
+
+                async with self._gate.slot(normalized_priority):
+                    async with AsyncSession(
+                        impersonate=profile,
+                        proxy=proxy,
+                        timeout=self._curl_cffi_timeout(),
+                    ) as session:
+                        resp = await session.get(url, headers=headers)
+                        if resp.status_code >= 400:
+                            last_error = RuntimeError(
+                                f"HTTP {resp.status_code} (impersonate={profile})"
+                            )
+                            continue
+                        text = resp.text
+                if self._is_cloudflare_challenge_html(text):
+                    last_error = RuntimeError(f"Cloudflare challenge (impersonate={profile})")
+                    continue
+                if profile != self._working_impersonate:
+                    self._working_impersonate = profile
+                    logger.info(f"[cs2] 文本抓取使用指纹 {profile}: {url}")
+                return text
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                logger.info(f"[cs2] 指纹 {profile} 文本抓取失败 {url}: {exc}")
+        if last_error is not None:
+            logger.warning(f"[cs2] 所有指纹均无法抓取文本 {url}: {last_error}")
+        return None
+
+    async def fetch_impersonated_bytes(
+        self,
+        url: str,
+        *,
+        accept: str = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        priority: FetchPriority = PRIORITY_WARM,
+    ) -> Optional[bytes]:
+        """Fetch image bytes with the same browser-fingerprint fallback chain."""
+        self._require_allowed_url(url, _ASSET_HOSTS)
+        normalized_priority = self._priority(priority)
+        proxy = self._curl_cffi_proxy()
+        headers = {"Accept": accept, "Referer": "https://www.hltv.org/"}
+        last_error: Exception | None = None
+        for profile in self._impersonate_candidates():
+            try:
+                from curl_cffi.requests import AsyncSession
+
+                async with self._gate.slot(normalized_priority):
+                    async with AsyncSession(
+                        impersonate=profile,
+                        proxy=proxy,
+                        timeout=self._curl_cffi_timeout(),
+                    ) as session:
+                        resp = await session.get(url, headers=headers)
+                        if resp.status_code >= 400:
+                            last_error = RuntimeError(
+                                f"HTTP {resp.status_code} (impersonate={profile})"
+                            )
+                            continue
+                        content_type = (
+                            resp.headers.get("content-type", "") or ""
+                        ).lower()
+                        body = resp.content
+                if not body or not content_type.startswith("image/"):
+                    last_error = RuntimeError(
+                        f"invalid content-type {content_type!r} (impersonate={profile})"
+                    )
+                    continue
+                if profile != self._working_impersonate:
+                    self._working_impersonate = profile
+                    logger.info(f"[cs2] 图片抓取使用指纹 {profile}: {url}")
+                return body
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                logger.info(f"[cs2] 指纹 {profile} 图片抓取失败 {url}: {exc}")
+        if last_error is not None:
+            logger.warning(f"[cs2] 所有指纹均无法抓取图片 {url}: {last_error}")
+        return None
 
     async def start(self) -> None:
         """Start Chromium once; concurrent callers share the same launch."""

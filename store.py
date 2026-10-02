@@ -44,6 +44,7 @@ _SUBS = DATA_DIR / "subscriptions.json"
 _WL = DATA_DIR / "whitelist.json"
 _PUSHED = DATA_DIR / "pushed.json"
 _EVLOGO = DATA_DIR / "event_logos.json"
+_NEWS_STATE = DATA_DIR / "news_state.json"
 _DB = DATA_DIR / "state.sqlite3"
 
 _JSON_LOCK = threading.RLock()
@@ -935,6 +936,76 @@ def set_user_origin(user_id: int, unified_msg_origin: str) -> None:
 
 def get_user_origin(user_id: int) -> str | None:
     return get_meta(f"origin:user:{int(user_id)}")
+
+
+def _news_state() -> dict:
+    state = _load(_NEWS_STATE, {})
+    if not isinstance(state, dict):
+        state = {}
+    return {
+        "subscribers": list(dict.fromkeys(state.get("subscribers") or [])),
+        "seen": list(dict.fromkeys(state.get("seen") or [])),
+        "initialized": bool(state.get("initialized", False)),
+    }
+
+
+def news_subscribers() -> list[str]:
+    return list(_news_state()["subscribers"])
+
+
+def news_subscribe(unified_msg_origin: str) -> bool:
+    umo = str(unified_msg_origin or "").strip()
+    if not umo:
+        return False
+    with _JSON_LOCK:
+        state = _news_state()
+        subscribers = state["subscribers"]
+        if umo in subscribers:
+            return False
+        subscribers.append(umo)
+        state["subscribers"] = subscribers
+        _dump(_NEWS_STATE, state)
+    return True
+
+
+def news_unsubscribe(unified_msg_origin: str) -> bool:
+    umo = str(unified_msg_origin or "").strip()
+    with _JSON_LOCK:
+        state = _news_state()
+        subscribers = state["subscribers"]
+        if umo not in subscribers:
+            return False
+        state["subscribers"] = [item for item in subscribers if item != umo]
+        _dump(_NEWS_STATE, state)
+    return True
+
+
+def news_seen_guids() -> list[str]:
+    return list(_news_state()["seen"])
+
+
+def news_initialized() -> bool:
+    return bool(_news_state()["initialized"])
+
+
+def news_mark_seen(guids: Iterable[str], *, keep: int = 500, initialized: bool = True) -> None:
+    incoming = [str(guid) for guid in guids if str(guid).strip()]
+    if not incoming and not initialized:
+        return
+    with _JSON_LOCK:
+        state = _news_state()
+        state["seen"] = (state["seen"] + incoming)[-max(1, int(keep)) :]
+        state["initialized"] = initialized or state["initialized"]
+        _dump(_NEWS_STATE, state)
+
+
+def news_status() -> dict:
+    state = _news_state()
+    return {
+        "subscribers": len(state["subscribers"]),
+        "seen": len(state["seen"]),
+        "initialized": state["initialized"],
+    }
 
 
 def upsert_ranking(teams: Iterable) -> tuple[int, int]:

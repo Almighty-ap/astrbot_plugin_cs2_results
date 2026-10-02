@@ -165,6 +165,55 @@
     "default": 60,
     "hint": ">=1 分钟"
   },
+  "cs2_news_enabled": {
+    "description": "启用 HLTV RSS 资讯自动推送",
+    "type": "bool",
+    "default": true
+  },
+  "cs2_news_poll_interval": {
+    "description": "HLTV RSS 资讯轮询间隔(分钟)",
+    "type": "int",
+    "default": 15,
+    "hint": "1~1440 分钟"
+  },
+  "cs2_news_rss_url": {
+    "description": "HLTV RSS 地址",
+    "type": "string",
+    "default": "https://www.hltv.org/rss/news"
+  },
+  "cs2_news_translate": {
+    "description": "使用 LLM 翻译并总结 HLTV 资讯",
+    "type": "bool",
+    "default": true
+  },
+  "cs2_news_provider_id": {
+    "description": "资讯翻译使用的 LLM 提供商 ID",
+    "type": "string",
+    "default": "",
+    "hint": "留空时自动选择当前会话或任意可用聊天模型"
+  },
+  "cs2_news_include_image": {
+    "description": "资讯卡片附带 RSS 封面图",
+    "type": "bool",
+    "default": true
+  },
+  "cs2_news_include_link": {
+    "description": "资讯卡片显示 HLTV 原文链接",
+    "type": "bool",
+    "default": true
+  },
+  "cs2_news_max_seen": {
+    "description": "新闻去重记录上限",
+    "type": "int",
+    "default": 500,
+    "hint": "10~5000 条"
+  },
+  "cs2_news_max_push_per_poll": {
+    "description": "单次轮询最多推送的新闻数",
+    "type": "int",
+    "default": 10,
+    "hint": "防止首次补抓或长时间离线后刷屏"
+  },
   "cs2_alert_after_failures": {
     "description": "连续失败多少次后告警",
     "type": "int",

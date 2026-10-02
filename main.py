@@ -50,6 +50,7 @@ from . import render as card
 from .config import Config
 from .delivery import DeliveryWorker, drop_unreachable_subscription
 from .fetcher import Fetcher, FetchPriority
+from .news import NewsService
 from .security import hltv_match_url
 
 MessageEvent = AstrMessageEvent
@@ -58,6 +59,7 @@ GroupMessageEvent = AstrMessageEvent
 cfg: Config
 fetcher: Fetcher
 delivery_worker: DeliveryWorker
+news_service: NewsService | None = None
 bot_context: Context | None = None
 user_origin_resolver: Callable[[int], str | None] | None = None
 admin_ids: set[str] = set()
@@ -1316,7 +1318,7 @@ async def _job_cleanup() -> None:
 
 async def startup() -> None:
     global _last_backstop, _next_backstop_at, _next_scan_at, _poll_task, fetcher
-    global _startup_backstop_pending
+    global _startup_backstop_pending, news_service
 
     if fetcher.closed:
         fetcher = Fetcher(cfg)
@@ -1346,6 +1348,10 @@ async def startup() -> None:
     _poll_task = _spawn_background(_poll_loop(), name="poll-loop")
     _spawn_background(_outbox_loop(), name="outbox-loop")
     _spawn_background(_first(), name="startup-refresh")
+    if bot_context is not None:
+        news_service = NewsService(cfg, fetcher, bot_context)
+        if cfg.cs2_news_enabled:
+            _spawn_background(news_service.poll_loop(), name="news-poll")
     _spawn_background(
         _run_interval(
             _job_warm_event,
@@ -1572,6 +1578,82 @@ async def _handle_my_subs(event: MessageEvent) -> None:
     await cs2.finish("\n".join(lines))
 
 
+def _get_news_service() -> NewsService | None:
+    global news_service
+    if news_service is None and bot_context is not None:
+        news_service = NewsService(cfg, fetcher, bot_context)
+    return news_service
+
+
+async def _handle_news(event: MessageEvent, action: str, admin: bool) -> None:
+    service = _get_news_service()
+    if service is None:
+        await cs2.finish("资讯服务尚未初始化,请稍后再试")
+
+    if action in ("订阅", "sub", "subscribe"):
+        added = store.news_subscribe(event.unified_msg_origin)
+        await cs2.finish(
+            "已订阅 HLTV RSS 资讯自动推送" if added else "当前会话已经订阅过 HLTV 资讯"
+        )
+
+    if action in ("退订", "unsub", "unsubscribe"):
+        removed = store.news_unsubscribe(event.unified_msg_origin)
+        await cs2.finish(
+            "已取消 HLTV RSS 资讯自动推送" if removed else "当前会话没有订阅 HLTV 资讯"
+        )
+
+    if action in ("状态", "status"):
+        status = store.news_status()
+        enabled = "开启" if cfg.cs2_news_enabled else "关闭"
+        await cs2.finish(
+            "\n".join(
+                [
+                    "HLTV RSS 资讯状态",
+                    f"自动轮询:{enabled}(每 {cfg.cs2_news_poll_interval} 分钟)",
+                    f"订阅会话:{status['subscribers']} 个",
+                    f"已记录去重资讯:{status['seen']} 条",
+                    f"首次初始化:{'完成' if status['initialized'] else '未完成'}",
+                ]
+            )
+        )
+
+    if action in ("检查", "check", "now"):
+        if not admin:
+            await cs2.finish("资讯检查仅限调试群或超级管理员私聊使用")
+        try:
+            matched = await service.check_once()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[cs2.news] 手动检查失败: %s", exc)
+            await cs2.finish("资讯检查失败,请查看日志")
+        if matched:
+            await cs2.finish(
+                f"发现并处理 {len(matched)} 条新资讯,"
+                f"当前订阅会话 {len(store.news_subscribers())} 个"
+            )
+        await cs2.finish("暂时没有新的 HLTV 资讯")
+
+    if action in ("帮助", "help"):
+        await cs2.finish(
+            "HLTV RSS 资讯\n"
+            "/cs2 资讯 — 查看最新资讯\n"
+            "/cs2 资讯订阅 — 订阅自动推送\n"
+            "/cs2 资讯退订 — 取消订阅\n"
+            "/cs2 资讯状态 — 查看状态"
+        )
+
+    if action not in ("", "最新", "latest"):
+        await cs2.finish("未知资讯命令。可用:/cs2 资讯、资讯订阅、资讯退订、资讯状态")
+    try:
+        item = await service.latest_item()
+        if item is None:
+            await cs2.finish("RSS 抓取失败或当前没有 HLTV 资讯")
+        png = await service.render_item(item)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[cs2.news] 最新资讯渲染失败: %s", exc)
+        await cs2.finish("资讯卡片渲染失败,请稍后再试")
+    await cs2.finish(png)
+
+
 async def handle_cs2(event: MessageEvent, raw: str) -> None:
     parts = raw.split()
     sub = parts[0] if parts else ""
@@ -1616,6 +1698,13 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
 
     if sub in ("赛程", "bracket", "对阵", "赛程表"):
         await _handle_bracket(" ".join(parts[1:]).strip() or None)
+
+    if sub in ("资讯", "news") or sub.startswith("资讯"):
+        if sub in ("资讯", "news"):
+            action = parts[1].lower() if len(parts) > 1 else "latest"
+        else:
+            action = sub.removeprefix("资讯").lower() or "latest"
+        await _handle_news(event, action, admin)
 
     # —— 管理 / 调试:仅调试群或超管私聊。普通场景不匹配 → 落到帮助卡,不暴露其存在 ——
     if admin and sub in ("状态", "status"):
@@ -1699,6 +1788,9 @@ async def _send_help(admin: bool) -> None:
             "/cs2 订阅 / 退订 —— 本群加入/退出推送(群管理员)",
             "/cs2 订阅 战队|选手 <名字> —— 开赛提醒和每张地图赛果都 @ 你",
             "/cs2 我的订阅 —— 查看你在本群订阅的战队/选手",
+            "/cs2 资讯 —— 查看最新 HLTV 资讯卡片",
+            "/cs2 资讯订阅 / 资讯退订 —— 管理 RSS 资讯推送",
+            "/cs2 资讯状态 —— 查看资讯订阅和去重状态",
         ]
         if admin:
             lines += [
@@ -1707,6 +1799,7 @@ async def _send_help(admin: bool) -> None:
                 "/cs2 重试投递 [比赛ID] —— 重新激活死信(仅调试群)",
                 "/cs2 刷新名录 —— 强制刷新战队/选手名录(仅调试群)",
                 "/cs2 刷新VRS —— 强制刷新 Valve 世界排名总榜(仅调试群)",
+                "/cs2 资讯检查 —— 立即检查并推送 HLTV RSS 新资讯(仅调试群)",
             ]
         await cs2.finish("\n".join(lines))
     await cs2.finish(png)
