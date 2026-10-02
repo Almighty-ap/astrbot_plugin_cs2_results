@@ -26,6 +26,7 @@
 - 支持群订阅、战队订阅和选手订阅,个人订阅命中后会在群里 `@` 对应用户。
 - 支持 HLTV RSS 新闻订阅、自动去重、LLM 中文翻译总结和资讯卡片推送。
 - 新闻提及已订阅战队或选手时，会在订阅群自动 `@` 对应用户。
+- 支持 AstrBot LLM Function Calling，用户自然语言询问 CS2 比赛、赛程、比分和资讯时由模型调用插件查询。
 - 支持补报、投递重试、禁言顺延、死信重放和持久化 outbox。
 - 使用 AstrBot 内置 `Star.html_render()` / T2I 服务渲染卡片。
 - HLTV 页面和图片支持 `curl_cffi` Chrome TLS 指纹优先通道,并可按配置走代理。
@@ -61,6 +62,7 @@ apt-get install -y xvfb
 | `/cs2 我的订阅` | 查看当前群的个人订阅 |
 | `/cs2 赛事` | 查看未来三个月的顶级赛事 |
 | `/cs2 日程` | 查看当前或下一个比赛日的赛程与赛果 |
+| `/cs2 战况 <战队>` | 查询指定战队近期比赛、当前比分与赛果 |
 | `/cs2 赛程 [赛事名]` | 查看正在进行或即将开赛赛事的完整赛程 |
 | `/cs2 资讯` | 查看最新一条 HLTV RSS 资讯卡片 |
 | `/cs2 资讯订阅` | 当前会话订阅 HLTV RSS 自动推送 |
@@ -88,6 +90,30 @@ apt-get install -y xvfb
 - RSS 和封面图复用插件当前的 `curl_cffi` 指纹回退链与 mihomo 代理。
 - 新闻标题和原始描述只在本地的已订阅战队/选手中做完整词语匹配;支持 `NAVI`、
   `NIP`、`VP` 等战队别名及 `s1mple/simple` 这类昵称变体，不额外调用 LLM 做实体识别。
+
+## LLM 工具
+
+插件注册以下 AstrBot Function Calling 工具：
+
+```text
+query_cs2_events        查询未来三个月顶级赛事
+query_cs2_schedule      查询当前或下一个比赛日
+query_cs2_bracket       查询正在进行的赛事赛程
+query_cs2_news          查询最新 HLTV RSS 资讯
+query_cs2_match_status  查询指定战队近期比赛和比分
+```
+
+当用户消息包含 `CS2`、`HLTV`、比赛、赛程、战况、比分、战队、选手或资讯等关键词时，
+插件会向当前 LLM 请求附加简短提示，引导模型优先调用对应工具。工具执行后直接发送
+插件卡片，并返回简短摘要给模型继续回复。
+
+相关配置：
+
+```text
+cs2_llm_tools_enabled          启用 LLM 工具
+cs2_llm_tool_intent_hint       启用关键词工具提示
+cs2_llm_tool_max_image_calls   单次对话最多发送的图片数
+```
 
 ## 抓取通道
 

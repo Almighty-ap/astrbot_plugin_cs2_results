@@ -156,6 +156,11 @@ class Config(BaseModel):
     cs2_news_mention_players: bool = True
     cs2_news_mention_max_per_group: int = Field(default=10, ge=0, le=50)
 
+    # —— LLM Function Calling ——
+    cs2_llm_tools_enabled: bool = True
+    cs2_llm_tool_intent_hint: bool = True
+    cs2_llm_tool_max_image_calls: int = Field(default=2, ge=1, le=10)
+
     # —— 命令保护 / 投递重试 ——
     cs2_command_cooldown: float = Field(default=5.0, ge=0, le=300)
     cs2_delivery_max_attempts: int = Field(default=5, ge=1, le=20)

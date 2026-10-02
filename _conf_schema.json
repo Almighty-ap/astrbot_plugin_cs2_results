@@ -235,6 +235,22 @@
     "default": 10,
     "hint": "0=关闭 @,最大 50"
   },
+  "cs2_llm_tools_enabled": {
+    "description": "允许 LLM 通过 Function Calling 调用 CS2 查询",
+    "type": "bool",
+    "default": true
+  },
+  "cs2_llm_tool_intent_hint": {
+    "description": "关键词命中时向 LLM 注入 CS2 工具使用提示",
+    "type": "bool",
+    "default": true
+  },
+  "cs2_llm_tool_max_image_calls": {
+    "description": "一次 LLM 对话最多发送的 CS2 图片数",
+    "type": "int",
+    "default": 2,
+    "hint": "1~10"
+  },
   "cs2_alert_after_failures": {
     "description": "连续失败多少次后告警",
     "type": "int",

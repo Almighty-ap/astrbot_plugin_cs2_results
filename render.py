@@ -2285,6 +2285,7 @@ def build_help_html(admin: bool, when_text: str) -> str:
     query_rows = (
         _cmd_row("/cs2 赛事", "未来 3 个月的顶级赛事一览", False)
         + _cmd_row("/cs2 日程", "今日关注赛事的比赛 · 赛果 / 直播 / 待开始;无赛则看下个比赛日", False)
+        + _cmd_row("/cs2 战况 <战队>", "查询指定战队近期比赛、当前比分与赛果", False)
         + _cmd_row("/cs2 赛程", "正在进行 / 即将开赛赛事的完整对阵 · 小组赛 / 淘汰赛,可指定其一", True)
     )
     sub_rows = (

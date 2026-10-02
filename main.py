@@ -118,8 +118,9 @@ class _LegacyEvent:
 class _CommandContext:
     """Bridge old ``cs2.finish()`` / ``cs2.send()`` calls to AstrBot."""
 
-    def __init__(self, event: AstrMessageEvent) -> None:
+    def __init__(self, event: AstrMessageEvent, *, stop_event: bool = True) -> None:
         self.event = event
+        self.stop_event = stop_event
 
     @staticmethod
     def _components(payload: Any) -> list[Any]:
@@ -148,7 +149,8 @@ class _CommandContext:
 
     async def finish(self, payload: Any) -> None:
         await self.send(payload)
-        self.event.stop_event()
+        if self.stop_event:
+            self.event.stop_event()
         raise _CommandFinished
 
 
@@ -233,6 +235,9 @@ def target_groups() -> set[int]:
 
 def _cooldown_left(event: MessageEvent) -> int:
     """群内按群、私聊按用户限流，避免公开查询并发挤占直播抓取和渲染。"""
+    get_extra = getattr(event, "get_extra", None)
+    if callable(get_extra) and get_extra("cs2_llm_tool_call", False):
+        return 0
     if cfg.cs2_command_cooldown <= 0:
         return 0
     scope = (
@@ -1706,6 +1711,9 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
     if sub in ("日程", "schedule", "sched", "今日"):
         await _handle_schedule()
 
+    if sub in ("战况", "match", "赛况", "比分"):
+        await _handle_schedule(" ".join(parts[1:]).strip() or None)
+
     if sub in ("赛程", "bracket", "对阵", "赛程表"):
         await _handle_bracket(" ".join(parts[1:]).strip() or None)
 
@@ -1970,7 +1978,7 @@ def _match_day_span_text(day: list[hltv.ScheduledMatch]) -> str:
     return f"{head} — {nxt} {b:%H:%M}"
 
 
-async def _handle_schedule() -> None:
+async def _handle_schedule(team_filter: str | None = None) -> None:
     html = await fetcher.get_html(
         hltv.URL_MATCHES,
         wait_selector=".match",
@@ -2008,8 +2016,28 @@ async def _handle_schedule() -> None:
     else:
         logger.warning("[cs2] /results 抓取失败,日程卡降级为不含已结束比赛")
 
+    if team_filter:
+        query = names.cf(team_filter)
+        ups = [
+            m
+            for m in ups
+            if query in names.cf(m.team1) or query in names.cf(m.team2)
+        ]
+        lives = [
+            m
+            for m in lives
+            if query in names.cf(m.team1) or query in names.cf(m.team2)
+        ]
+        fins = [
+            m
+            for m in fins
+            if query in names.cf(m.team1) or query in names.cf(m.team2)
+        ]
+
     days = _cluster_match_days(fins + ups)
     if not days and not lives:
+        if team_filter:
+            await cs2.finish(f"近期没有找到「{team_filter}」的比赛 🌙")
         await cs2.finish("近期没有关注赛事的比赛 🌙")
 
     tail = cfg.cs2_match_day_tail_hours * 3600_000
@@ -2059,6 +2087,8 @@ async def _handle_schedule() -> None:
 
     rows = day + lives
     subtitle = _match_day_span_text(day) if day else None
+    if team_filter:
+        title = f"{team_filter} · {title}"
 
     # 赛事 + 两队队标(全取自列表页卡片,通常已缓存;缺的后台补,当次用首字母兜底,不阻塞出图)
     need, seen = [], set()
@@ -2592,6 +2622,114 @@ class Cs2ResultsPlugin(Star):
             except (TypeError, ValueError):
                 duration = 0
             worker.note_group_muted(group_id, seconds=duration)
+
+    async def _run_llm_tool_command(
+        self,
+        event: AstrMessageEvent,
+        raw: str,
+        summary: str,
+    ) -> str:
+        if not cfg.cs2_llm_tools_enabled:
+            return "CS2 查询工具当前已关闭。"
+        used = int(event.get_extra("cs2_llm_tool_calls", 0) or 0)
+        if used >= cfg.cs2_llm_tool_max_image_calls:
+            return "本次对话已达到 CS2 查询图片数量上限。"
+
+        event.set_extra("cs2_llm_tool_call", True)
+        event.set_extra("cs2_llm_tool_calls", used + 1)
+        ctx = _CommandContext(event, stop_event=False)
+        token = _CURRENT_COMMAND.set(ctx)
+        try:
+            await handle_cs2(_LegacyEvent(event), raw)
+        except _CommandFinished:
+            return summary
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[cs2.llm] 工具调用失败: %s", exc)
+            return "CS2 查询失败，请稍后重试。"
+        finally:
+            event.set_extra("cs2_llm_tool_call", False)
+            _CURRENT_COMMAND.reset(token)
+        return summary
+
+    @filter.llm_tool(name="query_cs2_events")
+    async def query_cs2_events(self, event: AstrMessageEvent) -> str:
+        """查询 HLTV 未来三个月的 CS2 顶级赛事、赛事时间和地点。"""
+        return await self._run_llm_tool_command(
+            event,
+            "赛事",
+            "已发送 CS2 顶级赛事卡片。",
+        )
+
+    @filter.llm_tool(name="query_cs2_schedule")
+    async def query_cs2_schedule(self, event: AstrMessageEvent) -> str:
+        """查询当前或下一个比赛日的 CS2 比赛、比分、直播和赛果。"""
+        return await self._run_llm_tool_command(
+            event,
+            "日程",
+            "已发送 CS2 比赛日日程卡片。",
+        )
+
+    @filter.llm_tool(name="query_cs2_bracket")
+    async def query_cs2_bracket(
+        self,
+        event: AstrMessageEvent,
+        event_name: str = "",
+    ) -> str:
+        """查询正在进行的 CS2 赛事完整赛程。
+
+        Args:
+            event_name(string): 赛事名称，可为空；为空时自动选择当前赛事。
+        """
+        raw = f"赛程 {event_name}".strip()
+        return await self._run_llm_tool_command(
+            event,
+            raw,
+            f"已发送 CS2 赛程卡片{f'：{event_name}' if event_name else ''}。",
+        )
+
+    @filter.llm_tool(name="query_cs2_news")
+    async def query_cs2_news(self, event: AstrMessageEvent) -> str:
+        """查询最新一条 HLTV CS2 RSS 资讯。"""
+        return await self._run_llm_tool_command(
+            event,
+            "资讯",
+            "已发送最新 HLTV CS2 资讯卡片。",
+        )
+
+    @filter.llm_tool(name="query_cs2_match_status")
+    async def query_cs2_match_status(
+        self,
+        event: AstrMessageEvent,
+        team: str = "",
+    ) -> str:
+        """查询指定 CS2 战队近期比赛、当前比分和赛果。
+
+        Args:
+            team(string): 战队名称，例如 FaZe、Vitality、TYLOO。
+        """
+        team = team.strip()
+        if not team:
+            return "请提供要查询的 CS2 战队名称。"
+        return await self._run_llm_tool_command(
+            event,
+            f"战况 {team}".strip(),
+            f"已发送 {team} 的比赛状态卡片。",
+        )
+
+    @filter.on_llm_request()
+    async def add_cs2_llm_tool_hint(self, event: AstrMessageEvent, req: Any) -> None:
+        if not cfg.cs2_llm_tools_enabled or not cfg.cs2_llm_tool_intent_hint:
+            return
+        text = (event.message_str or "").casefold()
+        if not re.search(
+            r"cs2|hltv|比赛|赛程|战况|赛况|比分|赛果|战队|选手|资讯",
+            text,
+        ):
+            return
+        req.system_prompt = (getattr(req, "system_prompt", "") or "") + (
+            "\n用户在询问 CS2/HLTV 赛事、战况、赛程或资讯。"
+            "请优先调用 query_cs2_* 工具获取实时数据，不要凭记忆回答。"
+        )
 
     @filter.command("cs2")
     async def cs2_command(self, event: AstrMessageEvent) -> None:

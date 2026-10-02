@@ -214,3 +214,70 @@ def test_ongoing_event_detection_refreshes_empty_whitelist(
 
     assert asyncio.run(main._ongoing_event_ids()) == {"8244"}
     assert state["refreshed"] is True
+
+
+def test_llm_tool_command_reuses_public_query_and_limits_images(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = SimpleNamespace(
+        platform_manager=SimpleNamespace(platform_insts=[]),
+        get_config=lambda: {"admins_id": []},
+    )
+    plugin = main.Cs2ResultsPlugin(context=context, config={})
+    monkeypatch.setattr(
+        main,
+        "cfg",
+        main.Config(cs2_llm_tool_max_image_calls=1),
+        raising=False,
+    )
+    query = AsyncMock(side_effect=main._CommandFinished)
+    monkeypatch.setattr(main, "handle_cs2", query)
+
+    class _Event:
+        def __init__(self) -> None:
+            self.extra: dict[str, object] = {}
+
+        def get_extra(self, key: str, default: object = None) -> object:
+            return self.extra.get(key, default)
+
+        def set_extra(self, key: str, value: object) -> None:
+            self.extra[key] = value
+
+    event = _Event()
+    assert (
+        asyncio.run(
+            plugin._run_llm_tool_command(event, "赛事", "已发送赛事卡片。")
+        )
+        == "已发送赛事卡片。"
+    )
+    assert query.await_count == 1
+    event.extra["cs2_llm_tool_calls"] = 1
+    assert "上限" in asyncio.run(
+        plugin._run_llm_tool_command(event, "日程", "已发送日程卡片。")
+    )
+    assert query.await_count == 1
+
+
+def test_llm_intent_hint_only_applies_to_cs2_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = SimpleNamespace(
+        platform_manager=SimpleNamespace(platform_insts=[]),
+        get_config=lambda: {"admins_id": []},
+    )
+    plugin = main.Cs2ResultsPlugin(context=context, config={})
+    monkeypatch.setattr(main, "cfg", main.Config(), raising=False)
+
+    cs2_event = SimpleNamespace(message_str="FaZe 今晚比赛战况怎么样")
+    cs2_req = SimpleNamespace(system_prompt="")
+    asyncio.run(plugin.add_cs2_llm_tool_hint(cs2_event, cs2_req))
+    assert "query_cs2_" in cs2_req.system_prompt
+
+    other_req = SimpleNamespace(system_prompt="")
+    asyncio.run(
+        plugin.add_cs2_llm_tool_hint(
+            SimpleNamespace(message_str="今天天气怎么样"),
+            other_req,
+        )
+    )
+    assert other_req.system_prompt == ""

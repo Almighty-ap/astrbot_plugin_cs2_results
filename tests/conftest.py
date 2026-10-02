@@ -81,6 +81,20 @@ if "astrbot" not in sys.modules:
 
             return decorator
 
+        @staticmethod
+        def llm_tool(name: str | None = None, **_kwargs: object):
+            def decorator(func):
+                return func
+
+            return decorator
+
+        @staticmethod
+        def on_llm_request():
+            def decorator(func):
+                return func
+
+            return decorator
+
     class MessageChain:
         def __init__(self, chain: list[Any] | None = None) -> None:
             self.chain = chain or []
