@@ -7,9 +7,16 @@
 
 ## 预览
 
-![赛事日程预览](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview1.png)
+| 赛事日程 | 逐图战报 | HLTV 资讯 |
+| :---: | :---: | :---: |
+| ![赛事日程预览](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview1.png) | ![逐图战报预览](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview2.png) | ![HLTV 资讯预览](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview3.png) |
 
-![逐图战报预览](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview2.png)
+<details>
+<summary>帮助卡（命令一览）</summary>
+
+![帮助卡](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview4.png)
+
+</details>
 
 ## 功能
 
