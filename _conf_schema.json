@@ -214,6 +214,27 @@
     "default": 10,
     "hint": "防止首次补抓或长时间离线后刷屏"
   },
+  "cs2_news_mention_subscriptions": {
+    "description": "新闻命中个人订阅时自动 @ 订阅者",
+    "type": "bool",
+    "default": true
+  },
+  "cs2_news_mention_teams": {
+    "description": "允许新闻中的战队提及触发订阅 @",
+    "type": "bool",
+    "default": true
+  },
+  "cs2_news_mention_players": {
+    "description": "允许新闻中的选手提及触发订阅 @",
+    "type": "bool",
+    "default": true
+  },
+  "cs2_news_mention_max_per_group": {
+    "description": "每条新闻每群最多 @ 人数",
+    "type": "int",
+    "default": 10,
+    "hint": "0=关闭 @,最大 50"
+  },
   "cs2_alert_after_failures": {
     "description": "连续失败多少次后告警",
     "type": "int",

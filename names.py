@@ -125,6 +125,16 @@ _TEAM_ALIASES = {
 }
 
 
+def team_alias_variants(name: str) -> set[str]:
+    """Return aliases that resolve to an HLTV team's formal name."""
+    formal = cf(name)
+    return {
+        alias
+        for alias, target in _TEAM_ALIASES.items()
+        if cf(target) == formal
+    }
+
+
 def resolve_team_local(query: str, teams: list[dict]) -> TeamResolution:
     """在本地名录里解析战队。teams = store.all_index_teams() 的行。
 

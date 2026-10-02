@@ -122,19 +122,28 @@ class _CommandContext:
         self.event = event
 
     @staticmethod
-    def _component(payload: Any) -> Any:
+    def _components(payload: Any) -> list[Any]:
+        if isinstance(payload, MessageChain):
+            return list(payload.chain)
+        if isinstance(payload, (list, tuple)):
+            out: list[Any] = []
+            for item in payload:
+                out.extend(_CommandContext._components(item))
+            return out
         if isinstance(payload, bytes):
-            return Comp.Image.fromBytes(payload)
+            return [Comp.Image.fromBytes(payload)]
         if isinstance(payload, Path):
-            return Comp.Image.fromFileSystem(str(payload))
+            return [Comp.Image.fromFileSystem(str(payload))]
         if isinstance(payload, str) and payload.lower().endswith(
             (".png", ".jpg", ".jpeg", ".webp", ".gif")
         ):
-            return Comp.Image.fromFileSystem(payload)
-        return Comp.Plain(str(payload))
+            return [Comp.Image.fromFileSystem(payload)]
+        if isinstance(payload, str):
+            return [Comp.Plain(payload)]
+        return [payload]
 
     async def send(self, payload: Any) -> None:
-        chain = MessageChain(chain=[self._component(payload)])
+        chain = MessageChain(chain=self._components(payload))
         await self.event.send(chain)
 
     async def finish(self, payload: Any) -> None:
@@ -1648,10 +1657,11 @@ async def _handle_news(event: MessageEvent, action: str, admin: bool) -> None:
         if item is None:
             await cs2.finish("RSS 抓取失败或当前没有 HLTV 资讯")
         png = await service.render_item(item)
+        mentions = service.mentions_for_item(item, event.group_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("[cs2.news] 最新资讯渲染失败: %s", exc)
         await cs2.finish("资讯卡片渲染失败,请稍后再试")
-    await cs2.finish(png)
+    await cs2.finish([*[Comp.At(qq=qq) for qq in mentions], png])
 
 
 async def handle_cs2(event: MessageEvent, raw: str) -> None:

@@ -13,10 +13,11 @@ from typing import TYPE_CHECKING, Optional
 
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
-from astrbot.api.message_components import Image, Plain
+from astrbot.api.message_components import At, Image, Plain
 
 from . import render as card
 from . import store
+from .news_entities import NewsEntityMatcher
 
 if TYPE_CHECKING:
     from astrbot.api.star import Context
@@ -208,22 +209,80 @@ class NewsService:
             return new_items
 
         to_push = new_items[-self.cfg.cs2_news_max_push_per_poll :]
+        matcher = self._build_matcher() if self._mention_enabled() else None
         for item in to_push:
-            await self.push_item(item, subscribers)
+            await self.push_item(item, subscribers, matcher=matcher)
         return to_push
 
-    async def push_item(self, item: NewsItem, subscribers: list[str]) -> None:
+    async def push_item(
+        self,
+        item: NewsItem,
+        subscribers: list[str],
+        *,
+        matcher: NewsEntityMatcher | None = None,
+    ) -> None:
         try:
             rendered = await self.render_item(item)
-            chain = MessageChain(chain=[Image.fromBytes(rendered)])
         except Exception as exc:  # noqa: BLE001
             logger.exception("[cs2.news] 资讯卡片渲染失败,退化为文本: %s", exc)
-            chain = MessageChain(chain=[Plain(self._fallback_text(item))])
+            rendered = None
+        matcher = matcher or (self._build_matcher() if self._mention_enabled() else None)
         for umo in subscribers:
             try:
+                mentions = self.mentions_for_item(
+                    item,
+                    self._group_id_from_umo(umo),
+                    matcher=matcher,
+                )
+                components = [At(qq=qq) for qq in mentions]
+                if rendered is None:
+                    components.append(Plain(self._fallback_text(item)))
+                else:
+                    components.append(Image.fromBytes(rendered))
+                chain = MessageChain(chain=components)
                 await self.context.send_message(umo, chain)
             except Exception as exc:  # noqa: BLE001
                 logger.error("[cs2.news] 推送失败 %s: %s", umo, exc)
+
+    def _mention_enabled(self) -> bool:
+        return (
+            self.cfg.cs2_news_mention_subscriptions
+            and self.cfg.cs2_news_mention_max_per_group > 0
+        )
+
+    @staticmethod
+    def _group_id_from_umo(unified_msg_origin: str) -> int:
+        parts = str(unified_msg_origin or "").split(":", 2)
+        if len(parts) != 3 or parts[1].casefold() != "groupmessage":
+            return 0
+        try:
+            return int(parts[2])
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _build_matcher() -> NewsEntityMatcher:
+        return NewsEntityMatcher.from_targets(store.all_targets())
+
+    def mentions_for_item(
+        self,
+        item: NewsItem,
+        group_id: int,
+        *,
+        matcher: NewsEntityMatcher | None = None,
+    ) -> list[int]:
+        if not self._mention_enabled() or group_id <= 0:
+            return []
+        matcher = matcher or self._build_matcher()
+        teams, players = matcher.match(f"{item.title} {item.description}")
+        if not self.cfg.cs2_news_mention_teams:
+            teams = set()
+        if not self.cfg.cs2_news_mention_players:
+            players = set()
+        if not teams and not players:
+            return []
+        recipients = store.recipients_for([group_id], teams, players).get(group_id, set())
+        return sorted(recipients)[: self.cfg.cs2_news_mention_max_per_group]
 
     async def render_item(self, item: NewsItem) -> bytes:
         translated_title = ""

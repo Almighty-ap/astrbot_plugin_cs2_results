@@ -2295,7 +2295,7 @@ def build_help_html(admin: bool, when_text: str) -> str:
         + _cmd_row("/cs2 退订 …", "退订本群,或退订某战队 / 选手", True)
     )
     news_rows = (
-        _cmd_row("/cs2 资讯", "查看最新一条 HLTV 资讯卡片", False)
+        _cmd_row("/cs2 资讯", "查看最新资讯卡片，命中个人订阅时自动 @", False)
         + _cmd_row("/cs2 资讯订阅", "订阅 HLTV RSS 自动推送", False)
         + _cmd_row("/cs2 资讯退订", "取消 HLTV RSS 自动推送", False)
         + _cmd_row("/cs2 资讯状态", "查看新闻与自动推送状态", True)
