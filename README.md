@@ -7,9 +7,9 @@
 
 ## 预览
 
-![赛事日程预览](docs/images/preview1.png)
+![赛事日程预览](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview1.png)
 
-![逐图战报预览](docs/images/preview2.png)
+![逐图战报预览](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview2.png)
 
 ## 功能
 
