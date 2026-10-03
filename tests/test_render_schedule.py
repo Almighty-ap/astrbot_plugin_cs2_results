@@ -6,6 +6,7 @@ from astrbot_plugin_cs2_results import render
 from astrbot_plugin_cs2_results.hltv import (
     EventSchedule,
     Matchup,
+    ScheduledMatch,
     SlotTeam,
     SwissCell,
     SwissColumn,
@@ -59,3 +60,43 @@ def test_help_footer_uses_current_repository_without_prefix_duplicate() -> None:
     assert "github.com/Almighty-ap/astrbot_plugin_cs2_results" in html
     assert "github.com/canxiaocai/cs2-event-bot" not in html
     assert "或 cs2 均可触发" not in html
+
+
+def test_previous_match_day_recap_renders_above_current_events() -> None:
+    recap = ScheduledMatch(
+        "1",
+        "8244",
+        "Previous Event",
+        None,
+        "Falcons",
+        "TYLOO",
+        1_783_524_000_000,
+        "bo3",
+        status="finished",
+        score1=2,
+        score2=0,
+        winner="team1",
+    )
+    current = ScheduledMatch(
+        "2",
+        "8244",
+        "Current Event",
+        None,
+        "Vitality",
+        "Spirit",
+        1_783_612_800_000,
+        "bo3",
+        status="upcoming",
+    )
+
+    html = render.build_schedule_html(
+        [current],
+        "DEBUG",
+        title="下个比赛日",
+        recap=[recap],
+        recap_label="上个比赛日 · 7月24日 周五 20:04 — 次日 05:34",
+    )
+
+    assert html.index("上个比赛日") < html.index("Current Event")
+    assert "Falcons" in html
+    assert "Current Event" in html

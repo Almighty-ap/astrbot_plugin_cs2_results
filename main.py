@@ -13,7 +13,8 @@
   /cs2 我的订阅         查看你在本群订阅的战队/选手
   /cs2 赛事            未来 3 个月顶级赛事
   /cs2 日程            当前/下一个「比赛日」的关注赛事比赛(含赛果与直播)。比赛日按
-                      时间空档聚类,不按日历日切——欧洲赛事跨午夜的末场仍算同一晚
+                      时间空档聚类,不按日历日切——欧洲赛事跨午夜的末场仍算同一晚;
+                      有上一比赛日赛果时,会一并展示在当前日程上方
   /cs2 赛程 [赛事名]    正在进行/即将开赛赛事的完整赛程(小组赛/淘汰赛)
 
 管理/调试命令 —— 只在调试群(cfg.cs2_debug_groups,默认为空)或超管私聊可用,
@@ -1978,6 +1979,28 @@ def _match_day_span_text(day: list[hltv.ScheduledMatch]) -> str:
     return f"{head} — {nxt} {b:%H:%M}"
 
 
+def _previous_match_day_recap(
+    days: list[list[hltv.ScheduledMatch]],
+    target_index: int,
+    now_ms: float,
+) -> tuple[list[hltv.ScheduledMatch], str | None]:
+    """取目标比赛日紧邻的上一段已结束赛果,供日程卡顶部 recap 使用。
+
+    比赛日按时间空档聚类,不能按自然日取“昨天”:跨午夜的场次仍属于同一段。
+    只有前一比赛日仍足够新鲜且确实有已结束比赛时才返回。
+    """
+    if target_index <= 0 or target_index >= len(days):
+        return [], None
+    prev = days[target_index - 1]
+    finished = [m for m in prev if m.status == "finished"]
+    if not finished:
+        return [], None
+    latest_ms = max(m.start_unix for m in finished)
+    if now_ms - latest_ms > cfg.cs2_recap_max_age_hours * 3600_000:
+        return [], None
+    return finished, f"上个比赛日 · {_match_day_span_text(prev)}"
+
+
 async def _handle_schedule(team_filter: str | None = None) -> None:
     html = await fetcher.get_html(
         hltv.URL_MATCHES,
@@ -2069,21 +2092,20 @@ async def _handle_schedule(team_filter: str | None = None) -> None:
     recap_label = None
     if not days:  # 只有直播、拿不到任何带时间戳的场次
         day, title = [], "本比赛日"
+        target_index = None
     elif cur is not None:
         day, title = days[cur], "本比赛日"
+        target_index = cur
     else:
         nxt = next((i for i, d in enumerate(days) if d[0].start_unix > now_ms), None)
         if nxt is None:  # 只剩过去的比赛日 → 直接展示最后一段战报
             day, title = days[-1], "上个比赛日"
+            target_index = len(days) - 1
         else:
             day, title = days[nxt], "下个比赛日"
-            # 空档期:上一比赛日的战报折叠附在上方(太旧的不附)
-            if nxt > 0:
-                prev = days[nxt - 1]
-                fresh = now_ms - prev[-1].start_unix <= cfg.cs2_recap_max_age_hours * 3600_000
-                if fresh and any(m.status == "finished" for m in prev):
-                    recap = [m for m in prev if m.status == "finished"]
-                    recap_label = f"上个比赛日 · {_match_day_span_text(prev)}"
+            target_index = nxt
+    if target_index is not None:
+        recap, recap_label = _previous_match_day_recap(days, target_index, now_ms)
 
     rows = day + lives
     subtitle = _match_day_span_text(day) if day else None

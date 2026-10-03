@@ -1,11 +1,98 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from astrbot_plugin_cs2_results import main
+
+
+def _scheduled_match(
+    timestamp_ms: int,
+    *,
+    status: str = "finished",
+    team1: str = "Alpha",
+    team2: str = "Beta",
+) -> main.hltv.ScheduledMatch:
+    return main.hltv.ScheduledMatch(
+        match_id=str(timestamp_ms),
+        event_id="9001",
+        event_name="Test Event",
+        event_logo=None,
+        team1=team1,
+        team2=team2,
+        start_unix=timestamp_ms,
+        best_of="bo3",
+        status=status,
+    )
+
+
+def _cn_timestamp(
+    year: int,
+    month: int,
+    day: int,
+    hour: int,
+    minute: int = 0,
+) -> int:
+    cn = timezone(timedelta(hours=8))
+    return int(datetime(year, month, day, hour, minute, tzinfo=cn).timestamp() * 1000)
+
+
+def test_previous_match_day_recap_is_available_for_current_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main, "cfg", main.Config(), raising=False)
+    previous = [
+        _scheduled_match(_cn_timestamp(2026, 10, 3, 20)),
+        _scheduled_match(_cn_timestamp(2026, 10, 4, 1, 30)),
+    ]
+    current = [_scheduled_match(_cn_timestamp(2026, 10, 4, 18), status="upcoming")]
+    now_ms = _cn_timestamp(2026, 10, 4, 18)
+
+    recap, label = main._previous_match_day_recap([previous, current], 1, now_ms)
+
+    assert recap == previous
+    assert label == "上个比赛日 · 10月3日 周六 20:00 — 次日 01:30"
+
+
+def test_previous_match_day_recap_hides_stale_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "cfg",
+        main.Config(cs2_recap_max_age_hours=12),
+        raising=False,
+    )
+    previous = [_scheduled_match(_cn_timestamp(2026, 10, 3, 1))]
+    current = [_scheduled_match(_cn_timestamp(2026, 10, 4, 18), status="upcoming")]
+
+    recap, label = main._previous_match_day_recap(
+        [previous, current],
+        1,
+        _cn_timestamp(2026, 10, 4, 18),
+    )
+
+    assert recap == []
+    assert label is None
+
+
+def test_previous_match_day_recap_requires_an_earlier_cluster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main, "cfg", main.Config(), raising=False)
+    current = [_scheduled_match(_cn_timestamp(2026, 10, 4, 18), status="upcoming")]
+
+    recap, label = main._previous_match_day_recap(
+        [current],
+        0,
+        _cn_timestamp(2026, 10, 4, 18),
+    )
+
+    assert recap == []
+    assert label is None
 
 
 def test_member_role_resolves_owner_and_admin_from_group_api() -> None:
