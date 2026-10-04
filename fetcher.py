@@ -530,11 +530,11 @@ class Fetcher:
     async def start(self) -> None:
         """Start Chromium once; concurrent callers share the same launch."""
         async with self._lifecycle_lock:
+            if self._closing:
+                raise RuntimeError("fetcher is shutting down")
             if self._browser:
                 await self._ensure_context_locked()
                 return
-            if self._closing:
-                raise RuntimeError("fetcher is shutting down")
 
             from playwright.async_api import async_playwright
 
@@ -704,6 +704,10 @@ class Fetcher:
         )
 
     async def _ensure_context_locked(self):
+        if self._context is not None:
+            is_closed = getattr(self._context, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                self._context = None
         if self._context is None:
             browser = self._browser
             if browser is None:
