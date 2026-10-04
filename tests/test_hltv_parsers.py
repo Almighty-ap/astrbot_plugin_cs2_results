@@ -204,6 +204,39 @@ class HltvParserHappyPathTests(unittest.TestCase):
         self.assertEqual(profile.recent_results[1].opponent, "G2")
         self.assertEqual(profile.recent_results[1].result, "win")
 
+    def test_team_profile_uses_page_name_when_id_does_not_match(self) -> None:
+        profile = self.hltv.parse_team_profile(
+            _fixture("team_profile_normal.html"), "999999"
+        )
+
+        self.assertEqual([item.opponent for item in profile.recent_results], ["Vitality", "G2"])
+        self.assertEqual([item.result for item in profile.recent_results], ["loss", "win"])
+
+    def test_team_profile_handles_target_team_on_second_side(self) -> None:
+        profile = self.hltv.parse_team_profile(
+            """
+            <div class="teamProfile">
+              <div class="profile-team-name">Beta</div>
+              <div class="match-table"><table><tbody>
+                <tr class="team-row">
+                  <td class="date-cell">01/10/2026</td>
+                  <td class="team-center-cell">
+                    <a class="team-name team-1" href="/team/1/alpha">Alpha</a>
+                    1 <span>:</span> 2
+                    <a class="team-name team-2" href="/team/2/beta">Beta</a>
+                  </td>
+                  <td class="stats-button-cell"><a href="/matches/1/a-vs-b">Match</a></td>
+                </tr>
+              </tbody></table></div>
+            </div>
+            """,
+            "2",
+        )
+
+        self.assertEqual(profile.recent_results[0].opponent, "Alpha")
+        self.assertEqual(profile.recent_results[0].score, "1 : 2")
+        self.assertEqual(profile.recent_results[0].result, "win")
+
 
     def test_bracket_round_ignores_scheduled_shells_until_opponents_exist(self) -> None:
         hltv = self.hltv

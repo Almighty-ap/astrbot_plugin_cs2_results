@@ -14,7 +14,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional, Union
 
-from selectolax.parser import HTMLParser, Node
+try:
+    from selectolax.parser import HTMLParser, Node
+except ImportError:  # selectolax 1.x removes the old Modest backend.
+    from selectolax.lexbor import LexborHTMLParser as HTMLParser
+    from selectolax.lexbor import LexborNode as Node
 
 # 公开解析函数的入参:原始 HTML,**或**一棵已建好的 lexbor 树。
 #
@@ -2178,31 +2182,58 @@ def parse_team_profile(team_html: Html, team_id: str = "") -> TeamProfile:
                 continue
             if "team-row" not in classes:
                 continue
-            links = row.css("a[href*='/team/']")
+            cell = row.css_first(".team-center-cell")
             teams: list[tuple[str, str]] = []
-            seen_ids: set[str] = set()
-            for link in links:
-                href = link.attributes.get("href", "") or ""
-                match = re.search(r"/team/(\d+)/", href)
-                nick = _txt(link)
-                if not match or not nick or match.group(1) in seen_ids:
-                    continue
-                seen_ids.add(match.group(1))
-                teams.append((match.group(1), nick))
+            if cell:
+                for side in (1, 2):
+                    link = cell.css_first(f".team-name.team-{side}")
+                    if not link:
+                        continue
+                    href = link.attributes.get("href", "") or ""
+                    match = re.search(r"/team/(\d+)/", href)
+                    nick = _txt(link)
+                    if match and nick:
+                        teams.append((match.group(1), nick))
+                if len(teams) < 2:
+                    # 兼容旧版页面:没有 team-name 类时仍只从比赛行中心取链接。
+                    seen_ids: set[str] = set()
+                    teams = []
+                    for link in cell.css("a[href*='/team/']"):
+                        href = link.attributes.get("href", "") or ""
+                        match = re.search(r"/team/(\d+)/", href)
+                        nick = _txt(link)
+                        if not match or not nick or match.group(1) in seen_ids:
+                            continue
+                        seen_ids.add(match.group(1))
+                        teams.append((match.group(1), nick))
             if len(teams) < 2:
                 continue
-            center = _txt(row.css_first(".team-center-cell"))
-            score = re.search(r"(\d+)\s*:\s*(\d+)", center)
-            if not score:
-                continue
-            first_id = teams[0][0]
-            ours = first_id == str(team_id)
+            score_nodes = row.css(".score-cell .score")
+            score_values = [int(_txt(node)) for node in score_nodes if _txt(node).isdigit()]
+            if len(score_values) >= 2:
+                first_score, second_score = score_values[:2]
+            else:
+                score = re.search(r"(\d+)\s*:\s*(\d+)", _txt(cell))
+                if not score:
+                    continue
+                first_score, second_score = int(score.group(1)), int(score.group(2))
+            first_id, first_name = teams[0]
+            second_id, second_name = teams[1]
+            if str(team_id) in (first_id, second_id):
+                ours = first_id == str(team_id)
+            elif name:
+                ours = first_name.casefold() == name.casefold()
+                if not ours and second_name.casefold() != name.casefold():
+                    # 页面 ID 缺失或跳转后不一致时,默认主视角仍是页面第一队。
+                    ours = True
+            else:
+                ours = True
             our_score, their_score = (
-                int(score.group(1)),
-                int(score.group(2)),
+                first_score,
+                second_score,
             ) if ours else (
-                int(score.group(2)),
-                int(score.group(1)),
+                second_score,
+                first_score,
             )
             opponent = teams[1][1] if ours else teams[0][1]
             result = "win" if our_score > their_score else "loss" if our_score < their_score else "draw"
@@ -2212,7 +2243,7 @@ def parse_team_profile(team_html: Html, team_id: str = "") -> TeamProfile:
             recent_results.append(
                 RecentMatch(
                     opponent=opponent,
-                    score=f"{int(score.group(1))} : {int(score.group(2))}",
+                    score=f"{first_score} : {second_score}",
                     result=result,
                     event=current_event,
                     date=_txt(row.css_first(".date-cell")),
