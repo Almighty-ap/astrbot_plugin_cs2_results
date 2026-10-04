@@ -1732,10 +1732,15 @@ async def _handle_player_detail(name: str) -> None:
         profile.nick = player.nick
     if isinstance(stats_html, str):
         stats = hltv.parse_player_stats(stats_html)
-        profile.kd = stats["kd"]  # type: ignore[assignment]
-        profile.kills = stats["kills"]  # type: ignore[assignment]
-        profile.deaths = stats["deaths"]  # type: ignore[assignment]
-        profile.maps = stats["maps"]  # type: ignore[assignment]
+        if stats["kd"] is not None:
+            profile.kd = stats["kd"]  # type: ignore[assignment]
+            profile.kd_scope = "近期统计"
+        if stats["kills"] is not None:
+            profile.kills = stats["kills"]  # type: ignore[assignment]
+        if stats["deaths"] is not None:
+            profile.deaths = stats["deaths"]  # type: ignore[assignment]
+        if stats["maps"] is not None:
+            profile.maps = stats["maps"]  # type: ignore[assignment]
     try:
         png = await card.render_player_profile_card(profile, _now())
     except Exception as exc:  # noqa: BLE001

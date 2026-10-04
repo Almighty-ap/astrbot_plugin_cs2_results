@@ -115,6 +115,7 @@ def test_player_profile_card_contains_stats_roles_and_major_history() -> None:
         team="BC.Game",
         rating=1.22,
         kd=1.24,
+        kd_scope="生涯统计",
         maps=29,
         role_stats=[("Firepower", 85), ("Sniping", 89)],
         major_wins=1,
@@ -129,6 +130,7 @@ def test_player_profile_card_contains_stats_roles_and_major_history() -> None:
     assert "s1mple" in html
     assert "1.22" in html
     assert "1.24" in html
+    assert "生涯统计" in html
     assert "Firepower" in html
     assert "1 次 Major 冠军" in html
     assert "Sashi" in html

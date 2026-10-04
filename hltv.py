@@ -1804,6 +1804,7 @@ class PlayerProfile:
     avatar: Optional[str] = None
     rating: Optional[float] = None
     kd: Optional[float] = None
+    kd_scope: str = ""
     kills: Optional[int] = None
     deaths: Optional[int] = None
     maps: Optional[int] = None
@@ -1994,6 +1995,16 @@ def parse_player_profile(player_html: Html, player_id: str = "") -> PlayerProfil
     prize_text = _txt(t.css_first(".playerPrizeMoney .listRight")) or _txt(
         t.css_first(".playerPrizeMoney")
     )
+    stats_period = _txt(t.css_first(".stats-window"))
+    maps = None
+    if match := re.search(r"(\d+)\s*maps\b", stats_period, re.I):
+        maps = int(match.group(1))
+    kd = None
+    kd_scope = ""
+    all_time_text = " ".join(_txt(node) for node in t.css(".all-time-stat"))
+    if match := re.search(r"(\d+(?:\.\d+)?)\s*Average KDR", all_time_text, re.I):
+        kd = float(match.group(1))
+        kd_scope = "生涯统计"
     return PlayerProfile(
         player_id=str(player_id or ""),
         nick=nick,
@@ -2005,7 +2016,10 @@ def parse_player_profile(player_html: Html, player_id: str = "") -> PlayerProfil
         team_logo=team_logo,
         avatar=avatar,
         rating=rating,
-        stats_period=_txt(t.css_first(".stats-window")),
+        kd=kd,
+        kd_scope=kd_scope,
+        maps=maps,
+        stats_period=stats_period,
         role_stats=role_stats,
         recent_matches=recent_matches,
         major_wins=major_wins,

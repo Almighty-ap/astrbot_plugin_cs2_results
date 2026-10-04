@@ -2332,6 +2332,7 @@ def build_player_profile_html(profile: PlayerProfile, when_text: str) -> str:
     maps_text = str(profile.maps) if profile.maps is not None else "—"
     rating_text = f"{profile.rating:.2f}" if profile.rating is not None else "—"
     stat_period = profile.stats_period or "近期统计"
+    kd_period = profile.kd_scope or "近期统计"
     major_text = f"{profile.major_wins} 冠 / {profile.major_mvps} MVP"
     role_bars = "".join(
         f'<div style="display:flex;align-items:center;gap:13px;margin-top:12px;">'
@@ -2396,7 +2397,7 @@ def build_player_profile_html(profile: PlayerProfile, when_text: str) -> str:
   </div>
   <div style="display:flex;gap:12px;margin-top:30px;">
    {_profile_metric("Rating 3.0", rating_text, stat_period)}
-   {_profile_metric("K/D", kd_text, "近期统计")}
+   {_profile_metric("K/D", kd_text, kd_period)}
    {_profile_metric("Maps", maps_text, "计入样本")}
    {_profile_metric("Major", major_text, "冠军 / MVP")}
   </div>
