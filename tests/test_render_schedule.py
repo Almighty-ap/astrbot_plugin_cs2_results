@@ -6,11 +6,15 @@ from astrbot_plugin_cs2_results import render
 from astrbot_plugin_cs2_results.hltv import (
     EventSchedule,
     Matchup,
+    PlayerProfile,
+    RecentMatch,
     ScheduledMatch,
     SlotTeam,
     SwissCell,
     SwissColumn,
     SwissStage,
+    TeamProfile,
+    TeamRosterPlayer,
 )
 
 
@@ -100,3 +104,55 @@ def test_previous_match_day_recap_renders_above_current_events() -> None:
     assert html.index("上个比赛日") < html.index("Current Event")
     assert "Falcons" in html
     assert "Current Event" in html
+
+
+def test_player_profile_card_contains_stats_roles_and_major_history() -> None:
+    profile = PlayerProfile(
+        player_id="7998",
+        nick="s1mple",
+        realname="Oleksandr Kostyliev",
+        country="Ukraine",
+        team="BC.Game",
+        rating=1.22,
+        kd=1.24,
+        maps=29,
+        role_stats=[("Firepower", 85), ("Sniping", 89)],
+        major_wins=1,
+        major_mvps=1,
+        recent_matches=[
+            RecentMatch("Sashi", "13 : 11", "win", "ROG JOURNEY", rating=1.31)
+        ],
+    )
+
+    html = render.build_player_profile_html(profile, "2026-10-05 12:00")
+
+    assert "s1mple" in html
+    assert "1.22" in html
+    assert "1.24" in html
+    assert "Firepower" in html
+    assert "1 次 Major 冠军" in html
+    assert "Sashi" in html
+
+
+def test_team_profile_card_contains_rankings_roster_and_results() -> None:
+    profile = TeamProfile(
+        team_id="4608",
+        name="Natus Vincere",
+        country="Europe",
+        world_rank=10,
+        regional_rank=8,
+        region="Europe",
+        vrs_rank=20,
+        roster=[TeamRosterPlayer("18987", "b1t", "STARTER", 1.12)],
+        recent_results=[
+            RecentMatch("Vitality", "1 : 2", "loss", "ESL Pro League Season 24")
+        ],
+    )
+
+    html = render.build_team_profile_html(profile, "2026-10-05 12:00")
+
+    assert "Natus Vincere" in html
+    assert "#10" in html
+    assert "#20" in html
+    assert "b1t" in html
+    assert "Vitality" in html

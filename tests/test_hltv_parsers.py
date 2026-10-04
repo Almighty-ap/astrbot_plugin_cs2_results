@@ -147,6 +147,60 @@ class HltvParserHappyPathTests(unittest.TestCase):
         self.assertEqual((beta.win.points, beta.win.rank), ("-31pt", 2))
         self.assertIsNone(beta.lose)
 
+    def test_player_profile_and_recent_stats(self) -> None:
+        profile = self.hltv.parse_player_profile(
+            _fixture("player_profile_normal.html"), "7998"
+        )
+
+        self.assertEqual(profile.nick, "s1mple")
+        self.assertEqual(profile.realname, "Oleksandr Kostyliev")
+        self.assertEqual(profile.country, "Ukraine")
+        self.assertEqual(profile.team, "BC.Game")
+        self.assertEqual(profile.team_id, "12878")
+        self.assertEqual(profile.rating, 1.22)
+        self.assertIn("Past 3 months", profile.stats_period)
+        self.assertEqual(profile.role_stats, [("Firepower", 85), ("Sniping", 89)])
+        self.assertEqual(profile.major_wins, 1)
+        self.assertEqual(profile.major_mvps, 1)
+        self.assertEqual(len(profile.recent_matches), 2)
+        self.assertEqual(profile.recent_matches[0].opponent, "Sashi")
+        self.assertEqual(profile.recent_matches[0].result, "win")
+        self.assertEqual(profile.recent_matches[0].rating, 1.31)
+        self.assertEqual(profile.recent_matches[1].result, "loss")
+
+    def test_player_stats_extracts_kd_kills_and_maps(self) -> None:
+        stats = self.hltv.parse_player_stats(_fixture("player_stats_normal.html"))
+
+        self.assertEqual(stats["kd"], 1.24)
+        self.assertEqual(stats["kills"], 582)
+        self.assertEqual(stats["deaths"], 469)
+        self.assertEqual(stats["maps"], 29)
+
+    def test_team_profile_rankings_roster_and_recent_results(self) -> None:
+        profile = self.hltv.parse_team_profile(
+            _fixture("team_profile_normal.html"), "4608"
+        )
+
+        self.assertEqual(profile.name, "Natus Vincere")
+        self.assertEqual(profile.country, "Europe")
+        self.assertEqual(profile.world_rank, 10)
+        self.assertEqual(profile.regional_rank, 8)
+        self.assertEqual(profile.region, "Europe")
+        self.assertEqual(profile.vrs_rank, 20)
+        self.assertEqual(profile.vrs_regional_rank, 15)
+        self.assertEqual(profile.vrs_region, "Europe")
+        self.assertEqual(profile.average_age, 24.4)
+        self.assertEqual(profile.coach, "Andrey 'B1ad3' Gorodenskiy")
+        self.assertEqual(profile.win_rate, "40.0%")
+        self.assertEqual(profile.win_streak, "0")
+        self.assertEqual([p.nick for p in profile.roster], ["b1t", "Aleksib", "iM", "w0nderful", "makazze"])
+        self.assertEqual(profile.roster[0].rating, 1.12)
+        self.assertEqual(len(profile.recent_results), 2)
+        self.assertEqual(profile.recent_results[0].opponent, "Vitality")
+        self.assertEqual(profile.recent_results[0].result, "loss")
+        self.assertEqual(profile.recent_results[1].opponent, "G2")
+        self.assertEqual(profile.recent_results[1].result, "win")
+
 
     def test_bracket_round_ignores_scheduled_shells_until_opponents_exist(self) -> None:
         hltv = self.hltv

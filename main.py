@@ -16,6 +16,8 @@
                       时间空档聚类,不按日历日切——欧洲赛事跨午夜的末场仍算同一晚;
                       有上一比赛日赛果时,会一并展示在当前日程上方
   /cs2 赛程 [赛事名]    正在进行/即将开赛赛事的完整赛程(小组赛/淘汰赛)
+  /cs2 选手 <名字>      选手近期 Rating / K/D、角色分与 Major 荣誉
+  /cs2 战队 <名字>      战队阵容、世界 / VRS 排名与近期战绩
 
 管理/调试命令 —— 只在调试群(cfg.cs2_debug_groups,默认为空)或超管私聊可用,
 普通群里视为未识别、落回公开帮助卡,不暴露其存在,也不泄露订阅信息:
@@ -1670,6 +1672,119 @@ async def _handle_news(event: MessageEvent, action: str, admin: bool) -> None:
     await cs2.finish([*[Comp.At(qq=qq) for qq in mentions], png])
 
 
+def _detail_candidate_lines(kind: str, candidates: list) -> str:
+    if kind == "player":
+        return "\n".join(
+            f"· {p.nick}" + (f"({p.team})" if getattr(p, "team", None) else "")
+            for p in candidates
+        )
+    return "\n".join(f"· {t.name}" for t in candidates)
+
+
+async def _handle_player_detail(name: str) -> None:
+    if not name:
+        await cs2.finish("用法:/cs2 选手 <名字>,例如 /cs2 选手 s1mple")
+    res = await names.resolve_player(fetcher, name)
+    if res.status == "error":
+        await cs2.finish("HLTV 搜索暂时不可用,请稍后再试")
+    if res.status == "ambiguous":
+        lines = _detail_candidate_lines("player", res.candidates)
+        await cs2.finish(f"找到多个选手,请用更精确的昵称重发:\n{lines}")
+    if res.status == "none" or res.player is None:
+        await cs2.finish(f"没有找到选手「{name}」")
+    player = res.player
+    if not player.id.isascii() or not player.id.isdecimal():
+        await cs2.finish("选手 ID 无效")
+
+    await cs2.send(f"正在查询 {player.nick} 的近期数据…")
+    end_date = datetime.now(CN).date()
+    start_date = end_date - timedelta(days=90)
+    profile_url = f"{hltv.BASE}/player/{player.id}/x"
+    stats_url = (
+        f"{hltv.BASE}/stats/players/individual/{player.id}/x"
+        f"?startDate={start_date.isoformat()}&endDate={end_date.isoformat()}"
+    )
+    try:
+        profile_html, stats_html = await asyncio.gather(
+            fetcher.get_html(
+                profile_url,
+                wait_selector=".playerProfile",
+                max_age=cfg.cs2_cache_event_page_ttl,
+                stale_age=cfg.cs2_stale_event_page,
+                priority="user",
+            ),
+            fetcher.get_html(
+                stats_url,
+                wait_selector=".stats-rows",
+                max_age=cfg.cs2_cache_event_page_ttl,
+                stale_age=cfg.cs2_stale_event_page,
+                priority="user",
+            ),
+            return_exceptions=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[cs2] 选手详情抓取失败: %s", exc)
+        await cs2.finish("选手详情抓取失败,请稍后再试")
+    if isinstance(profile_html, BaseException) or not profile_html:
+        await cs2.finish("HLTV 选手页抓取失败(可能被 Cloudflare 挡),稍后再试")
+    profile = hltv.parse_player_profile(profile_html, player.id)
+    if not profile.nick:
+        profile.nick = player.nick
+    if isinstance(stats_html, str):
+        stats = hltv.parse_player_stats(stats_html)
+        profile.kd = stats["kd"]  # type: ignore[assignment]
+        profile.kills = stats["kills"]  # type: ignore[assignment]
+        profile.deaths = stats["deaths"]  # type: ignore[assignment]
+        profile.maps = stats["maps"]  # type: ignore[assignment]
+    try:
+        png = await card.render_player_profile_card(profile, _now())
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[cs2] 选手详情卡渲染失败: %s", exc)
+        await cs2.finish("选手详情卡渲染失败,请稍后再试")
+    await cs2.finish(png)
+
+
+async def _handle_team_detail(name: str) -> None:
+    if not name:
+        await cs2.finish("用法:/cs2 战队 <名字>,例如 /cs2 战队 NAVI")
+    res = await names.resolve_team(fetcher, name)
+    if res.status == "error":
+        await cs2.finish("HLTV 搜索暂时不可用,请稍后再试")
+    if res.status == "ambiguous":
+        lines = _detail_candidate_lines("team", res.candidates)
+        await cs2.finish(f"找到多个战队,请用更精确的名称重发:\n{lines}")
+    if res.status == "none" or res.team is None:
+        await cs2.finish(f"没有找到战队「{name}」")
+    team = res.team
+    if not team.id.isascii() or not team.id.isdecimal():
+        await cs2.finish("战队 ID 无效")
+
+    await cs2.send(f"正在查询 {team.name} 的阵容与排名…")
+    url = f"{hltv.BASE}/team/{team.id}/x"
+    try:
+        html = await fetcher.get_html(
+            url,
+            wait_selector=".teamProfile",
+            max_age=cfg.cs2_cache_event_page_ttl,
+            stale_age=cfg.cs2_stale_event_page,
+            priority="user",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[cs2] 战队详情抓取失败: %s", exc)
+        await cs2.finish("战队详情抓取失败,请稍后再试")
+    if not html:
+        await cs2.finish("HLTV 战队页抓取失败(可能被 Cloudflare 挡),稍后再试")
+    profile = hltv.parse_team_profile(html, team.id)
+    if not profile.name:
+        profile.name = team.name
+    try:
+        png = await card.render_team_profile_card(profile, _now())
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[cs2] 战队详情卡渲染失败: %s", exc)
+        await cs2.finish("战队详情卡渲染失败,请稍后再试")
+    await cs2.finish(png)
+
+
 async def handle_cs2(event: MessageEvent, raw: str) -> None:
     parts = raw.split()
     sub = parts[0] if parts else ""
@@ -1714,6 +1829,12 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
 
     if sub in ("战况", "match", "赛况", "比分"):
         await _handle_schedule(" ".join(parts[1:]).strip() or None)
+
+    if sub in ("选手", "player"):
+        await _handle_player_detail(" ".join(parts[1:]).strip())
+
+    if sub in ("战队", "team"):
+        await _handle_team_detail(" ".join(parts[1:]).strip())
 
     if sub in ("赛程", "bracket", "对阵", "赛程表"):
         await _handle_bracket(" ".join(parts[1:]).strip() or None)
@@ -1806,6 +1927,8 @@ async def _send_help(admin: bool) -> None:
             "/cs2 赛事 —— 未来 3 个月顶级赛事",
             "/cs2 日程 —— 当前/下个比赛日的关注赛事比赛(含赛果与直播)",
             "/cs2 赛程 [赛事名] —— 正在进行赛事的完整赛程(小组赛/淘汰赛)",
+            "/cs2 选手 <名字> —— 选手近期 Rating / K/D、角色分与 Major 荣誉",
+            "/cs2 战队 <名字> —— 战队阵容、世界 / VRS 排名与近期战绩",
             "/cs2 订阅 / 退订 —— 本群加入/退出推送(群管理员)",
             "/cs2 订阅 战队|选手 <名字> —— 开赛提醒和每张地图赛果都 @ 你",
             "/cs2 我的订阅 —— 查看你在本群订阅的战队/选手",

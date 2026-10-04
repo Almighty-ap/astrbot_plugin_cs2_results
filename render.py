@@ -36,10 +36,12 @@ from .hltv import (
     MapResult,
     MatchDetail,
     Matchup,
+    PlayerProfile,
     PlayerStat,
     ScheduledMatch,
     SlotTeam,
     SwissStage,
+    TeamProfile,
     VrsCell,
     VrsRow,
     cluster_match_days,
@@ -2265,6 +2267,263 @@ async def render_news_card(
     )
 
 
+def _profile_result_pill(result: str) -> str:
+    if result == "win":
+        return f'<span style="color:{GOOD};font-weight:800;">胜</span>'
+    if result == "loss":
+        return f'<span style="color:{BAD};font-weight:800;">负</span>'
+    if result == "draw":
+        return f'<span style="color:{MUTE};font-weight:800;">平</span>'
+    return f'<span style="color:{MUTE};font-weight:700;">—</span>'
+
+
+def _profile_metric(label: str, value: str, sub: str = "") -> str:
+    sub_html = (
+        f'<div style="font-size:13px;color:{MUTE};margin-top:4px;">{_esc(sub)}</div>'
+        if sub
+        else ""
+    )
+    return (
+        f'<div style="flex:1;min-width:0;background:{INNER};border:1px solid {BORDER};'
+        f'border-radius:16px;padding:18px 20px;">'
+        f'<div style="font-size:13px;font-weight:700;color:{MUTE};'
+        f'text-transform:uppercase;">{_esc(label)}</div>'
+        f'<div style="font-size:30px;font-weight:800;color:{INK};line-height:1.15;'
+        f'margin-top:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+        f"{_esc(value)}</div>{sub_html}</div>"
+    )
+
+
+def _profile_recent_rows(items: list, *, show_rating: bool = False) -> str:
+    if not items:
+        return f'<div style="padding:20px 4px;color:{MUTE};font-size:15px;">暂无近期比赛</div>'
+    rows: list[str] = []
+    for item in items:
+        detail = " · ".join(x for x in (item.date, item.event) if x)
+        rating = ""
+        if show_rating and item.rating is not None:
+            rating = (
+                f'<span style="width:70px;text-align:right;font-weight:800;'
+                f'color:{_rating_color(item.rating)};">{item.rating:.2f}</span>'
+            )
+        rows.append(
+            f'<div style="display:flex;align-items:center;gap:18px;padding:14px 4px;'
+            f'border-top:1px solid {BORDER_R};">'
+            f'<div style="width:36px;flex:none;text-align:center;">'
+            f"{_profile_result_pill(item.result)}</div>"
+            f'<div style="width:190px;min-width:0;font-size:17px;font-weight:700;'
+            f'color:{ROW};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+            f"vs {_esc(item.opponent or 'TBD')}</div>"
+            f'<div style="flex:1;min-width:0;font-size:14px;color:{MUTE};'
+            f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+            f"{_esc(detail)}</div>"
+            f'<div style="width:86px;text-align:right;font-size:16px;font-weight:800;'
+            f'color:{ROW};white-space:nowrap;">{_esc(item.score or "—")}</div>'
+            f"{rating}</div>"
+        )
+    return "".join(rows)
+
+
+def build_player_profile_html(profile: PlayerProfile, when_text: str) -> str:
+    """Build the warm player detail card with recent rating, K/D and achievements."""
+    identity = " · ".join(x for x in (profile.realname, profile.country, profile.age_text) if x)
+    team = profile.team or "无现役战队"
+    kd_text = f"{profile.kd:.2f}" if profile.kd is not None else "—"
+    maps_text = str(profile.maps) if profile.maps is not None else "—"
+    rating_text = f"{profile.rating:.2f}" if profile.rating is not None else "—"
+    stat_period = profile.stats_period or "近期统计"
+    major_text = f"{profile.major_wins} 冠 / {profile.major_mvps} MVP"
+    role_bars = "".join(
+        f'<div style="display:flex;align-items:center;gap:13px;margin-top:12px;">'
+        f'<div style="width:88px;flex:none;font-size:14px;font-weight:700;color:{ROW};">'
+        f"{_esc(label)}</div>"
+        f'<div style="flex:1;height:9px;background:{PANEL};border-radius:999px;overflow:hidden;">'
+        f'<div style="width:{max(0, min(value, 100))}%;height:100%;background:{ACCENT};'
+        f'border-radius:999px;"></div></div>'
+        f'<div style="width:38px;text-align:right;font-size:14px;font-weight:800;'
+        f'color:{ACCENT_D};">{value}</div></div>'
+        for label, value in profile.role_stats
+    )
+    role_panel = (
+        f'<div style="flex:0 0 360px;background:{INNER};border:1px solid {BORDER};'
+        f'border-radius:18px;padding:20px 22px;">'
+        f'<div style="font-size:15px;font-weight:800;color:{INK};">角色评分</div>'
+        f'<div style="font-size:12px;color:{MUTE};margin-top:3px;">{_esc(stat_period)}</div>'
+        + (
+            role_bars
+            or f'<div style="margin-top:18px;color:{MUTE};font-size:14px;">暂无角色评分</div>'
+        )
+        + "</div>"
+    )
+    achievement_chips = []
+    if profile.major_wins:
+        achievement_chips.append(f"{profile.major_wins} 次 Major 冠军")
+    if profile.major_mvps:
+        achievement_chips.append(f"{profile.major_mvps} 次 Major MVP")
+    if profile.top20_text:
+        achievement_chips.append(f"Top 20 {profile.top20_text}")
+    if profile.prize_money:
+        achievement_chips.append(f"奖金 {profile.prize_money}")
+    achievements = "".join(
+        f'<span style="display:inline-flex;align-items:center;background:{ACCENT_BG};'
+        f'border:1px solid rgba(196,112,78,0.22);border-radius:999px;padding:7px 13px;'
+        f'font-size:14px;font-weight:700;color:{ACCENT_D};margin-right:8px;margin-top:8px;">'
+        f"{_esc(item)}</span>"
+        for item in achievement_chips
+    )
+    achievements_empty = (
+        f'<div style="margin-top:8px;color:{MUTE};font-size:14px;">'
+        "暂无 Major 冠军 / MVP 记录</div>"
+    )
+    body = f"""
+  <div style="display:flex;align-items:center;gap:20px;">
+   {_badge(None, profile.nick, 74, DARK, CARD)}
+   <div style="flex:1;min-width:0;">
+    <div style="font-size:34px;font-weight:800;color:{INK};line-height:1.08;
+         white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{_esc(profile.nick)}</div>
+    <div style="font-size:15px;color:{SUB};margin-top:7px;white-space:nowrap;
+         overflow:hidden;text-overflow:ellipsis;">{_esc(identity or 'HLTV player')}</div>
+   </div>
+   <div style="display:flex;align-items:center;gap:11px;background:{INNER};border:1px solid {BORDER};
+        border-radius:16px;padding:12px 15px;">
+    {_badge(profile.team_logo, team, 38, DARK2, CARD)}
+    <div style="text-align:right;">
+     <div style="font-size:12px;color:{MUTE};font-weight:700;">CURRENT TEAM</div>
+     <div style="font-size:17px;color:{INK};font-weight:800;max-width:240px;
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{_esc(team)}</div>
+    </div>
+   </div>
+  </div>
+  <div style="display:flex;gap:12px;margin-top:30px;">
+   {_profile_metric("Rating 3.0", rating_text, stat_period)}
+   {_profile_metric("K/D", kd_text, "近期统计")}
+   {_profile_metric("Maps", maps_text, "计入样本")}
+   {_profile_metric("Major", major_text, "冠军 / MVP")}
+  </div>
+  <div style="display:flex;gap:18px;margin-top:18px;align-items:stretch;">
+   {role_panel}
+   <div style="flex:1;min-width:0;background:{INNER};border:1px solid {BORDER};
+        border-radius:18px;padding:20px 22px;">
+    <div style="font-size:15px;font-weight:800;color:{INK};">大赛履历</div>
+    <div style="min-height:36px;">{achievements or achievements_empty}</div>
+   </div>
+  </div>
+  <div style="margin-top:28px;border-top:1px solid {LINE};padding-top:18px;">
+   <div style="display:flex;align-items:baseline;justify-content:space-between;">
+    <div style="font-size:18px;font-weight:800;color:{INK};">近期比赛</div>
+    <div style="font-size:13px;color:{MUTE};">最近 5 场 · Rating 单场</div>
+   </div>
+   {_profile_recent_rows(profile.recent_matches, show_rating=True)}
+  </div>
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-top:26px;
+       padding-top:18px;border-top:1px solid {BORDER};font-size:14px;color:{FAINT};">
+   <span>{_esc(when_text)}</span>
+   <span>数据 · <span style="color:{ACCENT};font-weight:700;">hltv.org/player</span></span>
+  </div>"""
+    return _shell(body, "42px 48px 38px")
+
+
+async def render_player_profile_card(profile: PlayerProfile, when_text: str) -> bytes:
+    return await _render_png(build_player_profile_html(profile, when_text))
+
+
+def build_team_profile_html(profile: TeamProfile, when_text: str) -> str:
+    """Build the warm team detail card with rankings, roster and recent results."""
+    world_rank = f"#{profile.world_rank}" if profile.world_rank else "—"
+    regional = (
+        f"#{profile.regional_rank} {profile.region}".strip()
+        if profile.regional_rank
+        else "—"
+    )
+    vrs_rank = f"#{profile.vrs_rank}" if profile.vrs_rank else "—"
+    avg_age = f"{profile.average_age:.1f}" if profile.average_age is not None else "—"
+    coach = profile.coach or "—"
+    roster_head = (
+        f'<div style="display:grid;grid-template-columns:minmax(0,1fr) 130px 110px;'
+        f'gap:12px;padding:0 4px 10px;border-bottom:1px solid {LINE};font-size:13px;'
+        f'font-weight:800;color:{MUTE};">'
+        f'<div>选手</div><div>状态</div><div style="text-align:right;">Rating 3.0</div></div>'
+    )
+    roster_rows_list: list[str] = []
+    for player in profile.roster:
+        player_rating = f"{player.rating:.2f}" if player.rating is not None else "—"
+        rating_color = _rating_color(player.rating) if player.rating is not None else MUTE
+        roster_rows_list.append(
+            f'<div style="display:grid;grid-template-columns:minmax(0,1fr) 130px 110px;'
+            f'gap:12px;align-items:center;padding:14px 4px;border-bottom:1px solid {BORDER_R};">'
+            f'<div style="font-size:18px;font-weight:800;color:{ROW};white-space:nowrap;'
+            f'overflow:hidden;text-overflow:ellipsis;">{_esc(player.nick)}</div>'
+            f'<div style="font-size:13px;font-weight:700;'
+            f'color:{GOOD if player.status == "STARTER" else MUTE};'
+            f'white-space:nowrap;">{_esc(player.status or "现役")}</div>'
+            f'<div style="text-align:right;font-size:18px;font-weight:800;'
+            f'color:{rating_color};">{player_rating}</div></div>'
+        )
+    roster_rows = "".join(roster_rows_list)
+    roster_rows = roster_rows or (
+        f'<div style="padding:20px 4px;color:{MUTE};font-size:15px;">暂无阵容数据</div>'
+    )
+    body = f"""
+  <div style="display:flex;align-items:center;gap:20px;">
+   {_badge(profile.logo, profile.name, 76, DARK, CARD)}
+   <div style="flex:1;min-width:0;">
+    <div style="font-size:34px;font-weight:800;color:{INK};line-height:1.08;
+         white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{_esc(profile.name)}</div>
+    <div style="font-size:15px;color:{SUB};margin-top:7px;">
+     {_esc(profile.country or "International")} · 教练 {_esc(coach)}
+    </div>
+   </div>
+   <div style="display:flex;gap:10px;">
+    <div style="text-align:right;background:{ACCENT_BG};border:1px solid rgba(196,112,78,0.22);
+         border-radius:16px;padding:10px 16px;">
+     <div style="font-size:12px;color:{ACCENT_D};font-weight:800;">HLTV</div>
+     <div style="font-size:24px;color:{ACCENT_D};font-weight:900;">{_esc(world_rank)}</div>
+    </div>
+    <div style="text-align:right;background:{INNER};border:1px solid {BORDER};
+         border-radius:16px;padding:10px 16px;">
+     <div style="font-size:12px;color:{MUTE};font-weight:800;">VRS</div>
+     <div style="font-size:24px;color:{INK};font-weight:900;">{_esc(vrs_rank)}</div>
+    </div>
+   </div>
+  </div>
+  <div style="display:flex;gap:12px;margin-top:30px;">
+   {_profile_metric("世界排名", world_rank, "HLTV")}
+   {_profile_metric("地区排名", regional, "HLTV")}
+   {_profile_metric("Valve 排名", vrs_rank, f"{profile.vrs_region} #{profile.vrs_regional_rank}" if profile.vrs_regional_rank else "VRS")}
+   {_profile_metric("平均年龄", avg_age, f"近况 {profile.win_rate or '—'} 胜率")}
+  </div>
+  <div style="display:flex;gap:18px;margin-top:18px;align-items:stretch;">
+   <div style="flex:1;min-width:0;background:{INNER};border:1px solid {BORDER};
+        border-radius:18px;padding:20px 22px;">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;
+         margin-bottom:10px;">
+     <div style="font-size:18px;font-weight:800;color:{INK};">当前阵容</div>
+     <div style="font-size:13px;color:{MUTE};">HLTV Rating 3.0 · 队内周期</div>
+    </div>
+    {roster_head}{roster_rows}
+   </div>
+  </div>
+  <div style="margin-top:28px;border-top:1px solid {LINE};padding-top:18px;">
+   <div style="display:flex;align-items:baseline;justify-content:space-between;">
+    <div style="font-size:18px;font-weight:800;color:{INK};">近期战绩</div>
+    <div style="font-size:13px;color:{MUTE};">
+     最近 5 场 · 当前连胜 {_esc(profile.win_streak or "0")}
+    </div>
+   </div>
+   {_profile_recent_rows(profile.recent_results)}
+  </div>
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-top:26px;
+       padding-top:18px;border-top:1px solid {BORDER};font-size:14px;color:{FAINT};">
+   <span>{_esc(when_text)}</span>
+   <span>数据 · <span style="color:{ACCENT};font-weight:700;">hltv.org/team</span></span>
+  </div>"""
+    return _shell(body, "42px 48px 38px")
+
+
+async def render_team_profile_card(profile: TeamProfile, when_text: str) -> bytes:
+    return await _render_png(build_team_profile_html(profile, when_text))
+
+
 def build_help_html(admin: bool, when_text: str) -> str:
     callout = (
         f'<div style="margin-top:24px;background:{ACCENT_BG};border:1px solid rgba(196,112,78,0.22);'
@@ -2286,6 +2545,8 @@ def build_help_html(admin: bool, when_text: str) -> str:
         _cmd_row("/cs2 赛事", "未来 3 个月的顶级赛事一览", False)
         + _cmd_row("/cs2 日程", "今日关注赛事的比赛 · 赛果 / 直播 / 待开始;无赛则看下个比赛日", False)
         + _cmd_row("/cs2 战况 <战队>", "查询指定战队近期比赛、当前比分与赛果", False)
+        + _cmd_row("/cs2 选手 <名字>", "查看选手近期 Rating / K/D、角色分和 Major 荣誉", False)
+        + _cmd_row("/cs2 战队 <名字>", "查看阵容、世界 / VRS 排名和近期战绩", False)
         + _cmd_row("/cs2 赛程", "正在进行 / 即将开赛赛事的完整对阵 · 小组赛 / 淘汰赛,可指定其一", True)
     )
     sub_rows = (

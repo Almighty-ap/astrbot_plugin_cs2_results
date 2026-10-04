@@ -1778,6 +1778,72 @@ class SearchTeam:
     logo: Optional[str] = None
 
 
+@dataclass
+class RecentMatch:
+    """选手/战队详情页的一条近期比赛。"""
+
+    opponent: str
+    score: str
+    result: str  # win / loss / unknown
+    event: str = ""
+    date: str = ""
+    rating: Optional[float] = None
+    url: str = ""
+
+
+@dataclass
+class PlayerProfile:
+    player_id: str
+    nick: str
+    realname: str = ""
+    age_text: str = ""
+    country: str = ""
+    team: str = ""
+    team_id: str = ""
+    team_logo: Optional[str] = None
+    avatar: Optional[str] = None
+    rating: Optional[float] = None
+    kd: Optional[float] = None
+    kills: Optional[int] = None
+    deaths: Optional[int] = None
+    maps: Optional[int] = None
+    stats_period: str = ""
+    role_stats: list[tuple[str, int]] = field(default_factory=list)
+    recent_matches: list[RecentMatch] = field(default_factory=list)
+    major_wins: int = 0
+    major_mvps: int = 0
+    top20_text: str = ""
+    prize_money: str = ""
+
+
+@dataclass
+class TeamRosterPlayer:
+    player_id: str
+    nick: str
+    status: str = ""
+    rating: Optional[float] = None
+
+
+@dataclass
+class TeamProfile:
+    team_id: str
+    name: str
+    country: str = ""
+    logo: Optional[str] = None
+    world_rank: Optional[int] = None
+    regional_rank: Optional[int] = None
+    region: str = ""
+    vrs_rank: Optional[int] = None
+    vrs_regional_rank: Optional[int] = None
+    vrs_region: str = ""
+    average_age: Optional[float] = None
+    coach: str = ""
+    win_rate: str = ""
+    win_streak: str = ""
+    roster: list[TeamRosterPlayer] = field(default_factory=list)
+    recent_results: list[RecentMatch] = field(default_factory=list)
+
+
 def parse_search(json_text: str) -> tuple[list[SearchPlayer], list[SearchTeam]]:
     """解析 /search?term= 的 JSON,返回 (players, teams)。
 
@@ -1829,3 +1895,342 @@ def parse_search(json_text: str) -> tuple[list[SearchPlayer], list[SearchTeam]]:
             continue
         teams.append(SearchTeam(tid, name, tm.get("teamLogoDay") or tm.get("teamLogoNight")))
     return players, teams
+
+
+def _float_text(value: str) -> Optional[float]:
+    match = re.search(r"-?\d+(?:\.\d+)?", value or "")
+    return float(match.group()) if match else None
+
+
+def _int_text(value: str) -> Optional[int]:
+    match = re.search(r"\d+", value or "")
+    return int(match.group()) if match else None
+
+
+def _stat_value(node: Optional[Node]) -> str:
+    if node is None:
+        return ""
+    value = node.css_first(".statsVal") or node.css_first(".stats-val")
+    return _txt(value or node)
+
+
+def parse_player_profile(player_html: Html, player_id: str = "") -> PlayerProfile:
+    """解析 `/player/{id}`:基础资料、近三个月 Rating、近期比赛与 Major 荣誉。"""
+    t = tree(player_html)
+    nick = _txt(t.css_first(".playerNickname")) or _txt(t.css_first(".playerName"))
+    realname = _txt(t.css_first(".playerRealname"))
+    age_text = _txt(t.css_first(".playerAge .listRight")) or _txt(t.css_first(".playerAge"))
+    flag = t.css_first(".player-summary-stat-box-left-flag img") or t.css_first(".playerFlagName img")
+    country = ""
+    if flag:
+        country = flag.attributes.get("title") or flag.attributes.get("alt") or ""
+
+    team = ""
+    team_id = ""
+    team_logo = None
+    team_link = t.css_first(".playerTeam a[href*='/team/']")
+    if team_link:
+        team = _txt(team_link)
+        match = re.search(r"/team/(\d+)/", team_link.attributes.get("href", "") or "")
+        if match:
+            team_id = match.group(1)
+    team_img = t.css_first(".player-summary-stat-box-left-team-logo-wrapper img")
+    if team_img:
+        team_logo = team_img.attributes.get("data-cookieblock-src") or team_img.attributes.get("src")
+
+    avatar_img = t.css_first(".player-summary-stat-box-left-bodyshot")
+    avatar = None
+    if avatar_img:
+        avatar = avatar_img.attributes.get("data-cookieblock-src") or avatar_img.attributes.get("src")
+
+    rating = None
+    role_stats: list[tuple[str, int]] = []
+    attrs = t.css_first(".playerpage-container-attributes")
+    if attrs:
+        for stat in attrs.css(".player-stat"):
+            label_node = stat.css_first("b")
+            label = _txt(label_node)
+            value_text = _stat_value(stat)
+            if not label:
+                continue
+            if label.casefold().startswith("rating"):
+                rating = _float_text(value_text)
+                continue
+            value = _int_text(value_text)
+            if value is not None:
+                role_stats.append((label, value))
+
+    recent_matches: list[RecentMatch] = []
+    for box in t.css(".playerpage-matchbox"):
+        opponent = _txt(box.css_first(".playerpage-matchbox-team .text-ellipsis"))
+        event = _txt(box.css_first(".playerpage-matchbox-bottom"))
+        score = _txt(box.css_first(".playerpage-match-result"))
+        classes = box.attributes.get("class", "") or ""
+        result = "win" if "won-matchbox" in classes else "loss" if "lost-matchbox" in classes else "unknown"
+        rating_text = _txt(box.css_first(".playerpage-match-rating"))
+        recent_matches.append(
+            RecentMatch(
+                opponent=opponent,
+                score=score,
+                result=result,
+                event=event,
+                rating=_float_text(rating_text),
+                url=(box.attributes.get("href", "") or "").strip(),
+            )
+        )
+        if len(recent_matches) >= 5:
+            break
+
+    achievement_text = _txt(t.css_first(".playerAchievement .listRight")) or _txt(
+        t.css_first(".playerAchievement")
+    )
+    major_wins = 0
+    major_mvps = 0
+    if match := re.search(r"(\d+)\s*x\s+Major winner", achievement_text, re.I):
+        major_wins = int(match.group(1))
+    if match := re.search(r"(\d+)\s*x\s+Major MVP", achievement_text, re.I):
+        major_mvps = int(match.group(1))
+
+    prize_text = _txt(t.css_first(".playerPrizeMoney .listRight")) or _txt(
+        t.css_first(".playerPrizeMoney")
+    )
+    return PlayerProfile(
+        player_id=str(player_id or ""),
+        nick=nick,
+        realname=realname,
+        age_text=age_text,
+        country=country,
+        team=team,
+        team_id=team_id,
+        team_logo=team_logo,
+        avatar=avatar,
+        rating=rating,
+        stats_period=_txt(t.css_first(".stats-window")),
+        role_stats=role_stats,
+        recent_matches=recent_matches,
+        major_wins=major_wins,
+        major_mvps=major_mvps,
+        top20_text=_txt(t.css_first(".playerTop20 .listRight")) or _txt(t.css_first(".playerTop20")),
+        prize_money=prize_text,
+    )
+
+
+def parse_player_stats(player_stats_html: Html) -> dict[str, float | int | None]:
+    """从 `/stats/players/individual/...` 提取近期 K/D、击杀、死亡和地图数。
+
+    兼容 HLTV 的 `.stats-row`/`.stats-name`/`.stats-val` 结构；页面改版时再退回
+    对整页文本做标签匹配，保证至少能取到 K/D Ratio。
+    """
+    t = tree(player_stats_html)
+    pairs: list[tuple[str, str]] = []
+    for row in t.css(".stats-row"):
+        label = _txt(
+            row.css_first(".stats-name")
+            or row.css_first(".stats-description")
+            or row.css_first("dt")
+        )
+        value = _txt(
+            row.css_first(".stats-val")
+            or row.css_first(".stats-value")
+            or row.css_first("dd")
+        )
+        if label and value:
+            pairs.append((label, value))
+
+    def find(*labels: str) -> str:
+        wanted = {label.casefold() for label in labels}
+        for label, value in pairs:
+            if label.casefold() in wanted:
+                return value
+        body_text = _txt(t.css_first(".stats-rows") or t.body or t.root)
+        for label in labels:
+            match = re.search(
+                rf"{re.escape(label)}\s*(?:\||:)?\s*(-?\d+(?:\.\d+)?%?)",
+                body_text,
+                re.I,
+            )
+            if match:
+                return match.group(1)
+        return ""
+
+    return {
+        "kd": _float_text(find("K/D Ratio", "KD Ratio")),
+        "kills": _int_text(find("Total kills", "Kills")),
+        "deaths": _int_text(find("Total deaths", "Deaths")),
+        "maps": _int_text(find("Maps played", "Total maps")),
+    }
+
+
+def _profile_stat_node(t: HTMLParser, label: str) -> Optional[Node]:
+    wanted = label.casefold()
+    for node in t.css(".profile-team-stat"):
+        node_label = _txt(node.css_first("b"))
+        if node_label.casefold() == wanted:
+            return node
+    for node in t.css(".profile-team-stat"):
+        if wanted in _txt(node).casefold():
+            return node
+    return None
+
+
+def parse_team_profile(team_html: Html, team_id: str = "") -> TeamProfile:
+    """解析 `/team/{id}`:世界/VRS 排名、现役阵容、教练和近期战绩。"""
+    t = tree(team_html)
+    name = _txt(t.css_first(".profile-team-name"))
+    country = _txt(t.css_first(".team-country"))
+    logo_img = t.css_first(".profile-team-logo-container img")
+    logo = None
+    if logo_img:
+        logo = logo_img.attributes.get("data-cookieblock-src") or logo_img.attributes.get("src")
+
+    world_rank = None
+    regional_rank = None
+    region = ""
+    world_stat = _profile_stat_node(t, "World ranking")
+    if world_stat:
+        world_text = _txt(world_stat.css_first(".right"))
+        nums = [int(x) for x in re.findall(r"#(\d+)", world_text)]
+        if nums:
+            world_rank = nums[0]
+        if len(nums) > 1:
+            regional_rank = nums[1]
+        regional = world_stat.css_first(".regional-rank")
+        if regional:
+            match = re.search(
+                r"in\s+([A-Za-z ]+?)(?:\s+on\b|$)",
+                regional.attributes.get("title", "") or "",
+            )
+            region = match.group(1).strip() if match else ""
+
+    vrs_rank = None
+    vrs_regional_rank = None
+    vrs_region = ""
+    vrs_stat = _profile_stat_node(t, "Valve ranking")
+    if vrs_stat:
+        right = vrs_stat.css_first(".right")
+        right_text = _txt(right)
+        nums = [int(x) for x in re.findall(r"#(\d+)", right_text)]
+        if nums:
+            vrs_rank = nums[0]
+        if len(nums) > 1:
+            vrs_regional_rank = nums[1]
+        regional = vrs_stat.css_first(".regional-rank")
+        if regional:
+            vrs_region = _txt(regional.css_first(".region-eu")) or _txt(regional).replace(
+                "#", ""
+            ).strip()
+            title = regional.attributes.get("title", "") or ""
+            match = re.search(r"in\s+([A-Za-z ]+?)(?:\s+on\b|$)", title)
+            if match:
+                vrs_region = match.group(1).strip()
+
+    average_age = None
+    age_stat = _profile_stat_node(t, "Average player age")
+    if age_stat:
+        average_age = _float_text(_txt(age_stat.css_first(".right")))
+
+    coach = ""
+    coach_stat = _profile_stat_node(t, "Coach")
+    if coach_stat:
+        coach_link = coach_stat.css_first("a[href*='/coach/']")
+        coach = _txt(coach_link)
+
+    roster: list[TeamRosterPlayer] = []
+    for first_cell in t.css(".playersBox-first-cell"):
+        link = first_cell.css_first("a[href*='/player/']")
+        if not link:
+            continue
+        match = re.search(r"/player/(\d+)/", link.attributes.get("href", "") or "")
+        if not match:
+            continue
+        nick = _txt(first_cell)
+        if not nick:
+            continue
+        row = first_cell.parent
+        status = _txt(row.css_first(".status-cell")) if row else ""
+        rating = _float_text(_txt(row.css_first(".rating-cell"))) if row else None
+        roster.append(
+            TeamRosterPlayer(match.group(1), nick, status=status, rating=rating)
+        )
+
+    recent_results: list[RecentMatch] = []
+    tables = t.css(".match-table")
+    if tables:
+        current_event = ""
+        for row in tables[-1].css("tr"):
+            classes = row.attributes.get("class", "") or ""
+            if "event-header-cell" in classes:
+                current_event = _txt(row)
+                continue
+            if "team-row" not in classes:
+                continue
+            links = row.css("a[href*='/team/']")
+            teams: list[tuple[str, str]] = []
+            seen_ids: set[str] = set()
+            for link in links:
+                href = link.attributes.get("href", "") or ""
+                match = re.search(r"/team/(\d+)/", href)
+                nick = _txt(link)
+                if not match or not nick or match.group(1) in seen_ids:
+                    continue
+                seen_ids.add(match.group(1))
+                teams.append((match.group(1), nick))
+            if len(teams) < 2:
+                continue
+            center = _txt(row.css_first(".team-center-cell"))
+            score = re.search(r"(\d+)\s*:\s*(\d+)", center)
+            if not score:
+                continue
+            first_id = teams[0][0]
+            ours = first_id == str(team_id)
+            our_score, their_score = (
+                int(score.group(1)),
+                int(score.group(2)),
+            ) if ours else (
+                int(score.group(2)),
+                int(score.group(1)),
+            )
+            opponent = teams[1][1] if ours else teams[0][1]
+            result = "win" if our_score > their_score else "loss" if our_score < their_score else "draw"
+            match_link = row.css_first(".matchpage-button-cell a") or row.css_first(
+                ".stats-button-cell a"
+            )
+            recent_results.append(
+                RecentMatch(
+                    opponent=opponent,
+                    score=f"{int(score.group(1))} : {int(score.group(2))}",
+                    result=result,
+                    event=current_event,
+                    date=_txt(row.css_first(".date-cell")),
+                    url=(match_link.attributes.get("href", "") or "").strip() if match_link else "",
+                )
+            )
+            if len(recent_results) >= 5:
+                break
+
+    matches_text = _txt(t.css_first("#matchesBox"))
+    win_rate = ""
+    win_streak = ""
+    if match := re.search(r"(\d+)\s*Current win streak", matches_text, re.I):
+        win_streak = match.group(1)
+    if match := re.search(r"(\d+(?:\.\d+)?%)\s*Win rate", matches_text, re.I):
+        win_rate = match.group(1)
+
+    return TeamProfile(
+        team_id=str(team_id or ""),
+        name=name,
+        country=country,
+        logo=logo,
+        world_rank=world_rank,
+        regional_rank=regional_rank,
+        region=region,
+        vrs_rank=vrs_rank,
+        vrs_regional_rank=vrs_regional_rank,
+        vrs_region=vrs_region,
+        average_age=average_age,
+        coach=coach,
+        win_rate=win_rate,
+        win_streak=win_streak,
+        roster=roster,
+        recent_results=recent_results,
+    )

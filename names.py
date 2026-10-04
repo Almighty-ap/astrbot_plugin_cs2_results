@@ -225,6 +225,13 @@ async def resolve_team(fetcher, query: str) -> TeamResolution:
     teams = _dedup_teams(teams)
     if not teams:
         return TeamResolution("none")
+    alias = _TEAM_ALIASES.get(cf(q))
+    if alias:
+        alias_hits = [t for t in teams if nick_matches(alias, t.name)]
+        if len(alias_hits) == 1:
+            return TeamResolution("ok", team=alias_hits[0])
+        if len(alias_hits) > 1:
+            return TeamResolution("ambiguous", candidates=alias_hits[:8])
     strong = [t for t in teams if nick_matches(q, t.name)]
     if len(strong) > 1:
         strong = _tiebreak_exact(q, strong, lambda t: t.name)
