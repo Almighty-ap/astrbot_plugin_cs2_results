@@ -1741,8 +1741,16 @@ async def _handle_player_detail(name: str) -> None:
             profile.deaths = stats["deaths"]  # type: ignore[assignment]
         if stats["maps"] is not None:
             profile.maps = stats["maps"]  # type: ignore[assignment]
+    avatar_bytes = None
+    if profile.avatar:
+        try:
+            avatar_bytes = await fetcher.fetch_impersonated_bytes(
+                profile.avatar, priority="user"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[cs2] 选手定妆照抓取失败 %s: %s", profile.avatar, exc)
     try:
-        png = await card.render_player_profile_card(profile, _now())
+        png = await card.render_player_profile_card(profile, _now(), avatar_bytes)
     except Exception as exc:  # noqa: BLE001
         logger.exception("[cs2] 选手详情卡渲染失败: %s", exc)
         await cs2.finish("选手详情卡渲染失败,请稍后再试")

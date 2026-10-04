@@ -120,12 +120,16 @@ def test_player_profile_card_contains_stats_roles_and_major_history() -> None:
         role_stats=[("Firepower", 85), ("Sniping", 89)],
         major_wins=1,
         major_mvps=1,
+        top20_text="#1 ('21), #2 ('22), #3 ('23)",
         recent_matches=[
-            RecentMatch("Sashi", "13 : 11", "win", "ROG JOURNEY", rating=1.31)
+            RecentMatch("Sashi", "13 : 11", "win", "ROG JOURNEY", rating=1.31),
+            RecentMatch("BBL", "1 : 2", "loss", "ROG JOURNEY"),
         ],
     )
 
-    html = render.build_player_profile_html(profile, "2026-10-05 12:00")
+    html = render.build_player_profile_html(
+        profile, "2026-10-05 12:00", b"\x89PNG\r\n\x1a\navatar"
+    )
 
     assert "s1mple" in html
     assert "1.22" in html
@@ -134,6 +138,10 @@ def test_player_profile_card_contains_stats_roles_and_major_history() -> None:
     assert "Firepower" in html
     assert "1 次 Major 冠军" in html
     assert "Sashi" in html
+    assert "13 : 11" in html
+    assert "1.31" in html
+    assert html.count("Top 20") == 3
+    assert "data:image/png;base64" in html
 
 
 def test_team_profile_card_contains_rankings_roster_and_results() -> None:
@@ -158,3 +166,5 @@ def test_team_profile_card_contains_rankings_roster_and_results() -> None:
     assert "#20" in html
     assert "b1t" in html
     assert "Vitality" in html
+    assert "1 : 2" in html
+    assert "最近 5 场 · 比分" in html

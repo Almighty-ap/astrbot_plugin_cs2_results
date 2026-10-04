@@ -2185,6 +2185,20 @@ def _image_data_uri(data: Optional[bytes]) -> str:
     return f"data:{mime};base64,{base64.b64encode(data).decode()}"
 
 
+def _player_photo(data: Optional[bytes], text: str, width: int = 84, height: int = 104) -> str:
+    """选手定妆照:优先内嵌图片,缺失时回退首字母圆徽。"""
+    uri = _image_data_uri(data)
+    if uri:
+        return (
+            f'<div style="width:{width}px;height:{height}px;flex:none;background:{DARK};'
+            f'border-radius:18px;overflow:hidden;display:flex;align-items:flex-end;'
+            f'justify-content:center;">'
+            f'<img src="{uri}" style="display:block;width:100%;height:100%;'
+            f'object-fit:contain;object-position:center bottom;" alt=""></div>'
+        )
+    return _circle(text, width, DARK, CARD)
+
+
 def build_news_html(
     *,
     category: str,
@@ -2301,10 +2315,13 @@ def _profile_recent_rows(items: list, *, show_rating: bool = False) -> str:
     for item in items:
         detail = " · ".join(x for x in (item.date, item.event) if x)
         rating = ""
-        if show_rating and item.rating is not None:
+        if show_rating:
+            rating_value = f"{item.rating:.2f}" if item.rating is not None else "—"
+            rating_color = _rating_color(item.rating) if item.rating is not None else MUTE
             rating = (
-                f'<span style="width:70px;text-align:right;font-weight:800;'
-                f'color:{_rating_color(item.rating)};">{item.rating:.2f}</span>'
+                f'<div style="width:70px;flex:none;text-align:right;font-size:16px;'
+                f'font-weight:800;color:{rating_color};white-space:nowrap;">'
+                f"{rating_value}</div>"
             )
         rows.append(
             f'<div style="display:flex;align-items:center;gap:18px;padding:14px 4px;'
@@ -2317,14 +2334,16 @@ def _profile_recent_rows(items: list, *, show_rating: bool = False) -> str:
             f'<div style="flex:1;min-width:0;font-size:14px;color:{MUTE};'
             f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
             f"{_esc(detail)}</div>"
-            f'<div style="width:86px;text-align:right;font-size:16px;font-weight:800;'
+            f'<div style="width:74px;flex:none;text-align:right;font-size:16px;font-weight:800;'
             f'color:{ROW};white-space:nowrap;">{_esc(item.score or "—")}</div>'
             f"{rating}</div>"
         )
     return "".join(rows)
 
 
-def build_player_profile_html(profile: PlayerProfile, when_text: str) -> str:
+def build_player_profile_html(
+    profile: PlayerProfile, when_text: str, avatar_bytes: Optional[bytes] = None
+) -> str:
     """Build the warm player detail card with recent rating, K/D and achievements."""
     identity = " · ".join(x for x in (profile.realname, profile.country, profile.age_text) if x)
     team = profile.team or "无现役战队"
@@ -2334,6 +2353,7 @@ def build_player_profile_html(profile: PlayerProfile, when_text: str) -> str:
     stat_period = profile.stats_period or "近期统计"
     kd_period = profile.kd_scope or "近期统计"
     major_text = f"{profile.major_wins} 冠 / {profile.major_mvps} MVP"
+    avatar_html = _player_photo(avatar_bytes, profile.nick)
     role_bars = "".join(
         f'<div style="display:flex;align-items:center;gap:13px;margin-top:12px;">'
         f'<div style="width:88px;flex:none;font-size:14px;font-weight:700;color:{ROW};">'
@@ -2361,13 +2381,13 @@ def build_player_profile_html(profile: PlayerProfile, when_text: str) -> str:
         achievement_chips.append(f"{profile.major_wins} 次 Major 冠军")
     if profile.major_mvps:
         achievement_chips.append(f"{profile.major_mvps} 次 Major MVP")
-    if profile.top20_text:
-        achievement_chips.append(f"Top 20 {profile.top20_text}")
+    top20_items = [item.strip() for item in re.split(r",\s*", profile.top20_text) if item.strip()]
+    achievement_chips.extend(f"Top 20 {item}" for item in top20_items)
     if profile.prize_money:
         achievement_chips.append(f"奖金 {profile.prize_money}")
     achievements = "".join(
         f'<span style="display:inline-flex;align-items:center;background:{ACCENT_BG};'
-        f'border:1px solid rgba(196,112,78,0.22);border-radius:999px;padding:7px 13px;'
+        f'border:1px solid rgba(196,112,78,0.22);border-radius:12px;padding:7px 13px;'
         f'font-size:14px;font-weight:700;color:{ACCENT_D};margin-right:8px;margin-top:8px;">'
         f"{_esc(item)}</span>"
         for item in achievement_chips
@@ -2378,7 +2398,7 @@ def build_player_profile_html(profile: PlayerProfile, when_text: str) -> str:
     )
     body = f"""
   <div style="display:flex;align-items:center;gap:20px;">
-   {_badge(None, profile.nick, 74, DARK, CARD)}
+   {avatar_html}
    <div style="flex:1;min-width:0;">
     <div style="font-size:34px;font-weight:800;color:{INK};line-height:1.08;
          white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{_esc(profile.nick)}</div>
@@ -2412,7 +2432,7 @@ def build_player_profile_html(profile: PlayerProfile, when_text: str) -> str:
   <div style="margin-top:28px;border-top:1px solid {LINE};padding-top:18px;">
    <div style="display:flex;align-items:baseline;justify-content:space-between;">
     <div style="font-size:18px;font-weight:800;color:{INK};">近期比赛</div>
-    <div style="font-size:13px;color:{MUTE};">最近 5 场 · Rating 单场</div>
+    <div style="font-size:13px;color:{MUTE};">最近 5 场 · 比分 / Rating</div>
    </div>
    {_profile_recent_rows(profile.recent_matches, show_rating=True)}
   </div>
@@ -2424,8 +2444,10 @@ def build_player_profile_html(profile: PlayerProfile, when_text: str) -> str:
     return _shell(body, "42px 48px 38px")
 
 
-async def render_player_profile_card(profile: PlayerProfile, when_text: str) -> bytes:
-    return await _render_png(build_player_profile_html(profile, when_text))
+async def render_player_profile_card(
+    profile: PlayerProfile, when_text: str, avatar_bytes: Optional[bytes] = None
+) -> bytes:
+    return await _render_png(build_player_profile_html(profile, when_text, avatar_bytes))
 
 
 def build_team_profile_html(profile: TeamProfile, when_text: str) -> str:
@@ -2508,7 +2530,7 @@ def build_team_profile_html(profile: TeamProfile, when_text: str) -> str:
    <div style="display:flex;align-items:baseline;justify-content:space-between;">
     <div style="font-size:18px;font-weight:800;color:{INK};">近期战绩</div>
     <div style="font-size:13px;color:{MUTE};">
-     最近 5 场 · 当前连胜 {_esc(profile.win_streak or "0")}
+     最近 5 场 · 比分 · 当前连胜 {_esc(profile.win_streak or "0")}
     </div>
    </div>
    {_profile_recent_rows(profile.recent_results)}

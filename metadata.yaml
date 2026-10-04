@@ -3,7 +3,7 @@ display_name: "CS2 战报推送"
 author: "Almighty"
 desc: "HLTV CS2 赛事战报、RSS 资讯与 LLM 工具查询:支持赛程、选手/战队详情、订阅、比分和卡片渲染"
 short_desc: "HLTV CS2 赛事战报、选手/战队详情与 RSS 资讯订阅"
-version: "1.5.0"
+version: "1.5.1"
 astrbot_version: ">=4.25.3,<5"
 support_platforms:
   - aiocqhttp
