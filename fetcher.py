@@ -20,6 +20,7 @@ import html as html_lib
 import os
 import re
 import shutil
+import socket
 import subprocess
 import time
 from contextlib import asynccontextmanager
@@ -577,9 +578,15 @@ class Fetcher:
             )
         for number in range(99, 120):
             display = f":{number}"
-            socket = Path(f"/tmp/.X11-unix/X{number}")
-            if socket.exists():
-                continue
+            socket_path = Path(f"/tmp/.X11-unix/X{number}")
+            if socket_path.exists():
+                if self._display_socket_alive(socket_path):
+                    continue
+                try:
+                    socket_path.unlink()
+                except OSError as exc:
+                    logger.warning(f"[cs2] 无法清理陈旧 Xvfb socket {socket_path}: {exc}")
+                    continue
             proc = subprocess.Popen(
                 [
                     binary,
@@ -598,13 +605,26 @@ class Fetcher:
             for _ in range(30):
                 if proc.poll() is not None:
                     raise RuntimeError(f"Xvfb 启动失败,DISPLAY={display}")
-                if socket.exists():
+                if socket_path.exists():
                     self._xvfb_proc = proc
                     logger.info(f"[cs2] 已为有头 Chromium 启动 Xvfb {display}")
                     return display
                 time.sleep(0.1)
             proc.terminate()
         raise RuntimeError("找不到可用的 Xvfb DISPLAY")
+
+    @staticmethod
+    def _display_socket_alive(socket_path: Path) -> bool:
+        """Return whether an X11 socket still accepts connections."""
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.settimeout(0.2)
+            probe.connect(str(socket_path))
+            return True
+        except OSError:
+            return False
+        finally:
+            probe.close()
 
     def _track_task(self, coro, *, name: str) -> asyncio.Task[None] | None:
         if self._closing:
