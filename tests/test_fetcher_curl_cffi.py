@@ -150,9 +150,13 @@ def test_proxy_prefers_plugin_config_then_environment(
     assert from_env._curl_cffi_proxy() == "http://env-proxy:8080"
 
 
-def test_playwright_context_uses_same_proxy() -> None:
+def test_playwright_context_uses_same_proxy_and_is_reused() -> None:
     class _Browser:
+        def __init__(self) -> None:
+            self.calls = 0
+
         async def new_context(self, **kwargs: object) -> dict[str, object]:
+            self.calls += 1
             return kwargs
 
     fetcher = Fetcher(
@@ -161,11 +165,86 @@ def test_playwright_context_uses_same_proxy() -> None:
             cs2_proxy_url="http://mihomo:7890",
         )
     )
-    fetcher._browser = _Browser()
+    browser = _Browser()
+    fetcher._browser = browser
 
-    context = asyncio.run(fetcher._new_context())
+    async def run() -> tuple[dict[str, object], dict[str, object]]:
+        return await fetcher._new_context(), await fetcher._new_context()
 
-    assert context["proxy"] == {"server": "http://mihomo:7890"}
+    first, second = asyncio.run(run())
+
+    assert first is second
+    assert browser.calls == 1
+    assert first["proxy"] == {"server": "http://mihomo:7890"}
+
+
+def test_page_fetch_closes_page_but_keeps_shared_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Page:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def route(self, *_args: object) -> None:
+            return None
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class _Context:
+        def __init__(self) -> None:
+            self.page = _Page()
+            self.new_page_calls = 0
+
+        async def new_page(self) -> _Page:
+            self.new_page_calls += 1
+            return self.page
+
+    fetcher = Fetcher(Config(cs2_use_curl_cffi=False, cs2_request_min_gap=0))
+    context = _Context()
+    fetcher.start = AsyncMock()
+    fetcher._new_context = AsyncMock(return_value=context)
+    fetcher._navigate_html = AsyncMock(
+        return_value="<html><title>Matches | HLTV.org</title></html>"
+    )
+    monkeypatch.setattr(store, "cache_set_mem", lambda *_args: None)
+    monkeypatch.setattr(store, "cache_write_disk", lambda *_args: None)
+
+    async def run() -> str | None:
+        return await fetcher._fetch("https://www.hltv.org/matches", ".match", "user")
+
+    html = asyncio.run(run())
+
+    assert "Matches | HLTV.org" in (html or "")
+    assert context.new_page_calls == 1
+    assert context.page.closed is True
+    fetcher._new_context.assert_awaited_once()
+
+
+def test_shutdown_closes_persistent_context() -> None:
+    class _Closable:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def stop(self) -> None:
+            self.closed = True
+
+    fetcher = Fetcher(Config(cs2_request_min_gap=0))
+    context = _Closable()
+    browser = _Closable()
+    playwright = _Closable()
+    fetcher._context = context
+    fetcher._browser = browser
+    fetcher._pw = playwright
+
+    asyncio.run(fetcher.shutdown())
+
+    assert context.closed is True
+    assert browser.closed is True
+    assert playwright.closed is True
 
 
 def test_logo_fetch_does_not_start_browser_when_curl_succeeds(

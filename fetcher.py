@@ -195,6 +195,7 @@ class Fetcher:
         self.cfg = cfg
         self._pw = None
         self._browser = None
+        self._context = None
         self._xvfb_proc: subprocess.Popen[bytes] | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._gate = _FairPriorityGate(cfg.cs2_request_min_gap)
@@ -530,6 +531,7 @@ class Fetcher:
         """Start Chromium once; concurrent callers share the same launch."""
         async with self._lifecycle_lock:
             if self._browser:
+                await self._ensure_context_locked()
                 return
             if self._closing:
                 raise RuntimeError("fetcher is shutting down")
@@ -561,8 +563,20 @@ class Fetcher:
                 await pw.stop()
                 raise
 
+            try:
+                context = await self._build_context(browser)
+            except asyncio.CancelledError:
+                await browser.close()
+                await pw.stop()
+                raise
+            except Exception:
+                await browser.close()
+                await pw.stop()
+                raise
+
             self._pw = pw
             self._browser = browser
+            self._context = context
             logger.info(
                 f"[cs2] Chromium 抓取浏览器已启动"
                 f"({'有头/屏幕外' if self.cfg.cs2_headful else '无头'})"
@@ -649,19 +663,23 @@ class Fetcher:
             # Browser cleanup still runs if the shutdown coroutine itself is
             # cancelled while it is waiting for its children.
             async with self._lifecycle_lock:
-                browser, pw = self._browser, self._pw
-                self._browser = self._pw = None
+                context, browser, pw = self._context, self._browser, self._pw
+                self._context = self._browser = self._pw = None
                 try:
-                    if browser:
-                        await browser.close()
-                except Exception as exc:  # cleanup failure is useful but non-fatal
-                    logger.warning(f"[cs2] Chromium 关闭失败: {exc}")
+                    if context:
+                        await self._close_context(context)
                 finally:
-                    if pw:
-                        try:
-                            await pw.stop()
-                        except Exception as exc:
-                            logger.warning(f"[cs2] Playwright 关闭失败: {exc}")
+                    try:
+                        if browser:
+                            await browser.close()
+                    except Exception as exc:  # cleanup failure is useful but non-fatal
+                        logger.warning(f"[cs2] Chromium 关闭失败: {exc}")
+                    finally:
+                        if pw:
+                            try:
+                                await pw.stop()
+                            except Exception as exc:
+                                logger.warning(f"[cs2] Playwright 关闭失败: {exc}")
                 xvfb = self._xvfb_proc
                 self._xvfb_proc = None
                 if xvfb and xvfb.poll() is None:
@@ -676,10 +694,7 @@ class Fetcher:
         async with self._gate.slot(priority):
             yield
 
-    async def _new_context(self):
-        browser = self._browser
-        if browser is None:
-            raise RuntimeError("fetcher browser is not started")
+    async def _build_context(self, browser):
         proxy_url = self._curl_cffi_proxy()
         return await browser.new_context(
             user_agent=UA,
@@ -687,6 +702,21 @@ class Fetcher:
             viewport={"width": 1366, "height": 900},
             proxy={"server": proxy_url} if proxy_url else None,
         )
+
+    async def _ensure_context_locked(self):
+        if self._context is None:
+            browser = self._browser
+            if browser is None:
+                raise RuntimeError("fetcher browser is not started")
+            self._context = await self._build_context(browser)
+        return self._context
+
+    async def _new_context(self):
+        """Return the shared context so Cloudflare cookies survive fetches."""
+        async with self._lifecycle_lock:
+            if self._closing:
+                raise RuntimeError("fetcher is shutting down")
+            return await self._ensure_context_locked()
 
     @staticmethod
     async def _close_context(ctx) -> None:
@@ -698,6 +728,15 @@ class Fetcher:
             # Do not let a best-effort browser cleanup error replace the real
             # navigation exception (especially an in-flight cancellation).
             logger.warning(f"[cs2] 浏览器 context 关闭失败: {exc}")
+
+    @staticmethod
+    async def _close_page(page) -> None:
+        try:
+            await page.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"[cs2] 浏览器页面关闭失败: {exc}")
 
     @staticmethod
     def _is_challenge(title: str) -> bool:
@@ -907,6 +946,7 @@ class Fetcher:
 
         await self.start()
         ctx = await self._new_context()
+        page = None
         try:
             page = await ctx.new_page()
             await self._guard_top_level_navigation(page, _PAGE_HOSTS)
@@ -915,7 +955,8 @@ class Fetcher:
                 await self._cache_html(url, html)
             return html
         finally:
-            await self._close_context(ctx)
+            if page is not None:
+                await self._close_page(page)
 
     @staticmethod
     async def _cache_html(url: str, html: str) -> None:
@@ -954,6 +995,7 @@ class Fetcher:
 
         await self.start()
         ctx = await self._new_context()
+        page = None
         try:
             page = await ctx.new_page()
             await self._guard_top_level_navigation(page, _PAGE_HOSTS)
@@ -976,7 +1018,8 @@ class Fetcher:
             logger.warning(f"[cs2] 搜索异常 term={term!r}: {exc}")
             return None
         finally:
-            await self._close_context(ctx)
+            if page is not None:
+                await self._close_page(page)
 
     def spawn_logos(
         self,
@@ -1118,8 +1161,10 @@ class Fetcher:
         await self.start()
         out_lock = asyncio.Lock()
         ctx = await self._new_context()
+        pages = []
         try:
             page = await ctx.new_page()
+            pages.append(page)
             await self._guard_top_level_navigation(page, _ASSET_HOSTS)
             warm_html = await self._navigate_html(
                 page,
@@ -1196,12 +1241,12 @@ class Fetcher:
                     await _one(logo_page, url)
 
             # 预热页那个 page 直接复用(它已落地 CF),再按并发上限补几个。
-            pages = [page]
             for _ in range(min(self._LOGO_FETCH_CONCURRENCY, len(unique_urls)) - 1):
                 extra = await ctx.new_page()
-                await self._guard_top_level_navigation(extra, _ASSET_HOSTS)
                 pages.append(extra)
+                await self._guard_top_level_navigation(extra, _ASSET_HOSTS)
             await asyncio.gather(*(_worker(p) for p in pages))
             return out
         finally:
-            await self._close_context(ctx)
+            for page in pages:
+                await self._close_page(page)
