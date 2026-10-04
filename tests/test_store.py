@@ -68,7 +68,7 @@ def _create_future_database(data_dir: Path) -> None:
         conn.executescript(
             """
             CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            INSERT INTO metadata VALUES ('schema_version', '6');
+            INSERT INTO metadata VALUES ('schema_version', '7');
             """
         )
 
@@ -134,7 +134,7 @@ def test_legacy_subscription_migration_is_idempotent(
 ) -> None:
     store = store_factory([1001, 1002, 1002])
 
-    assert store.schema_version() == 5
+    assert store.schema_version() == 6
     assert store.get_subscriptions() == {1001, 1002}
     assert store.subscription_count() == 2
 
@@ -149,7 +149,7 @@ def test_schema_v1_migrates_to_v2_without_losing_state(
 ) -> None:
     store = store_factory([], _create_v1_database)
 
-    assert store.schema_version() == 5
+    assert store.schema_version() == 6
     assert store.get_subscriptions() == {4242}
     delivery = store.get_delivery("legacy-match", "legacy-map", 4242)
     assert delivery.status == "retry"
@@ -161,12 +161,13 @@ def test_schema_v1_migrates_to_v2_without_losing_state(
     assert batch.created_at == 10
     assert batch.updated_at == 10
     assert batch.payload_path is None
+    assert batch.payload_kind == "image"
 
 
 def test_future_schema_is_rejected_without_downgrade(
     store_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
-    with pytest.raises(RuntimeError, match="状态库版本为 6"):
+    with pytest.raises(RuntimeError, match="状态库版本为 7"):
         store_factory([], _create_future_database)
 
     databases = list(tmp_path.glob("case-*/plugin/data/state.sqlite3"))
@@ -175,7 +176,7 @@ def test_future_schema_is_rejected_without_downgrade(
         version = conn.execute(
             "SELECT value FROM metadata WHERE key = 'schema_version'"
         ).fetchone()[0]
-    assert version == "6"
+    assert version == "7"
 
 
 def test_config_seed_once_does_not_resurrect_unsubscribed_group(
@@ -254,6 +255,93 @@ def test_outbox_freezes_recipients_and_tracks_retry_to_dead(
     assert store.mark_delivery_sent("match-2", "map-1", 2001).status == "sent"
     assert store.delivery_complete("match-2", "map-1") is True
     assert store.delivery_all_sent("match-2", "map-1") is True
+
+
+def test_news_outbox_freezes_recipients_and_tracks_retry_to_dead(
+    store_factory: Callable[..., Any],
+) -> None:
+    store = store_factory([])
+    group_umo = "napcat:GroupMessage:1001"
+    private_umo = "napcat:FriendMessage:2002"
+
+    prepared = store.prepare_news_deliveries(
+        "news-1",
+        [group_umo, private_umo],
+        mentions={group_umo: [7, 42]},
+    )
+    assert [delivery.unified_msg_origin for delivery in prepared] == [
+        private_umo,
+        group_umo,
+    ]
+    assert prepared[1].group_id == 1001
+    assert prepared[1].mentions == (7, 42)
+
+    frozen = store.prepare_news_deliveries(
+        "news-1",
+        ["napcat:GroupMessage:9999"],
+    )
+    assert {delivery.unified_msg_origin for delivery in frozen} == {
+        private_umo,
+        group_umo,
+    }
+
+    batch = store.set_news_delivery_payload("news-1", b"png payload", kind="image")
+    assert batch.payload_kind == "image"
+    assert store.get_news_delivery_payload("news-1") == b"png payload"
+    assert store.get_news_delivery_payload_kind("news-1") == "image"
+
+    claimed = store.claim_due_news_deliveries("news-worker", 300, now=100, limit=10)
+    assert len(claimed) == 2
+    assert {delivery.claim_owner for delivery in claimed} == {"news-worker"}
+
+    sent = store.mark_news_delivery_sent(
+        "news-1",
+        private_umo,
+        worker_id="news-worker",
+    )
+    assert sent.status == "sent"
+    assert sent.attempts == 1
+
+    retry = store.mark_news_delivery_failed(
+        "news-1",
+        group_umo,
+        "timeout",
+        next_retry_at=200,
+        worker_id="news-worker",
+    )
+    assert retry.status == "retry"
+    assert retry.attempts == 1
+    assert retry.mentions == (7, 42)
+
+    dead = store.mark_news_delivery_failed(
+        "news-1",
+        group_umo,
+        "timeout again",
+        max_attempts=2,
+    )
+    assert dead.status == "dead"
+    assert dead.attempts == 2
+
+    overview = store.outbox_overview(now=250)
+    assert overview["news_sent"] == 1
+    assert overview["news_dead"] == 1
+    assert overview["news_due"] == 0
+
+
+def test_news_unsubscribe_cancels_pending_deliveries(
+    store_factory: Callable[..., Any],
+) -> None:
+    store = store_factory([])
+    umo = "napcat:GroupMessage:1010"
+    assert store.news_subscribe(umo) is True
+    store.prepare_news_deliveries("news-cancel", [umo])
+    store.set_news_delivery_payload("news-cancel", b"text payload", kind="text")
+    claimed = store.claim_due_news_deliveries("news-cancel-worker", 300)
+    assert len(claimed) == 1
+
+    assert store.news_unsubscribe(umo) is True
+    assert store.claim_due_news_deliveries("other-worker", 300) == []
+    assert store.outbox_overview()["news_cancelled"] == 1
 
 
 def test_empty_recipient_batch_remains_frozen_and_complete(

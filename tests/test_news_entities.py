@@ -118,3 +118,47 @@ def test_news_push_builds_per_group_at_then_image(monkeypatch) -> None:
     _, chain = context.chains[0]
     assert [component.qq for component in chain.chain[:-1]] == [7, 42]
     assert chain.chain[-1].__class__.__name__ == "Image"
+
+
+def test_news_enqueue_persists_payload_before_marking_seen(monkeypatch) -> None:
+    events: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        store,
+        "prepare_news_deliveries",
+        lambda guid, subscribers, mentions=None: events.append(
+            ("prepare", (guid, tuple(subscribers), mentions))
+        ),
+    )
+    monkeypatch.setattr(store, "get_news_delivery_payload", lambda _guid: None)
+    monkeypatch.setattr(
+        store,
+        "set_news_delivery_payload",
+        lambda guid, payload, *, kind: events.append(
+            ("payload", (guid, payload, kind))
+        ),
+    )
+    monkeypatch.setattr(
+        store,
+        "news_mark_seen",
+        lambda guids, **_kwargs: events.append(("seen", tuple(guids))),
+    )
+    monkeypatch.setattr(store, "news_seen_guids", lambda: [])
+    monkeypatch.setattr(store, "news_initialized", lambda: True)
+    monkeypatch.setattr(store, "news_subscribers", lambda: ["napcat:GroupMessage:1001"])
+
+    cfg = Config(cs2_news_max_push_per_poll=10)
+    service = news.NewsService(cfg, fetcher=None, context=None)  # type: ignore[arg-type]
+    item = news.NewsItem(
+        guid="g-enqueue",
+        title="Vitality win",
+        description="",
+        link="",
+        image_url="",
+    )
+    service.fetch_items = AsyncMock(return_value=[item])  # type: ignore[method-assign]
+    service.render_item = AsyncMock(return_value=b"png")  # type: ignore[method-assign]
+
+    asyncio.run(service.check_once())
+
+    assert [event[0] for event in events] == ["prepare", "payload", "seen"]
+    assert events[1][1][2] == "image"

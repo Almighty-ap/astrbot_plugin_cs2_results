@@ -86,6 +86,7 @@ apt-get install -y xvfb
 - 默认订阅 HLTV 官方 RSS:`https://www.hltv.org/rss/news`。
 - 首次运行只记录现有新闻 GUID,不补推历史消息,避免刷屏。
 - 后续轮询只推送新增新闻,并按 GUID 持久化去重。
+- 自动推送先持久化到 outbox,发送失败会按现有退避策略重试,避免单次超时丢新闻。
 - 可调用 AstrBot 已配置的 LLM,将英文标题和摘要翻译总结成中文。
 - 新闻卡片使用与战报、赛程相同的暖米色设计,支持 RSS 封面图。
 - RSS 和封面图复用插件当前的 `curl_cffi` 指纹回退链与 mihomo 代理。

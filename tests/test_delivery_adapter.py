@@ -69,6 +69,88 @@ class _FakeStore:
         return True
 
 
+class _FakeNewsStore:
+    def __init__(self) -> None:
+        self.claimed = False
+        self.sent: list[tuple[str, str]] = []
+        self.failed: list[tuple[str, str, int | None, str]] = []
+        self.deferred: list[tuple[str, str]] = []
+        self.cancelled: list[str] = []
+
+    def claim_due_deliveries(
+        self, _worker_id: str, *, lease_seconds: int, limit: int
+    ) -> list[SimpleNamespace]:
+        return []
+
+    def claim_due_news_deliveries(
+        self, _worker_id: str, *, lease_seconds: int, limit: int
+    ) -> list[SimpleNamespace]:
+        if self.claimed:
+            return []
+        self.claimed = True
+        return [
+            SimpleNamespace(
+                guid="news-1",
+                unified_msg_origin="napcat:FriendMessage:2002",
+                group_id=0,
+                attempts=0,
+                created_at=time.time(),
+                mentions=(123,),
+            )
+        ]
+
+    def news_subscribers(self) -> set[str]:
+        return {"napcat:FriendMessage:2002"}
+
+    def get_news_delivery_payload(self, _guid: str) -> bytes:
+        return "news text".encode()
+
+    def get_news_delivery_payload_kind(self, _guid: str) -> str:
+        return "text"
+
+    def mark_news_delivery_sent(
+        self, guid: str, unified_msg_origin: str, *, worker_id: str
+    ) -> object:
+        self.sent.append((guid, unified_msg_origin))
+        return object()
+
+    def mark_news_delivery_failed(
+        self,
+        guid: str,
+        unified_msg_origin: str,
+        _error: str,
+        *,
+        next_retry_at: float | None = None,
+        dead: bool = False,
+        max_attempts: int | None = None,
+        worker_id: str,
+    ) -> object:
+        self.failed.append((guid, unified_msg_origin, next_retry_at, worker_id))
+        return SimpleNamespace(status="dead" if dead else "retry")
+
+    def defer_news_delivery(
+        self,
+        guid: str,
+        unified_msg_origin: str,
+        _retry_at: float,
+        _error: str,
+        *,
+        worker_id: str,
+    ) -> object:
+        self.deferred.append((guid, unified_msg_origin))
+        return object()
+
+    def cancel_news_deliveries_for_umo(
+        self, unified_msg_origin: str, *, reason: str = ""
+    ) -> int:
+        self.cancelled.append(unified_msg_origin)
+        return 1
+
+    def news_unsubscribe(self, unified_msg_origin: str) -> bool:
+        self.cancelled.append(unified_msg_origin)
+        return True
+
+
 def test_successful_active_delivery_uses_umo_and_mentions(
     monkeypatch: Any,
 ) -> None:
@@ -126,3 +208,39 @@ def test_muted_group_is_deferred_without_exponential_retry(
     assert result.retried == 0
     assert fake_store.sent == []
     assert "禁言中" in fake_store.deferred[0][1]
+
+
+def test_news_delivery_uses_stored_umo_and_text_payload(
+    monkeypatch: Any,
+) -> None:
+    fake_store = _FakeNewsStore()
+    monkeypatch.setattr(delivery, "store", fake_store)
+    context = SimpleNamespace(send_message=AsyncMock(return_value=True))
+    worker = delivery.DeliveryWorker(Config(), context=context)
+
+    result = asyncio.run(worker.run_once())
+
+    assert result.sent == 1
+    assert fake_store.sent == [("news-1", "napcat:FriendMessage:2002")]
+    umo, chain = context.send_message.await_args.args
+    assert umo == "napcat:FriendMessage:2002"
+    assert chain.chain[0].qq == 123
+    assert chain.chain[1].text == "news text"
+
+
+def test_news_delivery_failure_enters_retry(
+    monkeypatch: Any,
+) -> None:
+    fake_store = _FakeNewsStore()
+    monkeypatch.setattr(delivery, "store", fake_store)
+    context = SimpleNamespace(
+        send_message=AsyncMock(side_effect=RuntimeError("network unavailable"))
+    )
+    worker = delivery.DeliveryWorker(Config(), context=context)
+
+    result = asyncio.run(worker.run_once())
+
+    assert result.retried == 1
+    assert fake_store.sent == []
+    assert fake_store.failed[0][0] == "news-1"
+    assert fake_store.failed[0][3] == worker._worker_id

@@ -197,22 +197,63 @@ class NewsService:
         new_items.sort(
             key=lambda item: item.pub_time or datetime.min.replace(tzinfo=timezone.utc)
         )
-        store.news_mark_seen(
-            [item.guid for item in new_items],
-            keep=self.cfg.cs2_news_max_seen,
-            initialized=True,
-        )
 
         subscribers = store.news_subscribers()
         if not subscribers:
+            store.news_mark_seen(
+                [item.guid for item in new_items],
+                keep=self.cfg.cs2_news_max_seen,
+                initialized=True,
+            )
             logger.info("[cs2.news] 发现 %s 条新资讯,但没有订阅会话", len(new_items))
             return new_items
 
         to_push = new_items[-self.cfg.cs2_news_max_push_per_poll :]
         matcher = self._build_matcher() if self._mention_enabled() else None
         for item in to_push:
-            await self.push_item(item, subscribers, matcher=matcher)
+            await self.enqueue_item(item, subscribers, matcher=matcher)
+        store.news_mark_seen(
+            [item.guid for item in new_items],
+            keep=self.cfg.cs2_news_max_seen,
+            initialized=True,
+        )
         return to_push
+
+    async def enqueue_item(
+        self,
+        item: NewsItem,
+        subscribers: list[str],
+        *,
+        matcher: NewsEntityMatcher | None = None,
+    ) -> None:
+        """Persist one news card into durable delivery queues before marking it seen."""
+        matcher = matcher or (self._build_matcher() if self._mention_enabled() else None)
+        mention_map: dict[str, list[int]] = {}
+        for umo in subscribers:
+            mentions = self.mentions_for_item(
+                item,
+                self._group_id_from_umo(umo),
+                matcher=matcher,
+            )
+            if mentions:
+                mention_map[umo] = mentions
+
+        store.prepare_news_deliveries(item.guid, subscribers, mentions=mention_map)
+        if store.get_news_delivery_payload(item.guid) is not None:
+            return
+
+        try:
+            rendered = await self.render_item(item)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[cs2.news] 资讯卡片渲染失败,入队纯文本: %s", exc)
+            rendered = None
+
+        if rendered:
+            store.set_news_delivery_payload(item.guid, rendered, kind="image")
+        else:
+            text = self._fallback_text(item).encode("utf-8")
+            store.set_news_delivery_payload(item.guid, text, kind="text")
+        logger.info("[cs2.news] 资讯已持久化到 outbox:%s", item.guid)
 
     async def push_item(
         self,

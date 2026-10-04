@@ -48,7 +48,7 @@ _NEWS_STATE = DATA_DIR / "news_state.json"
 _DB = DATA_DIR / "state.sqlite3"
 
 _JSON_LOCK = threading.RLock()
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 
 
 class PersistenceError(RuntimeError):
@@ -86,6 +86,26 @@ class Delivery:
 
 
 @dataclass(frozen=True, slots=True)
+class NewsDelivery:
+    """一条 RSS 资讯投递:同一新闻按订阅会话独立重试。"""
+
+    guid: str
+    unified_msg_origin: str
+    group_id: int
+    status: DeliveryStatus
+    attempts: int
+    last_error: Optional[str]
+    next_retry_at: Optional[float]
+    created_at: float
+    updated_at: float
+    sent_at: Optional[float]
+    cancelled_at: Optional[float]
+    claim_owner: Optional[str]
+    claim_until: Optional[float]
+    mentions: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class Target:
     """一条个人订阅:某群某人订阅了某战队/选手。"""
     group_id: int
@@ -106,6 +126,7 @@ class DeliveryBatch:
     payload_sha256: Optional[str]
     payload_size: Optional[int]
     payload_updated_at: Optional[float]
+    payload_kind: str = "image"
 
 
 def _connect() -> sqlite3.Connection:
@@ -389,6 +410,45 @@ def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
+    """v6:RSS 资讯独立 outbox + payload 类型。
+
+    比赛投递继续使用 ``deliveries``；资讯使用 ``news_deliveries``，以完整 UMO
+    作为收件键，兼容群聊与私聊。``delivery_batches`` 继续复用为 payload 存储。
+    """
+    conn.executescript(
+        """
+        BEGIN IMMEDIATE;
+        ALTER TABLE delivery_batches
+            ADD COLUMN payload_kind TEXT NOT NULL DEFAULT 'image';
+        CREATE TABLE news_deliveries (
+            guid                TEXT NOT NULL,
+            unified_msg_origin  TEXT NOT NULL,
+            group_id            INTEGER NOT NULL DEFAULT 0,
+            status              TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'sent', 'retry', 'dead', 'cancelled')),
+            attempts            INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+            last_error          TEXT,
+            next_retry_at       REAL,
+            created_at          REAL NOT NULL,
+            updated_at          REAL NOT NULL,
+            sent_at             REAL,
+            cancelled_at        REAL,
+            claim_owner         TEXT,
+            claim_until         REAL,
+            mentions            TEXT,
+            PRIMARY KEY (guid, unified_msg_origin)
+        );
+        CREATE INDEX idx_news_deliveries_due
+            ON news_deliveries(status, next_retry_at, claim_until, created_at);
+        CREATE INDEX idx_news_deliveries_umo
+            ON news_deliveries(unified_msg_origin, status);
+        UPDATE metadata SET value = '6' WHERE key = 'schema_version' AND value = '5';
+        COMMIT;
+        """
+    )
+
+
 def _initialize_database() -> None:
     conn = _connect()
     try:
@@ -404,20 +464,27 @@ def _initialize_database() -> None:
             _migrate_v2_to_v3(conn)
             _migrate_v3_to_v4(conn)
             _migrate_v4_to_v5(conn)
+            _migrate_v5_to_v6(conn)
         elif version == 1:
             _migrate_v1_to_v2(conn)
             _migrate_v2_to_v3(conn)
             _migrate_v3_to_v4(conn)
             _migrate_v4_to_v5(conn)
+            _migrate_v5_to_v6(conn)
         elif version == 2:
             _migrate_v2_to_v3(conn)
             _migrate_v3_to_v4(conn)
             _migrate_v4_to_v5(conn)
+            _migrate_v5_to_v6(conn)
         elif version == 3:
             _migrate_v3_to_v4(conn)
             _migrate_v4_to_v5(conn)
+            _migrate_v5_to_v6(conn)
         elif version == 4:
             _migrate_v4_to_v5(conn)
+            _migrate_v5_to_v6(conn)
+        elif version == 5:
+            _migrate_v5_to_v6(conn)
         elif version != _SCHEMA_VERSION:
             raise PersistenceError(f"不支持的状态库版本: {version}")
         final_version = _database_version(conn)
@@ -977,6 +1044,7 @@ def news_unsubscribe(unified_msg_origin: str) -> bool:
             return False
         state["subscribers"] = [item for item in subscribers if item != umo]
         _dump(_NEWS_STATE, state)
+    cancel_news_deliveries_for_umo(umo)
     return True
 
 
@@ -1276,6 +1344,26 @@ def _batch_from_row(row: sqlite3.Row) -> DeliveryBatch:
         payload_sha256=row["payload_sha256"],
         payload_size=row["payload_size"],
         payload_updated_at=row["payload_updated_at"],
+        payload_kind=str(row["payload_kind"] or "image"),
+    )
+
+
+def _news_delivery_from_row(row: sqlite3.Row) -> NewsDelivery:
+    return NewsDelivery(
+        guid=str(row["guid"]),
+        unified_msg_origin=str(row["unified_msg_origin"]),
+        group_id=int(row["group_id"]),
+        status=row["status"],
+        attempts=int(row["attempts"]),
+        last_error=row["last_error"],
+        next_retry_at=row["next_retry_at"],
+        created_at=float(row["created_at"]),
+        updated_at=float(row["updated_at"]),
+        sent_at=row["sent_at"],
+        cancelled_at=row["cancelled_at"],
+        claim_owner=row["claim_owner"],
+        claim_until=row["claim_until"],
+        mentions=_parse_mentions(row["mentions"]),
     )
 
 
@@ -1285,6 +1373,23 @@ def _validate_delivery_key(match_id: str, map_key: str) -> tuple[str, str]:
     if not match_id or not map_key:
         raise ValueError("match_id 和 map_key 不能为空")
     return match_id, map_key
+
+
+def _news_batch_key(guid: str) -> tuple[str, str]:
+    guid = str(guid).strip()
+    if not guid:
+        raise ValueError("资讯 guid 不能为空")
+    return f"news:{guid}", "news"
+
+
+def _group_id_from_umo(unified_msg_origin: str) -> int:
+    parts = str(unified_msg_origin or "").split(":", 2)
+    if len(parts) != 3 or parts[1].casefold() != "groupmessage":
+        return 0
+    try:
+        return int(parts[2])
+    except (TypeError, ValueError):
+        return 0
 
 
 def _safe_outbox_path(relative_path: str) -> Path:
@@ -1375,13 +1480,25 @@ def get_delivery_batch(match_id: str, map_key: str) -> Optional[DeliveryBatch]:
     return _batch_from_row(row) if row else None
 
 
-def set_delivery_payload(match_id: str, map_key: str, payload: bytes) -> DeliveryBatch:
+def set_delivery_payload(
+    match_id: str,
+    map_key: str,
+    payload: bytes,
+    *,
+    kind: str = "image",
+) -> DeliveryBatch:
     """线程安全地为已 prepare 的批次持久化 payload。"""
     with _JSON_LOCK:
-        return _set_delivery_payload_locked(match_id, map_key, payload)
+        return _set_delivery_payload_locked(match_id, map_key, payload, kind=kind)
 
 
-def _set_delivery_payload_locked(match_id: str, map_key: str, payload: bytes) -> DeliveryBatch:
+def _set_delivery_payload_locked(
+    match_id: str,
+    map_key: str,
+    payload: bytes,
+    *,
+    kind: str = "image",
+) -> DeliveryBatch:
     """为已 prepare 的批次持久化可重试 payload，返回新批次元数据。
 
     文件名同时包含 batch key 和内容哈希。先原子写入新内容地址，
@@ -1390,6 +1507,9 @@ def _set_delivery_payload_locked(match_id: str, map_key: str, payload: bytes) ->
     match_id, map_key = _validate_delivery_key(match_id, map_key)
     if not isinstance(payload, bytes) or not payload:
         raise ValueError("payload 必须是非空 bytes")
+    kind = str(kind).strip().lower()
+    if kind not in ("image", "text"):
+        raise ValueError("payload kind 必须是 image 或 text")
     with _transaction() as conn:
         old = conn.execute(
             """
@@ -1415,10 +1535,10 @@ def _set_delivery_payload_locked(match_id: str, map_key: str, payload: bytes) ->
                 """
                 UPDATE delivery_batches
                 SET payload_path = ?, payload_sha256 = ?, payload_size = ?,
-                    payload_updated_at = ?, updated_at = ?
+                    payload_updated_at = ?, payload_kind = ?, updated_at = ?
                 WHERE match_id = ? AND map_key = ?
                 """,
-                (relative, digest, len(payload), now, now, match_id, map_key),
+                (relative, digest, len(payload), now, kind, now, match_id, map_key),
             )
             if cursor.rowcount != 1:
                 raise KeyError(f"投递批次不存在: {match_id}/{map_key}")
@@ -1840,20 +1960,408 @@ def release_claim(
         return cursor.rowcount == 1
 
 
-def release_claims(worker_id: str) -> int:
-    """释放 worker 所有活跃 lease，供 consumer 优雅退出的 finally 调用。"""
+def prepare_news_deliveries(
+    guid: str,
+    unified_msg_origins: Iterable[str],
+    mentions: Optional[dict[str, Iterable[int]]] = None,
+) -> list[NewsDelivery]:
+    """首次调用时冻结一条资讯的订阅会话。
+
+    ``mentions`` 以完整统一消息来源为键；群聊可保存要 @ 的 QQ 列表，私聊通常为空。
+    """
+    guid = str(guid).strip()
+    match_id, map_key = _news_batch_key(guid)
+    umos = list(
+        dict.fromkeys(
+            str(umo).strip()
+            for umo in unified_msg_origins
+            if str(umo or "").strip()
+        )
+    )
+    if not umos:
+        return []
+    mention_map = {str(umo): qq_ids for umo, qq_ids in (mentions or {}).items()}
+    now = time.time()
+    with _transaction(write=True) as conn:
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO delivery_batches(
+                match_id, map_key, created_at, updated_at, payload_kind
+            ) VALUES (?, ?, ?, ?, 'image')
+            """,
+            (match_id, map_key, now, now),
+        )
+        if cursor.rowcount == 1:
+            conn.executemany(
+                """
+                INSERT INTO news_deliveries(
+                    guid, unified_msg_origin, group_id, status, attempts,
+                    created_at, updated_at, mentions
+                ) VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+                """,
+                (
+                    (
+                        guid,
+                        umo,
+                        _group_id_from_umo(umo),
+                        now,
+                        now,
+                        _mentions_blob(mention_map.get(umo)),
+                    )
+                    for umo in umos
+                ),
+            )
+        rows = conn.execute(
+            """
+            SELECT * FROM news_deliveries
+            WHERE guid = ?
+            ORDER BY unified_msg_origin
+            """,
+            (guid,),
+        ).fetchall()
+    return [_news_delivery_from_row(row) for row in rows]
+
+
+def claim_due_news_deliveries(
+    worker_id: str,
+    lease_seconds: float,
+    now: Optional[float] = None,
+    limit: int = 100,
+) -> list[NewsDelivery]:
+    """原子领取全局到期的资讯投递，只返回已持久化 payload 的行。"""
+    worker_id = str(worker_id).strip()
+    if not worker_id:
+        raise ValueError("worker_id 不能为空")
+    if lease_seconds <= 0:
+        raise ValueError("lease_seconds 必须大于 0")
+    if limit <= 0:
+        return []
+    now = time.time() if now is None else float(now)
+    claim_until = now + float(lease_seconds)
+    with _transaction(write=True) as conn:
+        selected = conn.execute(
+            """
+            SELECT d.guid, d.unified_msg_origin
+            FROM news_deliveries AS d
+            JOIN delivery_batches AS b
+              ON b.match_id = ('news:' || d.guid)
+             AND b.map_key = 'news'
+            WHERE b.payload_path IS NOT NULL
+              AND (
+                d.status = 'pending'
+                OR (d.status = 'retry'
+                    AND (d.next_retry_at IS NULL OR d.next_retry_at <= ?))
+              )
+              AND (d.claim_until IS NULL OR d.claim_until <= ?)
+            ORDER BY COALESCE(d.next_retry_at, d.created_at),
+                     d.guid, d.unified_msg_origin
+            LIMIT ?
+            """,
+            (now, now, int(limit)),
+        ).fetchall()
+        keys = [(str(row["guid"]), str(row["unified_msg_origin"])) for row in selected]
+        conn.executemany(
+            """
+            UPDATE news_deliveries
+            SET claim_owner = ?, claim_until = ?, updated_at = ?
+            WHERE guid = ? AND unified_msg_origin = ?
+              AND status IN ('pending', 'retry')
+            """,
+            (
+                (worker_id, claim_until, now, guid, umo)
+                for guid, umo in keys
+            ),
+        )
+        rows = [
+            conn.execute(
+                """
+                SELECT * FROM news_deliveries
+                WHERE guid = ? AND unified_msg_origin = ?
+                """,
+                key,
+            ).fetchone()
+            for key in keys
+        ]
+    return [_news_delivery_from_row(row) for row in rows if row is not None]
+
+
+def get_news_delivery_payload(guid: str) -> Optional[bytes]:
+    return get_delivery_payload(*_news_batch_key(guid))
+
+
+def get_news_delivery_payload_kind(guid: str) -> Optional[str]:
+    batch = get_delivery_batch(*_news_batch_key(guid))
+    return batch.payload_kind if batch else None
+
+
+def set_news_delivery_payload(guid: str, payload: bytes, *, kind: str) -> DeliveryBatch:
+    return set_delivery_payload(*_news_batch_key(guid), payload, kind=kind)
+
+
+def mark_news_delivery_sent(
+    guid: str,
+    unified_msg_origin: str,
+    *,
+    worker_id: Optional[str] = None,
+) -> Optional[NewsDelivery]:
+    guid = str(guid).strip()
+    unified_msg_origin = str(unified_msg_origin).strip()
+    if worker_id is not None:
+        worker_id = str(worker_id).strip()
+        if not worker_id:
+            raise ValueError("worker_id 不能为空")
+    now = time.time()
+    match_id, map_key = _news_batch_key(guid)
+    with _transaction(write=True) as conn:
+        claim_clause = " AND claim_owner = ?" if worker_id is not None else ""
+        params: list[object] = [now, now, guid, unified_msg_origin]
+        if worker_id is not None:
+            params.append(worker_id)
+        cursor = conn.execute(
+            f"""
+            UPDATE news_deliveries
+            SET status = 'sent', attempts = attempts + 1,
+                last_error = NULL, next_retry_at = NULL,
+                updated_at = ?, sent_at = ?, cancelled_at = NULL,
+                claim_owner = NULL, claim_until = NULL
+            WHERE guid = ? AND unified_msg_origin = ?
+              AND status IN ('pending', 'retry')
+              {claim_clause}
+            """,
+            params,
+        )
+        if cursor.rowcount != 1:
+            return None
+        conn.execute(
+            """
+            UPDATE delivery_batches SET updated_at = ?
+            WHERE match_id = ? AND map_key = ?
+            """,
+            (now, match_id, map_key),
+        )
+        row = conn.execute(
+            """
+            SELECT * FROM news_deliveries
+            WHERE guid = ? AND unified_msg_origin = ?
+            """,
+            (guid, unified_msg_origin),
+        ).fetchone()
+    return _news_delivery_from_row(row)
+
+
+def mark_news_delivery_failed(
+    guid: str,
+    unified_msg_origin: str,
+    error: object,
+    *,
+    next_retry_at: Optional[float] = None,
+    dead: bool = False,
+    max_attempts: Optional[int] = None,
+    worker_id: Optional[str] = None,
+) -> Optional[NewsDelivery]:
+    guid = str(guid).strip()
+    unified_msg_origin = str(unified_msg_origin).strip()
+    if max_attempts is not None and max_attempts <= 0:
+        raise ValueError("max_attempts 必须大于 0")
+    if worker_id is not None:
+        worker_id = str(worker_id).strip()
+        if not worker_id:
+            raise ValueError("worker_id 不能为空")
+    now = time.time()
+    message = str(error).strip() or "unknown delivery error"
+    match_id, map_key = _news_batch_key(guid)
+    with _transaction(write=True) as conn:
+        claim_clause = " AND claim_owner = ?" if worker_id is not None else ""
+        select_params: list[object] = [guid, unified_msg_origin]
+        if worker_id is not None:
+            select_params.append(worker_id)
+        current = conn.execute(
+            f"""
+            SELECT attempts, status FROM news_deliveries
+            WHERE guid = ? AND unified_msg_origin = ?
+              {claim_clause}
+            """,
+            select_params,
+        ).fetchone()
+        if not current or current["status"] not in ("pending", "retry"):
+            return None
+        attempts = int(current["attempts"]) + 1
+        final = dead or (max_attempts is not None and attempts >= max_attempts)
+        status: DeliveryStatus = "dead" if final else "retry"
+        retry_at = None if final else next_retry_at
+        conn.execute(
+            """
+            UPDATE news_deliveries
+            SET status = ?, attempts = ?, last_error = ?,
+                next_retry_at = ?, updated_at = ?, sent_at = NULL,
+                cancelled_at = NULL, claim_owner = NULL, claim_until = NULL
+            WHERE guid = ? AND unified_msg_origin = ?
+            """,
+            (
+                status,
+                attempts,
+                message,
+                retry_at,
+                now,
+                guid,
+                unified_msg_origin,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE delivery_batches SET updated_at = ?
+            WHERE match_id = ? AND map_key = ?
+            """,
+            (now, match_id, map_key),
+        )
+        row = conn.execute(
+            """
+            SELECT * FROM news_deliveries
+            WHERE guid = ? AND unified_msg_origin = ?
+            """,
+            (guid, unified_msg_origin),
+        ).fetchone()
+    return _news_delivery_from_row(row)
+
+
+def defer_news_delivery(
+    guid: str,
+    unified_msg_origin: str,
+    next_retry_at: float,
+    error: object,
+    *,
+    worker_id: Optional[str] = None,
+) -> Optional[NewsDelivery]:
+    guid = str(guid).strip()
+    unified_msg_origin = str(unified_msg_origin).strip()
+    if worker_id is not None:
+        worker_id = str(worker_id).strip()
+        if not worker_id:
+            raise ValueError("worker_id 不能为空")
+    retry_at = float(next_retry_at)
+    now = time.time()
+    message = str(error).strip() or "delivery deferred"
+    match_id, map_key = _news_batch_key(guid)
+    with _transaction(write=True) as conn:
+        claim_clause = " AND claim_owner = ?" if worker_id is not None else ""
+        params: list[object] = [message, retry_at, now, guid, unified_msg_origin]
+        if worker_id is not None:
+            params.append(worker_id)
+        cursor = conn.execute(
+            f"""
+            UPDATE news_deliveries
+            SET status = 'retry', last_error = ?, next_retry_at = ?,
+                updated_at = ?, claim_owner = NULL, claim_until = NULL
+            WHERE guid = ? AND unified_msg_origin = ?
+              AND status IN ('pending', 'retry')
+              {claim_clause}
+            """,
+            params,
+        )
+        if cursor.rowcount != 1:
+            return None
+        conn.execute(
+            """
+            UPDATE delivery_batches SET updated_at = ?
+            WHERE match_id = ? AND map_key = ?
+            """,
+            (now, match_id, map_key),
+        )
+        row = conn.execute(
+            """
+            SELECT * FROM news_deliveries
+            WHERE guid = ? AND unified_msg_origin = ?
+            """,
+            (guid, unified_msg_origin),
+        ).fetchone()
+    return _news_delivery_from_row(row)
+
+
+def release_news_claim(
+    guid: str,
+    unified_msg_origin: str,
+    *,
+    worker_id: str,
+) -> bool:
+    guid = str(guid).strip()
+    unified_msg_origin = str(unified_msg_origin).strip()
     worker_id = str(worker_id).strip()
     if not worker_id:
         raise ValueError("worker_id 不能为空")
     with _transaction(write=True) as conn:
         cursor = conn.execute(
             """
+            UPDATE news_deliveries
+            SET claim_owner = NULL, claim_until = NULL
+            WHERE guid = ? AND unified_msg_origin = ?
+              AND claim_owner = ? AND status IN ('pending', 'retry')
+            """,
+            (guid, unified_msg_origin, worker_id),
+        )
+        return cursor.rowcount == 1
+
+
+def cancel_news_deliveries_for_umo(
+    unified_msg_origin: str,
+    *,
+    reason: str = "news subscription removed",
+) -> int:
+    """取消某个会话的全部待发/重试资讯投递。"""
+    unified_msg_origin = str(unified_msg_origin).strip()
+    if not unified_msg_origin:
+        return 0
+    now = time.time()
+    with _transaction(write=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT guid FROM news_deliveries
+            WHERE unified_msg_origin = ?
+              AND status IN ('pending', 'retry')
+            """,
+            (unified_msg_origin,),
+        ).fetchall()
+        cursor = conn.execute(
+            """
+            UPDATE news_deliveries
+            SET status = 'cancelled', last_error = ?, next_retry_at = NULL,
+                updated_at = ?, cancelled_at = ?, claim_owner = NULL,
+                claim_until = NULL
+            WHERE unified_msg_origin = ?
+              AND status IN ('pending', 'retry')
+            """,
+            (str(reason)[:1000], now, now, unified_msg_origin),
+        )
+        conn.executemany(
+            """
+            UPDATE delivery_batches SET updated_at = ?
+            WHERE match_id = ? AND map_key = 'news'
+            """,
+            ((now, f"news:{row['guid']}") for row in rows),
+        )
+        return int(cursor.rowcount)
+
+
+def release_claims(worker_id: str) -> int:
+    """释放 worker 所有活跃 lease，供 consumer 优雅退出的 finally 调用。"""
+    worker_id = str(worker_id).strip()
+    if not worker_id:
+        raise ValueError("worker_id 不能为空")
+    with _transaction(write=True) as conn:
+        match_cursor = conn.execute(
+            """
             UPDATE deliveries SET claim_owner = NULL, claim_until = NULL
             WHERE claim_owner = ? AND status IN ('pending', 'retry')
             """,
             (worker_id,),
         )
-        return cursor.rowcount
+        news_cursor = conn.execute(
+            """
+            UPDATE news_deliveries SET claim_owner = NULL, claim_until = NULL
+            WHERE claim_owner = ? AND status IN ('pending', 'retry')
+            """,
+            (worker_id,),
+        )
+        return int(match_cursor.rowcount) + int(news_cursor.rowcount)
 
 
 def replay_dead(
@@ -1989,6 +2497,13 @@ def outbox_overview(now: Optional[float] = None) -> dict[str, int]:
         "retry": 0,
         "dead": 0,
         "cancelled": 0,
+        "news_pending": 0,
+        "news_sent": 0,
+        "news_retry": 0,
+        "news_dead": 0,
+        "news_cancelled": 0,
+        "news_due": 0,
+        "news_claimed": 0,
     }
     with _transaction() as conn:
         batch_row = conn.execute(
@@ -2024,6 +2539,32 @@ def outbox_overview(now: Optional[float] = None) -> dict[str, int]:
             """,
             (now,),
         ).fetchone()
+        news_status_rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM news_deliveries GROUP BY status"
+        ).fetchall()
+        news_due_row = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM news_deliveries AS d
+            JOIN delivery_batches AS b
+              ON b.match_id = ('news:' || d.guid)
+             AND b.map_key = 'news'
+            WHERE b.payload_path IS NOT NULL
+              AND (
+                d.status = 'pending'
+                OR (d.status = 'retry'
+                    AND (d.next_retry_at IS NULL OR d.next_retry_at <= ?))
+              )
+              AND (d.claim_until IS NULL OR d.claim_until <= ?)
+            """,
+            (now, now),
+        ).fetchone()
+        news_claimed_row = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM news_deliveries
+            WHERE status IN ('pending', 'retry') AND claim_until > ?
+            """,
+            (now,),
+        ).fetchone()
     overview["batches"] = int(batch_row["batches"])
     overview["payload_batches"] = int(batch_row["payload_batches"])
     overview["payload_bytes"] = int(batch_row["payload_bytes"])
@@ -2031,6 +2572,10 @@ def outbox_overview(now: Optional[float] = None) -> dict[str, int]:
     overview["claimed"] = int(claimed_row["n"])
     for row in status_rows:
         overview[str(row["status"])] = int(row["n"])
+    overview["news_due"] = int(news_due_row["n"])
+    overview["news_claimed"] = int(news_claimed_row["n"])
+    for row in news_status_rows:
+        overview[f"news_{row['status']}"] = int(row["n"])
     return overview
 
 
@@ -2050,6 +2595,14 @@ def _prune_delivery_batches_locked(older_than_days: float, now: Optional[float] 
     now = time.time() if now is None else float(now)
     cutoff = now - float(older_than_days) * 86400
     with _transaction(write=True) as conn:
+        conn.execute(
+            """
+            DELETE FROM news_deliveries
+            WHERE updated_at < ?
+              AND status IN ('sent', 'cancelled')
+            """,
+            (cutoff,),
+        )
         rows = conn.execute(
             """
             SELECT b.match_id, b.map_key, b.payload_path
@@ -2059,6 +2612,12 @@ def _prune_delivery_batches_locked(older_than_days: float, now: Optional[float] 
                 SELECT 1 FROM deliveries AS d
                 WHERE d.match_id = b.match_id AND d.map_key = b.map_key
                   AND d.status NOT IN ('sent', 'cancelled')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM news_deliveries AS n
+                WHERE b.match_id = ('news:' || n.guid)
+                  AND b.map_key = 'news'
+                  AND n.status NOT IN ('sent', 'cancelled')
               )
             """,
             (cutoff,),

@@ -1747,6 +1747,8 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
             f"缓存:logo {cache['logos']} 个 / 页面 {cache['pages']} 个,共 {cache['kb']} KB",
             f"投递:待发 {outbox['pending']} / 重试 {outbox['retry']} / "
             f"死信 {outbox['dead']} / 已取消 {outbox['cancelled']}",
+            f"资讯投递:待发 {outbox['news_pending']} / 重试 {outbox['news_retry']} / "
+            f"死信 {outbox['news_dead']} / 已取消 {outbox['news_cancelled']}",
             f"投递载荷:{outbox['payload_batches']} 批 / {outbox['payload_bytes'] // 1024} KB",
             f"上次刷新白名单:{_stat['last_featured'] or '—'}",
             f"上次轮询:{_stat['last_poll'] or '—'}",

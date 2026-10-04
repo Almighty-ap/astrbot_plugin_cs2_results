@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
-from astrbot.api.message_components import At, Image
+from astrbot.api.message_components import At, Image, Plain
 from astrbot.api.star import Context
 
 from . import store
@@ -181,7 +181,7 @@ class DeliveryWorker:
         )
         return True
 
-    async def run_once(self, *, limit: int = 100) -> DeliveryRun:
+    async def _run_match_deliveries(self, *, limit: int = 100) -> DeliveryRun:
         deliveries = store.claim_due_deliveries(
             self._worker_id,
             lease_seconds=300,
@@ -358,6 +358,217 @@ class DeliveryWorker:
                     delivery.match_id,
                     delivery.map_key,
                     delivery.group_id,
+                    worker_id=self._worker_id,
+                )
+                if updated:
+                    sent += 1
+
+        return DeliveryRun(
+            claimed=len(deliveries),
+            sent=sent,
+            retried=retried,
+            deferred=deferred,
+            dead=dead,
+            dead_expected=dead_expected,
+            unsubscribed=unsubscribed,
+            released=released,
+        )
+
+    @staticmethod
+    def _combine_runs(*runs: DeliveryRun) -> DeliveryRun:
+        return DeliveryRun(
+            claimed=sum(run.claimed for run in runs),
+            sent=sum(run.sent for run in runs),
+            retried=sum(run.retried for run in runs),
+            deferred=sum(run.deferred for run in runs),
+            dead=sum(run.dead for run in runs),
+            dead_expected=sum(run.dead_expected for run in runs),
+            unsubscribed=sum(run.unsubscribed for run in runs),
+            released=sum(run.released for run in runs),
+        )
+
+    async def run_once(self, *, limit: int = 100) -> DeliveryRun:
+        match_run = await self._run_match_deliveries(limit=limit)
+        news_run = await self._run_news_deliveries(limit=limit)
+        return self._combine_runs(match_run, news_run)
+
+    def _park_news_muted(
+        self,
+        delivery: store.NewsDelivery,
+        mute_end: float,
+    ) -> bool:
+        """禁言期间挂起一条资讯。返回 False 表示已超过最大顺延时间。"""
+        max_age = self._cfg.cs2_mute_defer_max_hours * 3600
+        if time.time() - delivery.created_at > max_age:
+            store.mark_news_delivery_failed(
+                delivery.guid,
+                delivery.unified_msg_origin,
+                f"群 {delivery.group_id} 持续禁言超过 "
+                f"{self._cfg.cs2_mute_defer_max_hours:g} 小时,资讯已过时",
+                dead=True,
+                worker_id=self._worker_id,
+            )
+            logger.info(
+                f"[cs2] 群 {delivery.group_id} 仍在禁言,资讯已过时丢弃:"
+                f"{delivery.guid}"
+            )
+            return False
+        store.defer_news_delivery(
+            delivery.guid,
+            delivery.unified_msg_origin,
+            mute_end,
+            f"群 {delivery.group_id} 禁言中,等待解禁后投递",
+            worker_id=self._worker_id,
+        )
+        return True
+
+    async def _run_news_deliveries(self, *, limit: int = 100) -> DeliveryRun:
+        """Consume the RSS news queue with the same retry/dead policy as match cards."""
+        claim_due = getattr(store, "claim_due_news_deliveries", None)
+        if claim_due is None:
+            return DeliveryRun()
+        deliveries = claim_due(
+            self._worker_id,
+            lease_seconds=300,
+            limit=limit,
+        )
+        if not deliveries:
+            return DeliveryRun()
+
+        if self._context is None:
+            exc = RuntimeError("AstrBot context unavailable")
+            retry_at = time.time() + self._cfg.cs2_delivery_retry_base_seconds
+            for delivery in deliveries:
+                store.defer_news_delivery(
+                    delivery.guid,
+                    delivery.unified_msg_origin,
+                    retry_at,
+                    f"AstrBot unavailable: {exc}"[:1000],
+                    worker_id=self._worker_id,
+                )
+            return DeliveryRun(claimed=len(deliveries), deferred=len(deliveries))
+
+        sent = retried = deferred = dead = dead_expected = unsubscribed = 0
+        released = 0
+        muted_this_run: set[int] = set()
+        active_subscribers = set(store.news_subscribers())
+        payloads: dict[str, bytes | None] = {}
+        payload_kinds: dict[str, str] = {}
+        payload_errors: dict[str, str] = {}
+        for delivery in deliveries:
+            if delivery.unified_msg_origin not in active_subscribers:
+                cancelled = store.cancel_news_deliveries_for_umo(
+                    delivery.unified_msg_origin,
+                    reason="news subscription removed",
+                )
+                if cancelled:
+                    released += 1
+                continue
+
+            mute_end = self.muted_until(delivery.group_id) if delivery.group_id > 0 else 0.0
+            if mute_end:
+                if self._park_news_muted(delivery, mute_end):
+                    deferred += 1
+                else:
+                    dead_expected += 1
+                continue
+
+            guid = delivery.guid
+            if guid not in payloads:
+                try:
+                    payloads[guid] = store.get_news_delivery_payload(guid)
+                    payload_kinds[guid] = (
+                        store.get_news_delivery_payload_kind(guid) or "image"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    payloads[guid] = None
+                    payload_errors[guid] = f"news outbox payload unreadable: {exc}"[:1000]
+            payload = payloads[guid]
+            if not payload:
+                if guid in payload_errors:
+                    updated = store.mark_news_delivery_failed(
+                        guid,
+                        delivery.unified_msg_origin,
+                        payload_errors[guid],
+                        dead=True,
+                        worker_id=self._worker_id,
+                    )
+                    if updated:
+                        dead += 1
+                    continue
+                store.defer_news_delivery(
+                    guid,
+                    delivery.unified_msg_origin,
+                    time.time() + 60,
+                    "news outbox payload missing",
+                    worker_id=self._worker_id,
+                )
+                deferred += 1
+                continue
+
+            try:
+                components: list[Any] = [At(qq=qq) for qq in delivery.mentions]
+                if payload_kinds.get(guid, "image") == "text":
+                    components.append(Plain(payload.decode("utf-8", errors="replace")))
+                else:
+                    components.append(Image.fromBytes(payload))
+                sent_ok = await self._context.send_message(
+                    delivery.unified_msg_origin,
+                    MessageChain(chain=components),
+                )
+                if sent_ok is False:
+                    raise RuntimeError("AstrBot could not find the target platform session")
+            except Exception as exc:  # noqa: BLE001
+                kind = classify_send_failure(exc)
+                err_text = str(exc)[:1000]
+                if kind == "permanent_group":
+                    removed = store.news_unsubscribe(delivery.unified_msg_origin)
+                    if not removed:
+                        store.cancel_news_deliveries_for_umo(
+                            delivery.unified_msg_origin,
+                            reason=f"news delivery permanently failed: {err_text}",
+                        )
+                    if removed:
+                        unsubscribed += 1
+                    continue
+
+                if kind == "temporary_group" and delivery.group_id > 0:
+                    mute_end = self.note_group_muted(delivery.group_id)
+                    if delivery.group_id not in muted_this_run:
+                        muted_this_run.add(delivery.group_id)
+                        logger.info(
+                            f"[cs2] 群 {delivery.group_id} 处于禁言中,"
+                            f"资讯顺延 {self._cfg.cs2_mute_backoff_minutes} 分钟"
+                        )
+                    if self._park_news_muted(delivery, mute_end):
+                        deferred += 1
+                    else:
+                        dead_expected += 1
+                    continue
+
+                delay = self._cfg.cs2_delivery_retry_base_seconds * (
+                    2 ** min(delivery.attempts, 8)
+                )
+                updated = store.mark_news_delivery_failed(
+                    delivery.guid,
+                    delivery.unified_msg_origin,
+                    err_text,
+                    next_retry_at=time.time() + delay,
+                    max_attempts=self._cfg.cs2_delivery_max_attempts,
+                    worker_id=self._worker_id,
+                )
+                if updated and updated.status == "dead":
+                    dead += 1
+                    logger.error(
+                        f"[cs2] 资讯投递进入死信:{delivery.guid}"
+                        f" → {delivery.unified_msg_origin}: {err_text[:200]}"
+                    )
+                else:
+                    retried += 1
+            else:
+                updated = store.mark_news_delivery_sent(
+                    delivery.guid,
+                    delivery.unified_msg_origin,
                     worker_id=self._worker_id,
                 )
                 if updated:
