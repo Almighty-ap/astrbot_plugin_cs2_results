@@ -130,6 +130,9 @@ cs2_llm_tool_max_image_calls   单次对话最多发送的图片数
 - `curl_cffi` 遇到 HTTP/Cloudflare 挑战、超时或响应类型异常时自动回退 Playwright。
 - `cs2_headful` 默认为关闭。若 HLTV 的 `/events` 对无头浏览器返回挑战,可开启该选项;
   Linux 无桌面环境时插件会自动启动私有 `Xvfb`。
+- Playwright 的 Node driver 会随反复导航增长内存。插件默认在浏览器抓取满
+  `cs2_browser_recycle_uses` 次或运行满 `cs2_browser_recycle_hours` 小时后,在操作间隙
+  自动重建整个 Playwright/Chromium 栈;Xvfb 会保留。两个阈值设为 `0` 可分别关闭。
 - Docker 内的 `127.0.0.1` 指向容器自身。代理运行在宿主机时,请填写宿主机地址或使用
   宿主机的容器网络地址。
 

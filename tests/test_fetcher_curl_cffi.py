@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import types
 from typing import ClassVar
@@ -245,6 +246,68 @@ def test_shutdown_closes_persistent_context() -> None:
     assert context.closed is True
     assert browser.closed is True
     assert playwright.closed is True
+
+
+def test_browser_recycle_rebuilds_playwright_stack_and_keeps_xvfb() -> None:
+    class _Closable:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def stop(self) -> None:
+            self.closed = True
+
+    class _Xvfb:
+        def __init__(self) -> None:
+            self.terminated = False
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+    fetcher = Fetcher(
+        Config(
+            cs2_request_min_gap=0,
+            cs2_browser_recycle_uses=1,
+            cs2_browser_recycle_hours=0,
+        )
+    )
+    context = _Closable()
+    browser = _Closable()
+    playwright = _Closable()
+    xvfb = _Xvfb()
+    fetcher._context = context
+    fetcher._browser = browser
+    fetcher._pw = playwright
+    fetcher._xvfb_proc = xvfb  # type: ignore[assignment]
+    fetcher._display = ":99"
+    fetcher._browser_uses = 1
+
+    asyncio.run(fetcher._recycle_browser_if_needed())
+
+    assert context.closed is True
+    assert browser.closed is True
+    assert playwright.closed is True
+    assert fetcher._context is None
+    assert fetcher._browser is None
+    assert fetcher._pw is None
+    assert fetcher._browser_uses == 0
+    assert fetcher._xvfb_proc is xvfb
+    assert fetcher._display == ":99"
+    assert xvfb.terminated is False
+
+
+def test_xvfb_lock_owner_detection(tmp_path) -> None:
+    lock = tmp_path / ".X99-lock"
+    lock.write_text("999999999\n", encoding="ascii")
+    assert Fetcher._xvfb_lock_owner_alive(lock) is False
+
+    lock.write_text(f"{os.getpid()}\n", encoding="ascii")
+    assert Fetcher._xvfb_lock_owner_alive(lock) is True
 
 
 def test_logo_fetch_does_not_start_browser_when_curl_succeeds(

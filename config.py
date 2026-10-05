@@ -98,6 +98,11 @@ class Config(BaseModel):
     # 单次抓取(含挑战重试)占用导航档位的时间预算(秒)。超预算就不再重试,免得
     # HLTV 超时时连续几个 45s 导航把闸门长占,堵住用户命令和直播轮询。
     cs2_fetch_budget_seconds: float = Field(default=60.0, ge=5, le=600)
+    # Playwright keeps one Node driver alive. Reusing the context preserves
+    # Cloudflare cookies, but its JS heap grows after repeated navigations.
+    # Rebuild the whole stack after either threshold. 0 disables that limit.
+    cs2_browser_recycle_uses: int = Field(default=100, ge=0, le=100000)
+    cs2_browser_recycle_hours: float = Field(default=4.0, ge=0, le=168)
 
     # —— 兜底 & 告警 ——
     cs2_results_backstop: bool = True  # 补报:重启/离线/漏扫期间结束的比赛,发现后补推

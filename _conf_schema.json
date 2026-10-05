@@ -59,6 +59,18 @@
     "default": false,
     "hint": "HLTV /events 反爬较严时建议开启;Linux 无 DISPLAY 会自动启动 Xvfb,需安装 xvfb"
   },
+  "cs2_browser_recycle_uses": {
+    "description": "Playwright 浏览器栈最大使用次数(0=不按次数回收)",
+    "type": "int",
+    "default": 100,
+    "hint": "每次回退浏览器抓取计 1 次;达到后自动关闭并重建 Playwright/Chromium,释放 Node driver 堆内存"
+  },
+  "cs2_browser_recycle_hours": {
+    "description": "Playwright 浏览器栈最长存活小时数(0=不按时间回收)",
+    "type": "float",
+    "default": 4.0,
+    "hint": "达到后在下一次浏览器操作结束时自动重建;0~168 小时"
+  },
   "cs2_nav_timeout": {
     "description": "页面导航超时(毫秒)",
     "type": "int",

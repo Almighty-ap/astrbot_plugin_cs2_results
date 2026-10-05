@@ -197,7 +197,13 @@ class Fetcher:
         self._browser = None
         self._context = None
         self._xvfb_proc: subprocess.Popen[bytes] | None = None
+        self._display: str | None = None
         self._lifecycle_lock = asyncio.Lock()
+        # Browser operations are serialized as a whole so recycling can never
+        # close the shared context while another command or logo batch uses it.
+        self._browser_operation_lock = asyncio.Lock()
+        self._browser_uses = 0
+        self._browser_started_at: float | None = None
         self._gate = _FairPriorityGate(cfg.cs2_request_min_gap)
         self._closing = False
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -539,8 +545,12 @@ class Fetcher:
             from playwright.async_api import async_playwright
 
             launch_env: dict[str, str] | None = None
-            if self.cfg.cs2_headful and os.name != "nt" and not os.environ.get("DISPLAY"):
-                display = await asyncio.to_thread(self._start_xvfb)
+            if self.cfg.cs2_headful and os.name != "nt":
+                display = os.environ.get("DISPLAY")
+                if not display and self._display_ready(self._display):
+                    display = self._display
+                if not display:
+                    display = await asyncio.to_thread(self._start_xvfb)
                 launch_env = os.environ.copy()
                 launch_env["DISPLAY"] = display
 
@@ -577,6 +587,8 @@ class Fetcher:
             self._pw = pw
             self._browser = browser
             self._context = context
+            self._browser_uses = 0
+            self._browser_started_at = time.monotonic()
             logger.info(
                 f"[cs2] Chromium 抓取浏览器已启动"
                 f"({'有头/屏幕外' if self.cfg.cs2_headful else '无头'})"
@@ -593,13 +605,23 @@ class Fetcher:
         for number in range(99, 120):
             display = f":{number}"
             socket_path = Path(f"/tmp/.X11-unix/X{number}")
+            lock_path = Path(f"/tmp/.X{number}-lock")
             if socket_path.exists():
                 if self._display_socket_alive(socket_path):
                     continue
+            if lock_path.exists() and self._xvfb_lock_owner_alive(lock_path):
+                continue
+            if socket_path.exists():
                 try:
                     socket_path.unlink()
                 except OSError as exc:
                     logger.warning(f"[cs2] 无法清理陈旧 Xvfb socket {socket_path}: {exc}")
+                    continue
+            if lock_path.exists():
+                try:
+                    lock_path.unlink()
+                except OSError as exc:
+                    logger.warning(f"[cs2] 无法清理陈旧 Xvfb lock {lock_path}: {exc}")
                     continue
             proc = subprocess.Popen(
                 [
@@ -621,11 +643,31 @@ class Fetcher:
                     raise RuntimeError(f"Xvfb 启动失败,DISPLAY={display}")
                 if socket_path.exists():
                     self._xvfb_proc = proc
+                    self._display = display
                     logger.info(f"[cs2] 已为有头 Chromium 启动 Xvfb {display}")
                     return display
                 time.sleep(0.1)
             proc.terminate()
         raise RuntimeError("找不到可用的 Xvfb DISPLAY")
+
+    @staticmethod
+    def _xvfb_lock_owner_alive(lock_path: Path) -> bool:
+        """Return whether the PID recorded in an Xvfb lock file still exists."""
+        try:
+            pid = int(lock_path.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            return False
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
 
     @staticmethod
     def _display_socket_alive(socket_path: Path) -> bool:
@@ -639,6 +681,21 @@ class Fetcher:
             return False
         finally:
             probe.close()
+
+    def _display_ready(self, display: str | None) -> bool:
+        """Check a locally managed Xvfb display without launching a new one."""
+        if not display:
+            return False
+        if not display.startswith(":"):
+            return True
+        number = display[1:].split(".", 1)[0]
+        if not number.isdecimal():
+            return False
+        proc = self._xvfb_proc
+        if proc is not None and proc.poll() is not None:
+            return False
+        socket_path = Path(f"/tmp/.X11-unix/X{number}")
+        return socket_path.exists() and self._display_socket_alive(socket_path)
 
     def _track_task(self, coro, *, name: str) -> asyncio.Task[None] | None:
         if self._closing:
@@ -663,31 +720,7 @@ class Fetcher:
             # Browser cleanup still runs if the shutdown coroutine itself is
             # cancelled while it is waiting for its children.
             async with self._lifecycle_lock:
-                context, browser, pw = self._context, self._browser, self._pw
-                self._context = self._browser = self._pw = None
-                try:
-                    if context:
-                        await self._close_context(context)
-                finally:
-                    try:
-                        if browser:
-                            await browser.close()
-                    except Exception as exc:  # cleanup failure is useful but non-fatal
-                        logger.warning(f"[cs2] Chromium 关闭失败: {exc}")
-                    finally:
-                        if pw:
-                            try:
-                                await pw.stop()
-                            except Exception as exc:
-                                logger.warning(f"[cs2] Playwright 关闭失败: {exc}")
-                xvfb = self._xvfb_proc
-                self._xvfb_proc = None
-                if xvfb and xvfb.poll() is None:
-                    xvfb.terminate()
-                    try:
-                        await asyncio.to_thread(xvfb.wait, 5)
-                    except subprocess.TimeoutExpired:
-                        xvfb.kill()
+                await self._close_playwright_stack(stop_xvfb=True)
 
     @asynccontextmanager
     async def _navigation_slot(self, priority: FetchPriority) -> AsyncIterator[None]:
@@ -721,6 +754,72 @@ class Fetcher:
             if self._closing:
                 raise RuntimeError("fetcher is shutting down")
             return await self._ensure_context_locked()
+
+    async def _close_playwright_stack(self, *, stop_xvfb: bool) -> None:
+        """Close Playwright resources. Caller must hold ``_lifecycle_lock``."""
+        context, browser, pw = self._context, self._browser, self._pw
+        self._context = self._browser = self._pw = None
+        self._browser_uses = 0
+        self._browser_started_at = None
+        try:
+            if context:
+                await self._close_context(context)
+        finally:
+            try:
+                if browser:
+                    await browser.close()
+            except Exception as exc:  # cleanup failure is useful but non-fatal
+                logger.warning(f"[cs2] Chromium 关闭失败: {exc}")
+            finally:
+                if pw:
+                    try:
+                        await pw.stop()
+                    except Exception as exc:
+                        logger.warning(f"[cs2] Playwright 关闭失败: {exc}")
+
+        if stop_xvfb:
+            xvfb = self._xvfb_proc
+            self._xvfb_proc = None
+            self._display = None
+            if xvfb and xvfb.poll() is None:
+                xvfb.terminate()
+                try:
+                    await asyncio.to_thread(xvfb.wait, 5)
+                except subprocess.TimeoutExpired:
+                    xvfb.kill()
+
+    async def _recycle_browser_if_needed(self) -> None:
+        """Rebuild the Playwright stack after a browser operation.
+
+        The caller holds ``_browser_operation_lock``, so no page or context
+        from another operation can still be in use here.
+        """
+        if self._closing or self._browser is None:
+            return
+
+        use_limit = self.cfg.cs2_browser_recycle_uses
+        age_limit_seconds = self.cfg.cs2_browser_recycle_hours * 3600.0
+        uses_due = use_limit > 0 and self._browser_uses >= use_limit
+        age_due = (
+            age_limit_seconds > 0
+            and self._browser_started_at is not None
+            and time.monotonic() - self._browser_started_at >= age_limit_seconds
+        )
+        if not (uses_due or age_due):
+            return
+
+        reason = "次数" if uses_due else "运行时长"
+        detail = (
+            f"{self._browser_uses} 次"
+            if uses_due
+            else f"{self.cfg.cs2_browser_recycle_hours:g} 小时"
+        )
+        async with self._lifecycle_lock:
+            if self._closing or self._browser is None:
+                return
+            logger.info(f"[cs2] Playwright 达到回收阈值({reason} {detail}),重建浏览器栈")
+            await self._close_playwright_stack(stop_xvfb=False)
+            logger.info("[cs2] Playwright 浏览器栈已回收,Xvfb 保持复用")
 
     @staticmethod
     async def _close_context(ctx) -> None:
@@ -948,19 +1047,22 @@ class Fetcher:
                 return html
             logger.info(f"[cs2] curl_cffi 通道失败,回退 Playwright: {url}")
 
-        await self.start()
-        ctx = await self._new_context()
-        page = None
-        try:
-            page = await ctx.new_page()
-            await self._guard_top_level_navigation(page, _PAGE_HOSTS)
-            html = await self._navigate_html(page, url, wait_selector, priority)
-            if html is not None:
-                await self._cache_html(url, html)
-            return html
-        finally:
-            if page is not None:
-                await self._close_page(page)
+        async with self._browser_operation_lock:
+            await self.start()
+            self._browser_uses += 1
+            page = None
+            try:
+                ctx = await self._new_context()
+                page = await ctx.new_page()
+                await self._guard_top_level_navigation(page, _PAGE_HOSTS)
+                html = await self._navigate_html(page, url, wait_selector, priority)
+                if html is not None:
+                    await self._cache_html(url, html)
+                return html
+            finally:
+                if page is not None:
+                    await self._close_page(page)
+                await self._recycle_browser_if_needed()
 
     @staticmethod
     async def _cache_html(url: str, html: str) -> None:
@@ -997,33 +1099,36 @@ class Fetcher:
                 return result
             logger.info("[cs2] curl_cffi 搜索通道失败,回退 Playwright")
 
-        await self.start()
-        ctx = await self._new_context()
-        page = None
-        try:
-            page = await ctx.new_page()
-            await self._guard_top_level_navigation(page, _PAGE_HOSTS)
-            landed = await self._navigate_html(
-                page, hltv.URL_MATCHES, ".match", normalized_priority
-            )
-            if landed is None:
-                return None
-            async with self._navigation_slot(normalized_priority):
-                result = await page.evaluate(self._SEARCH_JS, term)
-            if not isinstance(result, dict) or result.get("status") != 200:
-                logger.warning(
-                    f"[cs2] 搜索失败 term={term!r} status={result.get('status') if isinstance(result, dict) else result}"
+        async with self._browser_operation_lock:
+            await self.start()
+            self._browser_uses += 1
+            page = None
+            try:
+                ctx = await self._new_context()
+                page = await ctx.new_page()
+                await self._guard_top_level_navigation(page, _PAGE_HOSTS)
+                landed = await self._navigate_html(
+                    page, hltv.URL_MATCHES, ".match", normalized_priority
                 )
+                if landed is None:
+                    return None
+                async with self._navigation_slot(normalized_priority):
+                    result = await page.evaluate(self._SEARCH_JS, term)
+                if not isinstance(result, dict) or result.get("status") != 200:
+                    logger.warning(
+                        f"[cs2] 搜索失败 term={term!r} status={result.get('status') if isinstance(result, dict) else result}"
+                    )
+                    return None
+                return result.get("txt")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[cs2] 搜索异常 term={term!r}: {exc}")
                 return None
-            return result.get("txt")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[cs2] 搜索异常 term={term!r}: {exc}")
-            return None
-        finally:
-            if page is not None:
-                await self._close_page(page)
+            finally:
+                if page is not None:
+                    await self._close_page(page)
+                await self._recycle_browser_if_needed()
 
     def spawn_logos(
         self,
@@ -1162,7 +1267,24 @@ class Fetcher:
             )
             unique_urls = failed_urls
 
-        await self.start()
+        async with self._browser_operation_lock:
+            await self.start()
+            self._browser_uses += 1
+            try:
+                return await self._get_logos_via_browser(
+                    warm_url, unique_urls, normalized_priority, out
+                )
+            finally:
+                await self._recycle_browser_if_needed()
+
+    async def _get_logos_via_browser(
+        self,
+        warm_url: str,
+        unique_urls: list[str],
+        normalized_priority: FetchPriority,
+        out: dict[str, bytes],
+    ) -> dict[str, bytes]:
+        """Browser leg of ``get_logos``. Caller holds the browser operation lock."""
         out_lock = asyncio.Lock()
         ctx = await self._new_context()
         pages = []
