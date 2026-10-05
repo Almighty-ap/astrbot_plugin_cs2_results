@@ -1146,10 +1146,18 @@ def all_index_teams() -> list[dict]:
 def all_index_players() -> list[dict]:
     with _transaction() as conn:
         rows = conn.execute(
-            "SELECT player_id, nick, team, team_key FROM player_team_cache"
+            """SELECT p.player_id, p.nick, p.team, p.team_key, t.rank AS team_rank
+               FROM player_team_cache p
+               LEFT JOIN team_index t ON t.team_key = p.team_key"""
         ).fetchall()
     return [
-        {"player_id": r["player_id"], "nick": r["nick"], "team": r["team"], "team_key": r["team_key"]}
+        {
+            "player_id": r["player_id"],
+            "nick": r["nick"],
+            "team": r["team"],
+            "team_key": r["team_key"],
+            "team_rank": r["team_rank"],
+        }
         for r in rows
     ]
 

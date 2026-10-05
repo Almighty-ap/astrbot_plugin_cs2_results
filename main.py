@@ -1686,7 +1686,7 @@ async def _handle_player_detail(name: str) -> None:
         await cs2.finish(
             "用法:/cs2 查询 选手 <名字>,例如 /cs2 查询 选手 s1mple"
         )
-    res = await names.resolve_player(fetcher, name)
+    res = await names.resolve_player(fetcher, name, store.all_index_players())
     if res.status == "error":
         await cs2.finish("HLTV 搜索暂时不可用,请稍后再试")
     if res.status == "ambiguous":
@@ -1764,7 +1764,7 @@ async def _handle_team_detail(name: str) -> None:
         await cs2.finish(
             "用法:/cs2 查询 战队 <名字>,例如 /cs2 查询 战队 NAVI"
         )
-    res = await names.resolve_team(fetcher, name)
+    res = await names.resolve_team(fetcher, name, store.all_index_teams())
     if res.status == "error":
         await cs2.finish("HLTV 搜索暂时不可用,请稍后再试")
     if res.status == "ambiguous":

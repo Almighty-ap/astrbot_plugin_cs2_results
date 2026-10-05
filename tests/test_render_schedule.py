@@ -168,3 +168,5 @@ def test_team_profile_card_contains_rankings_roster_and_results() -> None:
     assert "Vitality" in html
     assert "1 : 2" in html
     assert "最近 5 场 · 比分" in html
+    assert "width:100%;max-width:1200px" in html
+    assert 'style="width:1200px;' not in html

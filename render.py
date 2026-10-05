@@ -212,9 +212,11 @@ def _shell(body: str, pad: str) -> str:
 html,body{{background:{PAGE};}}
 body{{font-family:{FONT};}}
 </style>
-<div style="background:{PAGE};padding:56px 60px;display:flex;justify-content:center;
+<div style="background:{PAGE};padding:clamp(28px,7vw,56px) clamp(24px,5vw,60px);
+     display:flex;justify-content:center;
      color:{INK};-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;">
- <div style="width:1200px;background:{CARD};border:1px solid {BORDER};border-radius:24px;
+ <div style="width:100%;max-width:1200px;background:{CARD};border:1px solid {BORDER};
+      border-radius:24px;
       box-shadow:{_SHADOW};padding:{pad};">
 {body}
  </div>
@@ -2299,10 +2301,10 @@ def _profile_metric(label: str, value: str, sub: str = "") -> str:
     )
     return (
         f'<div style="flex:1;min-width:0;background:{INNER};border:1px solid {BORDER};'
-        f'border-radius:16px;padding:18px 20px;">'
+        f'border-radius:16px;padding:16px 14px;">'
         f'<div style="font-size:13px;font-weight:700;color:{MUTE};'
         f'text-transform:uppercase;">{_esc(label)}</div>'
-        f'<div style="font-size:30px;font-weight:800;color:{INK};line-height:1.15;'
+        f'<div style="font-size:26px;font-weight:800;color:{INK};line-height:1.15;'
         f'margin-top:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
         f"{_esc(value)}</div>{sub_html}</div>"
     )
@@ -2324,17 +2326,17 @@ def _profile_recent_rows(items: list, *, show_rating: bool = False) -> str:
                 f"{rating_value}</div>"
             )
         rows.append(
-            f'<div style="display:flex;align-items:center;gap:18px;padding:14px 4px;'
+            f'<div style="display:flex;align-items:center;gap:14px;padding:14px 4px;'
             f'border-top:1px solid {BORDER_R};">'
             f'<div style="width:36px;flex:none;text-align:center;">'
             f"{_profile_result_pill(item.result)}</div>"
-            f'<div style="width:190px;min-width:0;font-size:17px;font-weight:700;'
+            f'<div style="width:160px;min-width:0;font-size:17px;font-weight:700;'
             f'color:{ROW};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
             f"vs {_esc(item.opponent or 'TBD')}</div>"
             f'<div style="flex:1;min-width:0;font-size:14px;color:{MUTE};'
-            f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+            f'line-height:1.35;white-space:normal;overflow:visible;">'
             f"{_esc(detail)}</div>"
-            f'<div style="width:74px;flex:none;text-align:right;font-size:16px;font-weight:800;'
+            f'<div style="width:64px;flex:none;text-align:right;font-size:16px;font-weight:800;'
             f'color:{ROW};white-space:nowrap;">{_esc(item.score or "—")}</div>'
             f"{rating}</div>"
         )
