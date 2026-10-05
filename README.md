@@ -14,7 +14,7 @@
 <details>
 <summary>帮助卡（命令一览）</summary>
 
-![帮助卡](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview4.png)
+![帮助卡](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview4.png?v=26f863a)
 
 </details>
 
