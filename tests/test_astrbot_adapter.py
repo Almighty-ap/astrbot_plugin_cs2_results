@@ -368,3 +368,33 @@ def test_llm_intent_hint_only_applies_to_cs2_queries(
         )
     )
     assert other_req.system_prompt == ""
+
+
+def test_query_subcommand_routes_player_and_team_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = SimpleNamespace(
+        is_group=False,
+        group_id=None,
+        user_id="10001",
+    )
+    calls: list[tuple[str, str]] = []
+
+    async def player(name: str) -> None:
+        calls.append(("player", name))
+        raise main._CommandFinished
+
+    async def team(name: str) -> None:
+        calls.append(("team", name))
+        raise main._CommandFinished
+
+    monkeypatch.setattr(main, "_cooldown_left", lambda _event: 0)
+    monkeypatch.setattr(main, "_admin_ctx", lambda _event: False)
+    monkeypatch.setattr(main, "_handle_player_detail", player)
+    monkeypatch.setattr(main, "_handle_team_detail", team)
+
+    for raw in ("查询 选手 s1mple", "查询 战队 NAVI"):
+        with pytest.raises(main._CommandFinished):
+            asyncio.run(main.handle_cs2(event, raw))
+
+    assert calls == [("player", "s1mple"), ("team", "NAVI")]

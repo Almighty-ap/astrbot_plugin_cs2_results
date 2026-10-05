@@ -16,8 +16,8 @@
                       时间空档聚类,不按日历日切——欧洲赛事跨午夜的末场仍算同一晚;
                       有上一比赛日赛果时,会一并展示在当前日程上方
   /cs2 赛程 [赛事名]    正在进行/即将开赛赛事的完整赛程(小组赛/淘汰赛)
-  /cs2 选手 <名字>      选手近期 Rating / K/D、角色分与 Major 荣誉
-  /cs2 战队 <名字>      战队阵容、世界 / VRS 排名与近期战绩
+  /cs2 查询 选手 <名字>  选手近期 Rating / K/D、角色分与 Major 荣誉
+  /cs2 查询 战队 <名字>  战队阵容、世界 / VRS 排名与近期战绩
 
 管理/调试命令 —— 只在调试群(cfg.cs2_debug_groups,默认为空)或超管私聊可用,
 普通群里视为未识别、落回公开帮助卡,不暴露其存在,也不泄露订阅信息:
@@ -1683,7 +1683,9 @@ def _detail_candidate_lines(kind: str, candidates: list) -> str:
 
 async def _handle_player_detail(name: str) -> None:
     if not name:
-        await cs2.finish("用法:/cs2 选手 <名字>,例如 /cs2 选手 s1mple")
+        await cs2.finish(
+            "用法:/cs2 查询 选手 <名字>,例如 /cs2 查询 选手 s1mple"
+        )
     res = await names.resolve_player(fetcher, name)
     if res.status == "error":
         await cs2.finish("HLTV 搜索暂时不可用,请稍后再试")
@@ -1759,7 +1761,9 @@ async def _handle_player_detail(name: str) -> None:
 
 async def _handle_team_detail(name: str) -> None:
     if not name:
-        await cs2.finish("用法:/cs2 战队 <名字>,例如 /cs2 战队 NAVI")
+        await cs2.finish(
+            "用法:/cs2 查询 战队 <名字>,例如 /cs2 查询 战队 NAVI"
+        )
     res = await names.resolve_team(fetcher, name)
     if res.status == "error":
         await cs2.finish("HLTV 搜索暂时不可用,请稍后再试")
@@ -1843,6 +1847,18 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
     if sub in ("战况", "match", "赛况", "比分"):
         await _handle_schedule(" ".join(parts[1:]).strip() or None)
 
+    if sub in ("查询", "query", "查"):
+        kind = parts[1] if len(parts) > 1 else ""
+        name = " ".join(parts[2:]).strip()
+        if kind in _PLAYER_WORDS:
+            await _handle_player_detail(name)
+        if kind in _TEAM_WORDS:
+            await _handle_team_detail(name)
+        await cs2.finish(
+            "用法:/cs2 查询 选手 <名字> 或 /cs2 查询 战队 <名字>"
+        )
+
+    # 兼容旧版直接以实体类型开头的查询写法。
     if sub in ("选手", "player"):
         await _handle_player_detail(" ".join(parts[1:]).strip())
 
@@ -1940,8 +1956,8 @@ async def _send_help(admin: bool) -> None:
             "/cs2 赛事 —— 未来 3 个月顶级赛事",
             "/cs2 日程 —— 当前/下个比赛日的关注赛事比赛(含赛果与直播)",
             "/cs2 赛程 [赛事名] —— 正在进行赛事的完整赛程(小组赛/淘汰赛)",
-            "/cs2 选手 <名字> —— 选手近期 Rating / K/D、角色分与 Major 荣誉",
-            "/cs2 战队 <名字> —— 战队阵容、世界 / VRS 排名与近期战绩",
+            "/cs2 查询 选手 <名字> —— 选手近期 Rating / K/D、角色分与 Major 荣誉",
+            "/cs2 查询 战队 <名字> —— 战队阵容、世界 / VRS 排名与近期战绩",
             "/cs2 订阅 / 退订 —— 本群加入/退出推送(群管理员)",
             "/cs2 订阅 战队|选手 <名字> —— 开赛提醒和每张地图赛果都 @ 你",
             "/cs2 我的订阅 —— 查看你在本群订阅的战队/选手",

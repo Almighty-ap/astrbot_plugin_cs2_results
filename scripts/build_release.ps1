@@ -26,6 +26,7 @@ $excludes = @(
     "$pluginName/docs/images/preview2.png",
     "$pluginName/docs/images/preview3.png",
     "$pluginName/docs/images/preview4.png",
+    "$pluginName/docs/images/preview6.png",
     "$pluginName/tests/__pycache__"
 )
 

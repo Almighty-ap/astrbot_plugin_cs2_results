@@ -7,9 +7,9 @@
 
 ## 预览
 
-| 赛事日程 | 逐图战报 | HLTV 资讯 |
-| :---: | :---: | :---: |
-| ![赛事日程预览](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview1.png) | ![逐图战报预览](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview2.png) | ![HLTV 资讯预览](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview3.png) |
+| 赛事日程 | 逐图战报 | HLTV 资讯 | 战队详情 |
+| :---: | :---: | :---: | :---: |
+| ![赛事日程预览](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview1.png) | ![逐图战报预览](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview2.png) | ![HLTV 资讯预览](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview3.png) | ![战队详情预览](https://raw.githubusercontent.com/Almighty-ap/astrbot_plugin_cs2_results/main/docs/images/preview6.png) |
 
 <details>
 <summary>帮助卡（命令一览）</summary>
@@ -23,8 +23,8 @@
 - 顶级赛事直播时逐图推送战报卡,包含比分、半场、十人 Rating 和 VRS 变化。
 - 比赛开始时推送开赛卡,包含双方阵容、Major 冠军星标和 VRS 预测。
 - 支持 `/cs2 赛事`、`/cs2 日程`、`/cs2 赛程 [赛事名]`。
-- 支持 `/cs2 选手 <名字>` 查询近期 Rating / K/D、角色评分、Major 荣誉和近期比赛。
-- 支持 `/cs2 战队 <名字>` 查询现役阵容、HLTV / VRS 世界排名和近期战绩。
+- 支持 `/cs2 查询 选手 <名字>` 查询近期 Rating / K/D、角色评分、Major 荣誉和近期比赛。
+- 支持 `/cs2 查询 战队 <名字>` 查询现役阵容、HLTV / VRS 世界排名和近期战绩。
 - `/cs2 日程` 在展示当前或下个比赛日时，会在顶部附带上一比赛日的已结束赛果。
 - 支持群订阅、战队订阅和选手订阅,个人订阅命中后会在群里 `@` 对应用户。
 - 支持 HLTV RSS 新闻订阅、自动去重、LLM 中文翻译总结和资讯卡片推送。
@@ -66,8 +66,8 @@ apt-get install -y xvfb
 | `/cs2 赛事` | 查看未来三个月的顶级赛事 |
 | `/cs2 日程` | 查看当前或下一个比赛日的赛程与赛果，顶部附带上一比赛日赛果 |
 | `/cs2 战况 <战队>` | 查询指定战队近期比赛、当前比分与赛果 |
-| `/cs2 选手 <名字>` | 查询选手近期 Rating / K/D、角色评分、Major 荣誉和近期比赛 |
-| `/cs2 战队 <名字>` | 查询战队现役阵容、世界 / VRS 排名和近期战绩 |
+| `/cs2 查询 选手 <名字>` | 查询选手近期 Rating / K/D、角色评分、Major 荣誉和近期比赛 |
+| `/cs2 查询 战队 <名字>` | 查询战队现役阵容、世界 / VRS 排名和近期战绩 |
 | `/cs2 赛程 [赛事名]` | 查看正在进行或即将开赛赛事的完整赛程 |
 | `/cs2 资讯` | 查看最新一条 HLTV RSS 资讯卡片 |
 | `/cs2 资讯订阅` | 当前会话订阅 HLTV RSS 自动推送 |
