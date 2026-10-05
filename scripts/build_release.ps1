@@ -18,10 +18,14 @@ if (-not $Version) {
 $zip = Join-Path $parent "$pluginName`_v$Version.zip"
 $excludes = @(
     "$pluginName/.git",
+    "$pluginName/.venv",
     "$pluginName/__pycache__",
     "$pluginName/.pytest_cache",
+    "$pluginName/.pytest-tmp",
     "$pluginName/.ruff_cache",
     "$pluginName/data",
+    "$pluginName/DEVELOPMENT.md",
+    "$pluginName/_patch.py",
     "$pluginName/docs/images/preview1.png",
     "$pluginName/docs/images/preview2.png",
     "$pluginName/docs/images/preview3.png",
