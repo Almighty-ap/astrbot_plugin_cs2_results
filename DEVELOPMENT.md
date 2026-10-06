@@ -1,7 +1,8 @@
 # CS2 Results 插件开发文档
 
-本文档面向继续维护和扩展 `astrbot_plugin_cs2_results` 的开发者。当前基线为
-`v1.3.0`，目标运行时是 AstrBot `>=4.25.3,<5` 与 NapCat/OneBot v11。
+本文档面向继续维护和扩展 `astrbot_plugin_cs2_results` 的开发者。当前开发基线为
+`v1.5.7`（2026-10-07），目标运行时是 AstrBot `>=4.25.3,<5` 与
+NapCat/OneBot v11。
 
 ## 1. 项目定位
 
@@ -14,9 +15,11 @@
 - 自动追踪 HLTV 顶级赛事直播，并在每张地图结束后推送战报卡。
 - 推送开赛提醒，支持群级、战队级和选手级订阅。
 - 查询未来赛事、当前比赛日、赛事赛程和指定战队近期比赛。
+- 支持 `/cs2 查询 选手|战队` 详情卡，展示选手近期数据、战队阵容与排名。
 - 轮询 HLTV RSS，翻译资讯，并向订阅会话推送资讯卡。
 - 将赛事查询注册为 AstrBot LLM 工具。
-- 使用持久化 outbox 处理重试、禁群顺延、死信和重启恢复。
+- 使用持久化 outbox 处理战报和资讯投递的重试、禁群顺延、死信和重启恢复。
+- 支持通过 noVNC/x11vnc 人工完成 Cloudflare Turnstile，并持久化浏览器登录状态。
 
 ## 2. 总体架构
 
@@ -52,7 +55,7 @@ AstrBot 事件/命令/LLM 工具
 /cs2 命令或 LLM 工具 -> 读取缓存/抓取 -> 渲染卡片 -> 当前会话
 
 资讯推送:
-RSS 轮询 -> 去重 -> LLM 翻译 -> 渲染 -> 直接发送到 RSS 订阅会话
+RSS 轮询 -> 去重 -> LLM 翻译 -> 渲染 -> 资讯 outbox -> DeliveryWorker -> RSS 订阅会话
 ```
 
 ## 3. 目录职责
@@ -62,12 +65,12 @@ RSS 轮询 -> 去重 -> LLM 翻译 -> 渲染 -> 直接发送到 RSS 订阅会话
 | `main.py` | AstrBot 入口、命令路由、后台任务、赛事追踪、收件人计算和 LLM 工具 |
 | `config.py` | Pydantic 配置模型、默认值和跨字段校验 |
 | `_conf_schema.json` | AstrBot WebUI 配置表 |
-| `fetcher.py` | 抓取、缓存、限流、优先级队列、`curl_cffi`/Playwright 回退 |
+| `fetcher.py` | 抓取、缓存、限流、Cloudflare 退避、Playwright 状态复用和人工验证 |
 | `hltv.py` | HLTV HTML/JSON 解析和领域数据模型 |
-| `store.py` | SQLite 状态库、JSON 状态、图片缓存、页面缓存和 outbox |
-| `delivery.py` | 持久化投递消费者、重试、禁言顺延和死信处理 |
-| `render.py` | 战报、开赛、赛程、资讯、帮助卡的 HTML 和 PNG 渲染 |
-| `news.py` | HLTV RSS 轮询、翻译、去重、推送和提及匹配 |
+| `store.py` | SQLite 状态库、JSON 状态、图片/页面缓存、战报与资讯 outbox |
+| `delivery.py` | 消费战报和资讯投递，处理重试、禁言顺延、退订清理和死信 |
+| `render.py` | 战报、开赛、赛程、资讯、选手/战队详情和帮助卡的 HTML/PNG 渲染 |
+| `news.py` | HLTV RSS 轮询、翻译、去重、持久化入队和提及匹配 |
 | `news_entities.py` | 本地战队/选手实体匹配，不调用 LLM 做命名实体识别 |
 | `names.py` | 战队/选手名字归一化、本地解析和别名处理 |
 | `majors.py` | Major 冠军星标数据 |
@@ -88,9 +91,10 @@ RSS 轮询 -> 去重 -> LLM 翻译 -> 渲染 -> 直接发送到 RSS 订阅会话
 3. 读取 AstrBot 管理员 QQ 列表。
 4. 创建 `Fetcher` 和 `DeliveryWorker`。
 5. 将 `self.html_render` 绑定到渲染模块。
-6. 启动轮询、outbox、资讯和每日任务。
+6. 启动轮询、outbox、资讯、赛事预热和每日任务。
 
-`terminate()` 负责取消全部后台任务、释放 outbox claim，并关闭 Playwright/Xvfb。
+`terminate()` 负责取消全部后台任务、释放 outbox claim，并关闭 Playwright/Xvfb 与
+人工验证辅助进程。
 
 ### 4.2 事件和命令
 
@@ -143,7 +147,7 @@ await self.html_render(
 | 任务 | 作用 |
 | --- | --- |
 | `_poll_loop` | 串行调度 `/matches` 扫描、补报和直播比赛轮询 |
-| `_outbox_loop` | 持续消费持久化投递队列 |
+| `_outbox_loop` | 持续消费战报和资讯两类持久化投递队列 |
 | `NewsService.poll_loop` | 按配置轮询 HLTV RSS |
 | `_run_interval(_job_warm_event)` | 保鲜“正在进行”赛事的赛程页缓存 |
 | `_run_daily(_job_featured)` | 每日刷新赛事白名单、logo 和本地名录 |
@@ -199,7 +203,7 @@ await self.html_render(
 
 ### 7.1 SQLite
 
-当前 schema 版本为 `5`，主要表：
+当前 schema 版本为 `6`，主要表：
 
 | 表 | 用途 |
 | --- | --- |
@@ -211,15 +215,18 @@ await self.html_render(
 | `vrs_ranking` | Valve 世界排名 |
 | `delivery_batches` | 每个 `(match_id, map_key)` 的 PNG 载荷 |
 | `deliveries` | 每个群的投递状态、尝试次数、lease 和 mentions |
+| `news_deliveries` | 每条资讯在每个订阅会话中的投递状态和 mentions |
 
 Outbox 的关键语义：
 
-- 卡片先写入 `delivery_batches`，再进入 `deliveries`。
+- 战报卡片先写入 `delivery_batches`，再进入 `deliveries`。
+- 资讯卡片先渲染并写入 `delivery_batches`，再按完整 UMO 写入
+  `news_deliveries`；GUID 只在成功入队后标记为已见。
 - 只有成功发送才标记为 `sent`。
 - 普通失败使用有上限的指数退避。
 - 群禁言会顺延且不消耗重试次数。
 - 永久失败会进入 `dead` 或自动退订不可达群。
-- 重启后仍可继续投递已经生成的 PNG。
+- 重启后仍可继续投递已经生成的战报或资讯载荷。
 
 ### 7.2 JSON 和文件缓存
 
@@ -250,6 +257,8 @@ Outbox 的关键语义：
 | `/cs2 赛事` | 未来三个月顶级赛事 |
 | `/cs2 日程` | 当前或下一个比赛日 |
 | `/cs2 战况 <战队>` | 按战队过滤日程结果 |
+| `/cs2 查询 选手 <名字>` | 选手近期 Rating/K/D、角色分和 Major 荣誉 |
+| `/cs2 查询 战队 <名字>` | 战队阵容、世界/VRS 排名和近期战绩 |
 | `/cs2 赛程 [赛事名]` | 进行中赛事的完整赛程 |
 | `/cs2 资讯` | 最新 HLTV RSS 资讯 |
 | `/cs2 资讯订阅` / `资讯退订` | RSS 自动推送订阅 |
@@ -264,6 +273,7 @@ Outbox 的关键语义：
 | `/cs2 重试投递 [比赛ID]` | 重放死信 |
 | `/cs2 刷新名录` | 强制刷新战队/选手名录 |
 | `/cs2 刷新VRS` | 强制刷新 Valve 排名 |
+| `/cs2 验证` | 启动可见 Chromium 和 noVNC，人工完成 Cloudflare 验证 |
 | `/cs2 资讯检查` | 立即检查并推送 RSS |
 
 命令冷却默认按群或私聊用户计算。LLM 工具调用通过事件 extra 跳过普通命令冷却，
@@ -299,6 +309,7 @@ Outbox 的关键语义：
 - 遇到 Cloudflare 挑战、超时、错误内容类型或导入失败时回退 Playwright。
 - Playwright 可按 `cs2_headful` 启动有头模式。
 - Linux 无 DISPLAY 且启用有头模式时，会尝试启动私有 Xvfb。
+- Playwright 会持久化 `storage_state`，并在达到导航或运行时阈值后整体回收浏览器栈。
 
 ### 10.2 URL 安全
 
@@ -337,6 +348,19 @@ RSS 使用 `ETag` 和 `Last-Modified` 条件请求。HTTP 304 不下载、不解
 
 直播追踪会持续重抓比赛页并回写缓存，命令链可以利用这些缓存补齐进行中 BO3/BO5
 的当前大比分。
+
+### 10.5 人工 Cloudflare 验证
+
+`/cs2 验证` 仅在调试群或超级管理员私聊中开放。验证流程会：
+
+1. 复用现有 `Xvfb :99` 或按需启动它。
+2. 以有头模式启动 Chromium，并把窗口放在 `(0, 0)`。
+3. 临时启动 `x11vnc` 和 noVNC，输出可从本机建立 SSH 隧道的连接命令。
+4. 等待管理员在 HLTV 页面手动完成人机验证。
+5. 检测到 `cf_clearance` 或成功进入目标页面后，保存 Playwright `storage_state`。
+
+验证完成后浏览器上下文会复用保存的 cookies。后续自动抓取遇到失效时，再执行一次
+`/cs2 验证` 即可。Docker 镜像需要安装 `x11vnc`、`novnc` 和 `websockify`。
 
 ## 11. 渲染约定
 
@@ -406,7 +430,8 @@ ruff check .
 - `curl_cffi` 回退、代理和内容校验。
 - 投递发送、mentions 和禁言顺延。
 - 配置边界和 URL 安全。
-- RSS 解析、实体匹配和资讯状态。
+- RSS 解析、实体匹配、条件请求和资讯 outbox 状态。
+- Cloudflare 退避、人工验证状态和 Playwright `storage_state`。
 - AstrBot 事件适配、T2I 调用和 LLM 工具限制。
 
 ### 13.3 在 AstrBot 中调试
@@ -416,6 +441,8 @@ ruff check .
 3. 在 WebUI 中启用插件或点击“重载插件”。
 4. 配置至少一个订阅群或调试群。
 5. 使用 `/cs2 状态` 和 `/cs2 测试 <比赛ID>` 验证抓取、T2I 和发送链路。
+6. 在 Docker/VPS 中遇到 Cloudflare 时，使用 `/cs2 验证` 完成一次人工验证并观察
+   后续抓取是否复用 `storage_state`。
 
 真实端到端调试需要同时具备 AstrBot、NapCat、T2I 和可访问 HLTV 的网络环境。
 
@@ -430,7 +457,9 @@ ruff check .
 | 修改主动投递策略 | `delivery.py` 和 `store.py` 的投递状态机 |
 | 增加 LLM 工具 | `Cs2ResultsPlugin` 下的 `@filter.llm_tool` |
 | 修改 RSS 行为 | `news.py`、`news_entities.py` 和资讯卡渲染 |
+| 修改选手/战队详情 | `hltv.py`、`render.py` 和 `_handle_*_detail()` |
 | 修改抓取限流 | `fetcher.py` 的 `_FairPriorityGate` 和 `Fetcher` |
+| 修改 Cloudflare 验证 | `fetcher.py` 的 Playwright manager 和 `/cs2 验证` 入口 |
 
 ## 15. 当前已知缺口
 
@@ -441,8 +470,6 @@ ruff check .
 - `cs2_tpm_limit` 是预留配置，当前查询链不调用 LLM。
 - `cs2_sub_start_window_min`、`cs2_sub_lineup_resolve_cap` 和
   `cs2_sub_player_team_refresh_hours` 目前没有业务代码读取。
-- RSS 资讯没有独立 outbox。新闻 GUID 会先写入去重状态，再尝试发送；如果发送失败，
-  该条新闻不会自动重试。
 - `/cs2 战况 <战队>` 只过滤日程数据，受顶级赛事白名单和结果回看窗口限制，不等价于
   查询任意战队的完整历史比赛。
 - `main.py` 仍保留大量模块级全局状态，适合现有单体插件运行方式，但不利于隔离测试和
