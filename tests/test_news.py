@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from astrbot_plugin_cs2_results import news, render, store
+from astrbot_plugin_cs2_results.config import Config
+from astrbot_plugin_cs2_results.fetcher import ConditionalTextResult
 
 RSS_SAMPLE = """\
 <?xml version="1.0" encoding="UTF-8"?>
@@ -53,6 +56,45 @@ def test_news_state_subscribe_deduplicate_and_seen(
     assert store.news_unsubscribe("platform:GroupMessage:1001") is True
     assert store.news_unsubscribe("platform:GroupMessage:1001") is False
     assert store.news_subscribers() == []
+
+
+def test_news_uses_persisted_rss_cache_after_304(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_path = tmp_path / "news_state.json"
+    monkeypatch.setattr(store, "_NEWS_STATE", state_path)
+
+    class _Fetcher:
+        def __init__(self) -> None:
+            self.results = [
+                ConditionalTextResult(
+                    text=RSS_SAMPLE,
+                    etag='"rss-v1"',
+                    last_modified="Tue, 06 Oct 2026 12:00:00 GMT",
+                ),
+                ConditionalTextResult(
+                    etag='"rss-v1"',
+                    last_modified="Tue, 06 Oct 2026 12:00:00 GMT",
+                    not_modified=True,
+                ),
+            ]
+            self.calls: list[dict[str, str]] = []
+
+        async def fetch_impersonated_text_conditional(self, _url: str, **kwargs: str):
+            self.calls.append(kwargs)
+            return self.results.pop(0)
+
+    fetcher = _Fetcher()
+    service = news.NewsService(Config(), fetcher, context=None)  # type: ignore[arg-type]
+
+    first = asyncio.run(service.fetch_items())
+    second = asyncio.run(service.fetch_items())
+
+    assert [item.guid for item in first] == [item.guid for item in second]
+    assert fetcher.calls[1]["etag"] == '"rss-v1"'
+    assert fetcher.calls[1]["last_modified"] == "Tue, 06 Oct 2026 12:00:00 GMT"
+    assert store.news_http_cache()["xml"] == RSS_SAMPLE
 
 
 def test_news_html_contains_shared_card_content() -> None:

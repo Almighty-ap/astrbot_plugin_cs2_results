@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import html as html_lib
 import os
+import random
 import re
 import shutil
 import socket
@@ -58,6 +59,29 @@ _PRIORITY_RANK: dict[str, int] = {
 # hosts.  This is deliberately an exact allowlist rather than ``*.hltv.org``.
 _PAGE_HOSTS = frozenset({"hltv.org", "www.hltv.org"})
 _ASSET_HOSTS = frozenset({"hltv.org", "www.hltv.org", "img-cdn.hltv.org"})
+_STORAGE_STATE_FILENAME = "playwright_storage_state.json"
+_VNC_PORT = 5900
+_NOVNC_PORT = 6080
+
+
+@dataclass(frozen=True, slots=True)
+class ManualVerifyResult:
+    ok: bool
+    message: str
+    display: str | None = None
+    vnc_port: int = _VNC_PORT
+    novnc_port: int = _NOVNC_PORT
+    tunnel_target: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConditionalTextResult:
+    """A conditional HTTP response for RSS/XML feeds."""
+
+    text: Optional[str] = None
+    etag: str = ""
+    last_modified: str = ""
+    not_modified: bool = False
 
 
 @dataclass(eq=False, slots=True)
@@ -197,8 +221,12 @@ class Fetcher:
         self._browser = None
         self._context = None
         self._xvfb_proc: subprocess.Popen[bytes] | None = None
+        self._x11vnc_proc: subprocess.Popen[bytes] | None = None
+        self._novnc_proc: subprocess.Popen[bytes] | None = None
         self._display: str | None = None
         self._lifecycle_lock = asyncio.Lock()
+        self._manual_verify_lock = asyncio.Lock()
+        self._manual_verify_requested = False
         # Browser operations are serialized as a whole so recycling can never
         # close the shared context while another command or logo batch uses it.
         self._browser_operation_lock = asyncio.Lock()
@@ -211,6 +239,17 @@ class Fetcher:
         self._logo_refreshing: set[str] = set()  # background logo fetch dedupe
         self._logo_failed: dict[str, float] = {}  # url -> last-fail epoch (retry-cooldown)
         self._working_impersonate: str | None = None
+        self._challenge_until = 0.0
+        self._challenge_streak = 0
+        self._metrics_started = time.monotonic()
+        self._metrics: dict[str, int] = {
+            "attempts": 0,
+            "success": 0,
+            "errors": 0,
+            "challenges": 0,
+            "suppressed": 0,
+        }
+        self._last_metrics_log = self._metrics_started
 
     @property
     def closed(self) -> bool:
@@ -245,6 +284,74 @@ class Fetcher:
         if not cls._allowed_url(url, hosts):
             raise ValueError(f"blocked non-HLTV navigation URL: {url!r}")
 
+    def _backoff_remaining(self) -> float:
+        return max(0.0, self._challenge_until - time.monotonic())
+
+    def backoff_remaining_seconds(self) -> float:
+        """Public read-only view for the scheduler's retry delay."""
+        return self._backoff_remaining()
+
+    def _backoff_blocks(self, priority: FetchPriority) -> bool:
+        # Explicit interactive verification and the live result lane must remain
+        # available.  Everything decorative or periodic yields to the cooldown.
+        if self._manual_verify_enabled() or priority == PRIORITY_LIVE:
+            return False
+        return self._backoff_remaining() > 0
+
+    def _record_challenge(self, *, arm_backoff: bool = False) -> None:
+        self._metrics["challenges"] += 1
+        if not arm_backoff:
+            return
+        self._challenge_streak += 1
+        base = float(self.cfg.cs2_challenge_backoff_base_min * 60)
+        cap = float(self.cfg.cs2_challenge_backoff_max_min * 60)
+        exponent = min(self._challenge_streak - 1, 16)
+        delay = min(cap, base * (2**exponent))
+        delay *= random.uniform(0.85, 1.15)
+        self._challenge_until = time.monotonic() + delay
+        logger.warning(
+            f"[cs2] Cloudflare 连续失败 {self._challenge_streak} 次,"
+            f"低优先级抓取退避 {delay / 60:.1f} 分钟"
+        )
+
+    def _record_fetch_success(self) -> None:
+        self._metrics["success"] += 1
+        self._challenge_streak = 0
+        self._challenge_until = 0.0
+
+    def metrics_snapshot(self) -> dict[str, float | int]:
+        elapsed = max(1e-6, time.monotonic() - self._metrics_started)
+        attempts = self._metrics["attempts"]
+        return {
+            **self._metrics,
+            "window_seconds": elapsed,
+            "attempts_per_hour": attempts * 3600.0 / elapsed,
+            "backoff_remaining": self._backoff_remaining(),
+            "challenge_streak": self._challenge_streak,
+        }
+
+    def maybe_log_metrics(self, *, interval: float = 3600.0) -> None:
+        now = time.monotonic()
+        if now - self._last_metrics_log < interval:
+            return
+        snapshot = self.metrics_snapshot()
+        logger.info(
+            "[cs2] HLTV 抓取统计:"
+            f"尝试 {snapshot['attempts']} / 成功 {snapshot['success']} / "
+            f"失败 {snapshot['errors']} / CF {snapshot['challenges']} / "
+            f"退避 {float(snapshot['backoff_remaining']) / 60:.1f} 分钟 / "
+            f"抑制 {snapshot['suppressed']}"
+        )
+        self._metrics = {
+            "attempts": 0,
+            "success": 0,
+            "errors": 0,
+            "challenges": 0,
+            "suppressed": 0,
+        }
+        self._metrics_started = now
+        self._last_metrics_log = now
+
 
     # —— curl_cffi 双通道(Chrome TLS 指纹伪装)——
     # 仿照 HLTV RSS 插件:用 curl_cffi 的 impersonate="chrome" 伪装 Chrome TLS 指纹,
@@ -266,6 +373,36 @@ class Fetcher:
 
     def _curl_cffi_timeout(self) -> float:
         return max(5.0, min(float(self.cfg.cs2_nav_timeout) / 1000.0, 120.0))
+
+    def _headful_enabled(self) -> bool:
+        return bool(
+            self.cfg.cs2_headful
+            or self._manual_verify_enabled()
+        )
+
+    def _manual_verify_enabled(self) -> bool:
+        return bool(self.cfg.cs2_manual_verify or self._manual_verify_requested)
+
+    def _visible_headful(self) -> bool:
+        return bool(
+            self._manual_verify_enabled() or os.name == "nt"
+        )
+
+    def _chromium_launch_args(self) -> list[str]:
+        args = ["--disable-blink-features=AutomationControlled"]
+        if not self._headful_enabled():
+            return args
+        if self._visible_headful():
+            # A local Windows runner and an explicitly enabled manual-verify
+            # session need a visible window.  The offscreen position remains
+            # useful for ordinary Linux headful scraping.
+            args += ["--window-position=0,0", "--window-size=1366,900"]
+        else:
+            args += ["--window-position=-32000,-32000", "--window-size=1366,900"]
+        return args
+
+    def _storage_state_file(self) -> Path:
+        return store.DATA_DIR / _STORAGE_STATE_FILENAME
 
     @staticmethod
     def _html_title(html_text: str) -> str:
@@ -333,6 +470,7 @@ class Fetcher:
                 return None
 
         if self._is_cloudflare_challenge_html(html_text):
+            self._record_challenge()
             logger.info(f"[cs2] curl_cffi 命中 Cloudflare 挑战页,回退 Playwright: {url}")
             return None
         title = self._html_title(html_text)
@@ -340,6 +478,7 @@ class Fetcher:
             logger.warning(f"[cs2] curl_cffi 拒绝错误页 {title!r}: {url}")
             return None
         logger.debug(f"[cs2] curl_cffi 抓取成功: {url}")
+        self._record_fetch_success()
         return html_text
 
     async def _download_logo_via_curl_cffi(
@@ -444,11 +583,45 @@ class Fetcher:
         priority: FetchPriority = PRIORITY_SCAN,
     ) -> Optional[str]:
         """Fetch text/XML with a browser-fingerprint fallback chain and proxy."""
+        result = await self.fetch_impersonated_text_conditional(
+            url,
+            accept=accept,
+            priority=priority,
+        )
+        return result.text
+
+    async def fetch_impersonated_text_conditional(
+        self,
+        url: str,
+        *,
+        accept: str,
+        etag: str = "",
+        last_modified: str = "",
+        priority: FetchPriority = PRIORITY_SCAN,
+    ) -> ConditionalTextResult:
+        """Fetch XML/JSON with optional ETag and Last-Modified validators.
+
+        A 304 response is a successful no-op and avoids downloading or parsing
+        the unchanged RSS body.  The fallback chain remains the same as the
+        normal text fetcher so a challenged fingerprint does not poison the
+        conditional path.
+        """
         self._require_allowed_url(url, _PAGE_HOSTS)
         normalized_priority = self._priority(priority)
+        if self._backoff_blocks(normalized_priority):
+            self._metrics["suppressed"] += 1
+            logger.warning(
+                f"[cs2] Cloudflare 退避中,暂缓文本抓取({self._backoff_remaining():.0f}s): {url}"
+            )
+            return ConditionalTextResult()
         proxy = self._curl_cffi_proxy()
         headers = {"Accept": accept}
+        if etag:
+            headers["If-None-Match"] = etag
+        if last_modified:
+            headers["If-Modified-Since"] = last_modified
         last_error: Exception | None = None
+        saw_challenge = False
         for profile in self._impersonate_candidates():
             try:
                 from curl_cffi.requests import AsyncSession
@@ -460,19 +633,38 @@ class Fetcher:
                         timeout=self._curl_cffi_timeout(),
                     ) as session:
                         resp = await session.get(url, headers=headers)
+                        if resp.status_code == 304:
+                            if profile != self._working_impersonate:
+                                self._working_impersonate = profile
+                            self._record_fetch_success()
+                            return ConditionalTextResult(
+                                etag=etag,
+                                last_modified=last_modified,
+                                not_modified=True,
+                            )
                         if resp.status_code >= 400:
                             last_error = RuntimeError(
                                 f"HTTP {resp.status_code} (impersonate={profile})"
                             )
                             continue
                         text = resp.text
+                        response_etag = str(resp.headers.get("etag", "") or "").strip()
+                        response_modified = str(
+                            resp.headers.get("last-modified", "") or ""
+                        ).strip()
                 if self._is_cloudflare_challenge_html(text):
+                    saw_challenge = True
                     last_error = RuntimeError(f"Cloudflare challenge (impersonate={profile})")
                     continue
                 if profile != self._working_impersonate:
                     self._working_impersonate = profile
                     logger.info(f"[cs2] 文本抓取使用指纹 {profile}: {url}")
-                return text
+                self._record_fetch_success()
+                return ConditionalTextResult(
+                    text=text,
+                    etag=response_etag,
+                    last_modified=response_modified,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -480,7 +672,9 @@ class Fetcher:
                 logger.info(f"[cs2] 指纹 {profile} 文本抓取失败 {url}: {exc}")
         if last_error is not None:
             logger.warning(f"[cs2] 所有指纹均无法抓取文本 {url}: {last_error}")
-        return None
+        if saw_challenge:
+            self._record_challenge(arm_backoff=True)
+        return ConditionalTextResult()
 
     async def fetch_impersonated_bytes(
         self,
@@ -492,6 +686,9 @@ class Fetcher:
         """Fetch image bytes with the same browser-fingerprint fallback chain."""
         self._require_allowed_url(url, _ASSET_HOSTS)
         normalized_priority = self._priority(priority)
+        if self._backoff_blocks(normalized_priority):
+            self._metrics["suppressed"] += 1
+            return None
         proxy = self._curl_cffi_proxy()
         headers = {"Accept": accept, "Referer": "https://www.hltv.org/"}
         last_error: Exception | None = None
@@ -545,7 +742,8 @@ class Fetcher:
             from playwright.async_api import async_playwright
 
             launch_env: dict[str, str] | None = None
-            if self.cfg.cs2_headful and os.name != "nt":
+            headful = self._headful_enabled()
+            if headful and os.name != "nt":
                 display = os.environ.get("DISPLAY")
                 if not display and self._display_ready(self._display):
                     display = self._display
@@ -555,13 +753,10 @@ class Fetcher:
                 launch_env["DISPLAY"] = display
 
             pw = await async_playwright().start()
-            args = ["--disable-blink-features=AutomationControlled"]
-            if self.cfg.cs2_headful:
-                # Headful is more reliable for /events.  Keep the window offscreen.
-                args += ["--window-position=-32000,-32000", "--window-size=1366,900"]
+            args = self._chromium_launch_args()
             try:
                 browser = await pw.chromium.launch(
-                    headless=not self.cfg.cs2_headful,
+                    headless=not headful,
                     args=args,
                     ignore_default_args=["--enable-automation"],
                     env=launch_env,
@@ -589,9 +784,11 @@ class Fetcher:
             self._context = context
             self._browser_uses = 0
             self._browser_started_at = time.monotonic()
+            mode = "无头"
+            if headful:
+                mode = "有头/可见" if self._visible_headful() else "有头/屏幕外"
             logger.info(
-                f"[cs2] Chromium 抓取浏览器已启动"
-                f"({'有头/屏幕外' if self.cfg.cs2_headful else '无头'})"
+                f"[cs2] Chromium 抓取浏览器已启动({mode})"
             )
 
     def _start_xvfb(self) -> str:
@@ -608,7 +805,9 @@ class Fetcher:
             lock_path = Path(f"/tmp/.X{number}-lock")
             if socket_path.exists():
                 if self._display_socket_alive(socket_path):
-                    continue
+                    self._display = display
+                    logger.info(f"[cs2] 复用已有 Xvfb {display}")
+                    return display
             if lock_path.exists() and self._xvfb_lock_owner_alive(lock_path):
                 continue
             if socket_path.exists():
@@ -697,6 +896,123 @@ class Fetcher:
         socket_path = Path(f"/tmp/.X11-unix/X{number}")
         return socket_path.exists() and self._display_socket_alive(socket_path)
 
+    @staticmethod
+    def _tcp_port_ready(host: str, port: int) -> bool:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.settimeout(0.2)
+            probe.connect((host, port))
+            return True
+        except OSError:
+            return False
+        finally:
+            probe.close()
+
+    def _start_x11vnc(self, display: str) -> None:
+        """Start a temporary x11vnc server for the managed X display."""
+        proc = self._x11vnc_proc
+        if proc is not None and proc.poll() is None:
+            return
+        if self._tcp_port_ready("127.0.0.1", _VNC_PORT):
+            logger.info(f"[cs2] 检测到已有 x11vnc 监听 :{_VNC_PORT}")
+            return
+
+        binary = shutil.which("x11vnc")
+        if not binary:
+            raise RuntimeError(
+                "未安装 x11vnc;Debian/Ubuntu 可执行 apt-get install -y x11vnc"
+            )
+        child = subprocess.Popen(
+            [
+                binary,
+                "-display",
+                display,
+                "-forever",
+                "-shared",
+                "-rfbport",
+                str(_VNC_PORT),
+                "-nolookup",
+                "-quiet",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        for _ in range(50):
+            if child.poll() is not None:
+                raise RuntimeError("x11vnc 启动失败")
+            if self._tcp_port_ready("127.0.0.1", _VNC_PORT):
+                self._x11vnc_proc = child
+                logger.info(f"[cs2] x11vnc 已启动: display={display}, port={_VNC_PORT}")
+                return
+            time.sleep(0.1)
+        child.terminate()
+        raise RuntimeError("x11vnc 启动超时")
+
+    async def _stop_x11vnc(self) -> None:
+        proc = self._x11vnc_proc
+        self._x11vnc_proc = None
+        if proc is None or proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            await asyncio.to_thread(proc.wait, 5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            await asyncio.to_thread(proc.wait, 5)
+        logger.info("[cs2] x11vnc 已停止")
+
+    def _start_novnc(self) -> None:
+        """Start a temporary browser-based noVNC frontend."""
+        proc = self._novnc_proc
+        if proc is not None and proc.poll() is None:
+            return
+        if self._tcp_port_ready("127.0.0.1", _NOVNC_PORT):
+            logger.info(f"[cs2] 检测到已有 noVNC 监听 :{_NOVNC_PORT}")
+            return
+
+        binary = shutil.which("websockify")
+        web_root = Path("/usr/share/novnc")
+        if not binary or not (web_root / "vnc.html").is_file():
+            raise RuntimeError(
+                "未安装 noVNC/websockify;"
+                "Debian/Ubuntu 可执行 apt-get install -y novnc websockify"
+            )
+        child = subprocess.Popen(
+            [
+                binary,
+                f"--web={web_root}",
+                str(_NOVNC_PORT),
+                f"127.0.0.1:{_VNC_PORT}",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        for _ in range(50):
+            if child.poll() is not None:
+                raise RuntimeError("noVNC 启动失败")
+            if self._tcp_port_ready("127.0.0.1", _NOVNC_PORT):
+                self._novnc_proc = child
+                logger.info(f"[cs2] noVNC 已启动: port={_NOVNC_PORT}")
+                return
+            time.sleep(0.1)
+        child.terminate()
+        raise RuntimeError("noVNC 启动超时")
+
+    async def _stop_novnc(self) -> None:
+        proc = self._novnc_proc
+        self._novnc_proc = None
+        if proc is None or proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            await asyncio.to_thread(proc.wait, 5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            await asyncio.to_thread(proc.wait, 5)
+        logger.info("[cs2] noVNC 已停止")
+
     def _track_task(self, coro, *, name: str) -> asyncio.Task[None] | None:
         if self._closing:
             coro.close()
@@ -729,12 +1045,133 @@ class Fetcher:
 
     async def _build_context(self, browser):
         proxy_url = self._curl_cffi_proxy()
-        return await browser.new_context(
-            user_agent=UA,
-            locale="en-US",
-            viewport={"width": 1366, "height": 900},
-            proxy={"server": proxy_url} if proxy_url else None,
-        )
+        context_options: dict[str, object] = {
+            "user_agent": UA,
+            "locale": "en-US",
+            "viewport": {"width": 1366, "height": 900},
+            "proxy": {"server": proxy_url} if proxy_url else None,
+        }
+        state_file = self._storage_state_file()
+        if state_file.is_file():
+            context_options["storage_state"] = str(state_file)
+        return await browser.new_context(**context_options)
+
+    async def _save_storage_state(self) -> None:
+        """Persist cookies/local storage after a manual Cloudflare verification."""
+        context = self._context
+        if context is None:
+            return
+        state_file = self._storage_state_file()
+        tmp_file = state_file.with_name(f".{state_file.name}.tmp")
+        try:
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            await context.storage_state(path=str(tmp_file))
+            await asyncio.to_thread(os.replace, tmp_file, state_file)
+            logger.info(f"[cs2] 已保存 Playwright 验证状态: {state_file}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[cs2] 保存 Playwright 验证状态失败: {exc}")
+        finally:
+            try:
+                tmp_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    async def _has_cf_clearance(self) -> bool:
+        context = self._context
+        if context is None:
+            return False
+        try:
+            cookies = await context.cookies("https://www.hltv.org")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+        return any(cookie.get("name") == "cf_clearance" for cookie in cookies)
+
+    def _vnc_tunnel_target(self) -> str | None:
+        try:
+            host = socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return None
+        return f"{host}:{_VNC_PORT}" if host else None
+
+    async def manual_verify(self) -> ManualVerifyResult:
+        """Open a visible browser, wait for manual Cloudflare clearance, and persist it."""
+        async with self._manual_verify_lock:
+            if self._closing:
+                return ManualVerifyResult(False, "插件正在关闭,无法开始验证")
+
+            self._manual_verify_requested = True
+            display: str | None = None
+            try:
+                async with self._browser_operation_lock:
+                    # A browser started for normal scraping may use the offscreen
+                    # window position, so recycle it before opening the VNC view.
+                    async with self._lifecycle_lock:
+                        if self._browser is not None:
+                            await self._close_playwright_stack(stop_xvfb=False)
+
+                    await self.start()
+                    self._browser_uses += 1
+                    display = self._display or os.environ.get("DISPLAY")
+                    if os.name != "nt":
+                        if not display:
+                            return ManualVerifyResult(
+                                False, "没有可用的 Xvfb DISPLAY,无法启动 VNC"
+                            )
+                        await asyncio.to_thread(self._start_x11vnc, display)
+                        await asyncio.to_thread(self._start_novnc)
+
+                    context = await self._new_context()
+                    page = None
+                    try:
+                        page = await context.new_page()
+                        await self._guard_top_level_navigation(page, _PAGE_HOSTS)
+                        html = await self._navigate_html(
+                            page,
+                            hltv.URL_MATCHES,
+                            ".match",
+                            PRIORITY_USER,
+                        )
+                        if html is None:
+                            return ManualVerifyResult(
+                                False,
+                                "等待人工验证超时,HLTV 仍未放行",
+                                display=display,
+                                tunnel_target=self._vnc_tunnel_target(),
+                            )
+                        has_clearance = await self._has_cf_clearance()
+                        await self._save_storage_state()
+                        target = self._vnc_tunnel_target()
+                        return ManualVerifyResult(
+                            True,
+                            (
+                                "Cloudflare 验证成功,已保存 cf_clearance 登录状态"
+                                if has_clearance
+                                else "HLTV 已成功进入 /matches,已保存浏览器登录状态"
+                            ),
+                            display=display,
+                            tunnel_target=target,
+                        )
+                    finally:
+                        if page is not None:
+                            await self._close_page(page)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[cs2] 人工验证失败: {exc}")
+                return ManualVerifyResult(
+                    False,
+                    f"人工验证启动失败:{exc}",
+                    display=display,
+                    tunnel_target=self._vnc_tunnel_target(),
+                )
+            finally:
+                self._manual_verify_requested = False
+                await self._stop_novnc()
+                await self._stop_x11vnc()
 
     async def _ensure_context_locked(self):
         if self._context is not None:
@@ -778,6 +1215,8 @@ class Fetcher:
                         logger.warning(f"[cs2] Playwright 关闭失败: {exc}")
 
         if stop_xvfb:
+            await self._stop_novnc()
+            await self._stop_x11vnc()
             xvfb = self._xvfb_proc
             self._xvfb_proc = None
             self._display = None
@@ -913,6 +1352,8 @@ class Fetcher:
         """
         attempts = max(1, self.cfg.cs2_challenge_retries)
         budget = self.cfg.cs2_fetch_budget_seconds
+        manual_verify = self._manual_verify_enabled()
+        manual_timeout_ms = self.cfg.cs2_manual_verify_timeout * 1000
         async with self._navigation_slot(priority):
             started = time.monotonic()
             for attempt in range(attempts):
@@ -937,7 +1378,13 @@ class Fetcher:
                             wait_selector,
                             state="attached",
                             timeout=(
-                                self.cfg.cs2_challenge_grace_ms if was_challenge else 25000
+                                manual_timeout_ms
+                                if (manual_verify and was_challenge)
+                                else (
+                                    self.cfg.cs2_challenge_grace_ms
+                                    if was_challenge
+                                    else 25000
+                                )
                             ),
                         )
                     except Exception:  # timeout is validated below, never cached
@@ -946,8 +1393,14 @@ class Fetcher:
                     # 还在挑战页(宽限窗口内没自行放行)→ 不必再取 title/content,
                     # 直接进下一轮 reload。
                     if was_challenge and not selector_found:
+                        if manual_verify:
+                            logger.warning(
+                                f"[cs2] 手动验证等待超时({self.cfg.cs2_manual_verify_timeout}s): {url}"
+                            )
+                            return None
                         if attempt + 1 < attempts and time.monotonic() - started < budget:
                             continue
+                        self._record_challenge(arm_backoff=True)
                         logger.warning(f"[cs2] Cloudflare 挑战未通过: {url}")
                         return None
 
@@ -966,6 +1419,7 @@ class Fetcher:
                 if self._is_challenge(title):
                     if attempt + 1 < attempts and time.monotonic() - started < budget:
                         continue
+                    self._record_challenge(arm_backoff=True)
                     logger.warning(f"[cs2] Cloudflare 挑战未通过: {url}")
                     return None
 
@@ -981,6 +1435,9 @@ class Fetcher:
                 if self._is_error_page(title, html):
                     logger.warning(f"[cs2] 拒绝缓存错误页 {title!r}: {url}")
                     return None
+                if manual_verify and was_challenge:
+                    await self._save_storage_state()
+                self._record_fetch_success()
                 return html
         return None
 
@@ -1040,6 +1497,13 @@ class Fetcher:
         wait_selector: str,
         priority: FetchPriority,
     ) -> Optional[str]:
+        if self._backoff_blocks(priority):
+            self._metrics["suppressed"] += 1
+            logger.warning(
+                f"[cs2] Cloudflare 退避中,暂缓页面抓取({self._backoff_remaining():.0f}s): {url}"
+            )
+            return None
+        self._metrics["attempts"] += 1
         if self._curl_cffi_enabled():
             html = await self._fetch_via_curl_cffi(url, priority)
             if html is not None:
@@ -1058,6 +1522,8 @@ class Fetcher:
                 html = await self._navigate_html(page, url, wait_selector, priority)
                 if html is not None:
                     await self._cache_html(url, html)
+                else:
+                    self._metrics["errors"] += 1
                 return html
             finally:
                 if page is not None:
@@ -1093,6 +1559,12 @@ class Fetcher:
         if not term:
             return None
         normalized_priority = self._priority(priority)
+        if self._backoff_blocks(normalized_priority):
+            self._metrics["suppressed"] += 1
+            logger.warning(
+                f"[cs2] Cloudflare 退避中,暂缓搜索({self._backoff_remaining():.0f}s): {term}"
+            )
+            return None
         if self._curl_cffi_enabled():
             result = await self._fetch_search_via_curl_cffi(term, normalized_priority)
             if result is not None:
@@ -1150,6 +1622,9 @@ class Fetcher:
 
         cooldown = self.cfg.cs2_logo_fail_cooldown
         now = time.time()
+        if self._backoff_blocks(normalized_priority):
+            self._metrics["suppressed"] += 1
+            return
         fresh = [
             url
             for url in dict.fromkeys(logo_urls)

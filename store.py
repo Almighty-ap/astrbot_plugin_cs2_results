@@ -1009,10 +1009,18 @@ def _news_state() -> dict:
     state = _load(_NEWS_STATE, {})
     if not isinstance(state, dict):
         state = {}
+    http = state.get("http")
+    if not isinstance(http, dict):
+        http = {}
     return {
         "subscribers": list(dict.fromkeys(state.get("subscribers") or [])),
         "seen": list(dict.fromkeys(state.get("seen") or [])),
         "initialized": bool(state.get("initialized", False)),
+        "http": {
+            "etag": str(http.get("etag") or ""),
+            "last_modified": str(http.get("last_modified") or ""),
+            "xml": str(http.get("xml") or "")[:2_000_000],
+        },
     }
 
 
@@ -1054,6 +1062,29 @@ def news_seen_guids() -> list[str]:
 
 def news_initialized() -> bool:
     return bool(_news_state()["initialized"])
+
+
+def news_http_cache() -> dict[str, str]:
+    """Return the cached RSS validators and last XML body for conditional GET."""
+    return dict(_news_state()["http"])
+
+
+def news_set_http_cache(
+    *,
+    etag: str = "",
+    last_modified: str = "",
+    xml: str = "",
+) -> None:
+    """Persist conditional-GET metadata without changing subscription state."""
+    with _JSON_LOCK:
+        state = _news_state()
+        previous = state["http"]
+        state["http"] = {
+            "etag": str(etag or "").strip(),
+            "last_modified": str(last_modified or "").strip(),
+            "xml": str(xml or previous.get("xml") or "")[:2_000_000],
+        }
+        _dump(_NEWS_STATE, state)
 
 
 def news_mark_seen(guids: Iterable[str], *, keep: int = 500, initialized: bool = True) -> None:

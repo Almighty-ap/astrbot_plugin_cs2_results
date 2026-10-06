@@ -26,6 +26,7 @@
   /cs2 重试投递 [比赛ID] 重新激活全部或指定比赛的死信
   /cs2 刷新名录         强制刷新战队/选手本地名录(抓一次世界排行榜)
   /cs2 刷新VRS          强制刷新 Valve 世界排名总榜(抓一次 /valve-ranking/teams)
+  /cs2 验证             启动可见 Chromium + noVNC,人工完成 Cloudflare 验证
 适配 AstrBot + NapCat(OneBot v11)。
 """
 
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import socket
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
@@ -226,7 +228,7 @@ def _is_superuser(event: MessageEvent) -> bool:
 
 
 def _live_busy() -> bool:
-    """当前是否有正在追踪的直播。有的话,120s 节流几乎被逐图轮询占满,不应再让装饰性的
+    """当前是否有正在追踪的直播。有的话,全局节流几乎被逐图轮询占满,不应再让装饰性的
     logo 发现(每个赛事页占一个节流档)去抢额度、拖慢时效性强的战报推送。空闲期(如每日
     4 点白名单刷新时)_followed 为空,预热便能放开发现、一次填满。"""
     return bool(_followed)
@@ -1177,6 +1179,25 @@ async def _job_vrs() -> None:
         await refresh_vrs_ranking()
 
 
+def _matches_scan_interval_seconds() -> float:
+    """Return the dynamic /matches scan cadence.
+
+    Live tracking keeps the tighter configured cadence (at least five minutes)
+    because a newly started map can otherwise be missed for too long.  In idle
+    periods the slower interval protects the shared HLTV navigation budget and
+    lets the daily warm-up tasks breathe.
+    """
+    active = max(5 * 60.0, cfg.cs2_matches_scan_interval * 60.0)
+    idle = max(active, cfg.cs2_matches_idle_scan_interval * 60.0)
+    return active if _followed else idle
+
+
+def _failure_retry_seconds(normal_interval: float) -> float:
+    """Retry quickly for ordinary failures, but not before CF backoff expires."""
+    normal = max(60.0, normal_interval)
+    return min(normal, max(60.0, fetcher.backoff_remaining_seconds() + 5.0))
+
+
 async def _poll_once() -> float:
     """公平执行一个到期操作，不把多个上游请求捆在同一轮里。
 
@@ -1185,20 +1206,21 @@ async def _poll_once() -> float:
     排在字典后面的比赛。
     """
     global _last_backstop, _next_backstop_at, _next_scan_at
+    fetcher.maybe_log_metrics()
     if not target_groups():
         return 30.0
 
     now = time.time()
     # 有 live 时拉长 /matches 扫描:新开赛发现可慢一点,把导航额度留给逐图轮询
-    scan_every = cfg.cs2_matches_scan_interval * 60
-    if _followed:
-        scan_every = max(scan_every, 5 * 60)
+    scan_every = _matches_scan_interval_seconds()
     if _next_backstop_at <= 0:
         # 启动后尽快做一次宽窗口补报
         _next_backstop_at = now + (15 if _startup_backstop_pending else 60)
     if now >= _next_scan_at:
         succeeded = await scan_live()
-        _next_scan_at = time.time() + (scan_every if succeeded else min(60, scan_every))
+        _next_scan_at = time.time() + (
+            scan_every if succeeded else _failure_retry_seconds(scan_every)
+        )
         if succeeded:
             _stat["last_scan"] = time.time()
         _stat["last_poll"] = _now()
@@ -1214,7 +1236,9 @@ async def _poll_once() -> float:
                 _last_backstop = time.time()
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cs2] 补报扫描失败: {e}")
-        _next_backstop_at = time.time() + (backstop_every if succeeded else 60)
+        _next_backstop_at = time.time() + (
+            backstop_every if succeeded else _failure_retry_seconds(backstop_every)
+        )
         _stat["last_poll"] = _now()
         return 0.0
 
@@ -1880,6 +1904,7 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
         wl = store.whitelist_view()
         cache = store.cache_overview()
         outbox = store.outbox_overview()
+        fetch_stats = fetcher.metrics_snapshot()
         failing = {
             name: state["fail_streak"]
             for name, state in _stat["sources"].items()
@@ -1902,11 +1927,19 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
             f"投递载荷:{outbox['payload_batches']} 批 / {outbox['payload_bytes'] // 1024} KB",
             f"上次刷新白名单:{_stat['last_featured'] or '—'}",
             f"上次轮询:{_stat['last_poll'] or '—'}",
+            f"HLTV 抓取窗口:尝试 {fetch_stats['attempts']} / 成功 {fetch_stats['success']} / "
+            f"失败 {fetch_stats['errors']} / CF {fetch_stats['challenges']} / "
+            f"抑制 {fetch_stats['suppressed']}",
+            f"HLTV 频率:{float(fetch_stats['attempts_per_hour']):.1f} 次/小时;"
+            f"CF 退避:{float(fetch_stats['backoff_remaining']) / 60:.1f} 分钟",
             f"连续失败:{_stat['fail_streak']}",
             f"失败来源:{failing or '无'}",
             f"最近错误:{_stat['last_error'] or '—'}",
         ]
         await cs2.finish("\n".join(lines))
+
+    if admin and sub in ("验证", "verify", "cloudflare"):
+        await _handle_manual_verify()
 
     if admin and sub in ("测试", "test"):
         await _handle_test(parts[1] if len(parts) > 1 else None)
@@ -1946,6 +1979,32 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
     await _send_help(admin)
 
 
+async def _handle_manual_verify() -> None:
+    try:
+        container_ip = socket.gethostbyname(socket.gethostname())
+    except OSError:
+        container_ip = "<AstrBot容器IP>"
+    vnc_target = f"{container_ip}:5900"
+    novnc_target = f"{container_ip}:6080"
+    ssh_host = cfg.cs2_vnc_ssh_host.strip() or "<VPS_IP>"
+    await cs2.send(
+        "正在启动人工验证浏览器…\n"
+        "无需安装 VNC 客户端,使用浏览器即可。\n"
+        f"1. 本机执行: ssh -L 6080:{novnc_target} root@{ssh_host}\n"
+        "2. 浏览器打开: "
+        "http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale\n"
+        "3. 在页面中的 Chromium 完成 HLTV 验证。\n"
+        f"原生 VNC 备用隧道: ssh -L 5900:{vnc_target} root@{ssh_host}"
+    )
+    result = await fetcher.manual_verify()
+    if result.ok:
+        await cs2.finish(
+            f"{result.message}\n后续自动抓取将复用这次 cf_clearance;失效时再执行 /cs2 验证"
+        )
+    else:
+        await cs2.finish(f"人工验证失败:{result.message}")
+
+
 async def _send_help(admin: bool) -> None:
     try:
         png = await card.render_help_card(admin, _now())
@@ -1972,6 +2031,7 @@ async def _send_help(admin: bool) -> None:
                 "/cs2 重试投递 [比赛ID] —— 重新激活死信(仅调试群)",
                 "/cs2 刷新名录 —— 强制刷新战队/选手名录(仅调试群)",
                 "/cs2 刷新VRS —— 强制刷新 Valve 世界排名总榜(仅调试群)",
+                "/cs2 验证 —— 启动网页 VNC 人工完成 Cloudflare 验证(仅调试群)",
                 "/cs2 资讯检查 —— 立即检查并推送 HLTV RSS 新资讯(仅调试群)",
             ]
         await cs2.finish("\n".join(lines))

@@ -8,6 +8,7 @@ from typing import ClassVar
 from unittest.mock import AsyncMock
 
 import pytest
+from astrbot_plugin_cs2_results import fetcher as fetcher_module
 from astrbot_plugin_cs2_results import store
 from astrbot_plugin_cs2_results.config import Config
 from astrbot_plugin_cs2_results.fetcher import Fetcher
@@ -22,12 +23,18 @@ class _FakeResponse:
         content: bytes = b"",
         content_type: str = "text/html",
         status_code: int = 200,
+        etag: str = "",
+        last_modified: str = "",
     ) -> None:
         self.url = url
         self.text = text
         self.content = content
         self.status_code = status_code
         self.headers = {"content-type": content_type}
+        if etag:
+            self.headers["etag"] = etag
+        if last_modified:
+            self.headers["last-modified"] = last_modified
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -36,6 +43,7 @@ class _FakeResponse:
 
 class _FakeSession:
     calls: ClassVar[list[dict[str, object]]] = []
+    get_calls: ClassVar[list[dict[str, object]]] = []
     responses: ClassVar[list[_FakeResponse]] = []
 
     def __init__(self, **kwargs: object) -> None:
@@ -48,7 +56,8 @@ class _FakeSession:
     async def __aexit__(self, *_args: object) -> None:
         return None
 
-    async def get(self, url: str, **_kwargs: object) -> _FakeResponse:
+    async def get(self, url: str, **kwargs: object) -> _FakeResponse:
+        self.get_calls.append({"url": url, **kwargs})
         if not self.responses:
             raise RuntimeError("no fake response configured")
         return self.responses.pop(0)
@@ -57,6 +66,7 @@ class _FakeSession:
 @pytest.fixture
 def curl_cffi_stub(monkeypatch: pytest.MonkeyPatch) -> type[_FakeSession]:
     _FakeSession.calls.clear()
+    _FakeSession.get_calls.clear()
     _FakeSession.responses.clear()
     package = types.ModuleType("curl_cffi")
     package.__path__ = []  # type: ignore[attr-defined]
@@ -110,6 +120,71 @@ def test_curl_cffi_page_fetch_uses_chrome_and_explicit_proxy(
         }
     ]
     asyncio.run(fetcher.shutdown())
+
+
+def test_conditional_text_fetch_sends_validators_and_handles_304(
+    curl_cffi_stub: type[_FakeSession],
+) -> None:
+    _FakeSession.responses.extend(
+        [
+            _FakeResponse(
+                url="https://www.hltv.org/rss/news",
+                content_type="application/rss+xml",
+                text="<rss><channel/></rss>",
+                etag='"rss-v1"',
+                last_modified="Tue, 06 Oct 2026 12:00:00 GMT",
+            ),
+            _FakeResponse(
+                url="https://www.hltv.org/rss/news",
+                content_type="application/rss+xml",
+                status_code=304,
+            ),
+        ]
+    )
+    fetcher = Fetcher(Config(cs2_use_curl_cffi=True, cs2_request_min_gap=0))
+
+    async def run():
+        first = await fetcher.fetch_impersonated_text_conditional(
+            "https://www.hltv.org/rss/news",
+            accept="application/rss+xml",
+        )
+        second = await fetcher.fetch_impersonated_text_conditional(
+            "https://www.hltv.org/rss/news",
+            accept="application/rss+xml",
+            etag=first.etag,
+            last_modified=first.last_modified,
+        )
+        return first, second
+
+    first, second = asyncio.run(run())
+
+    assert first.text == "<rss><channel/></rss>"
+    assert first.etag == '"rss-v1"'
+    assert first.last_modified == "Tue, 06 Oct 2026 12:00:00 GMT"
+    assert second.not_modified is True
+    assert _FakeSession.get_calls[1]["headers"] == {
+        "Accept": "application/rss+xml",
+        "If-None-Match": '"rss-v1"',
+        "If-Modified-Since": "Tue, 06 Oct 2026 12:00:00 GMT",
+    }
+    asyncio.run(fetcher.shutdown())
+
+
+def test_cloudflare_backoff_pauses_low_priority_but_keeps_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fetcher_module.random, "uniform", lambda _low, _high: 1.0)
+    fetcher = Fetcher(Config(cs2_request_min_gap=0))
+
+    fetcher._record_challenge(arm_backoff=True)
+
+    assert fetcher._backoff_blocks("scan") is True
+    assert fetcher._backoff_blocks("warm") is True
+    assert fetcher._backoff_blocks("live") is False
+
+    fetcher._record_fetch_success()
+
+    assert fetcher._backoff_blocks("scan") is False
 
 
 def test_curl_cffi_page_falls_back_after_cloudflare_challenge(
@@ -177,6 +252,126 @@ def test_playwright_context_uses_same_proxy_and_is_reused() -> None:
     assert first is second
     assert browser.calls == 1
     assert first["proxy"] == {"server": "http://mihomo:7890"}
+
+
+def test_manual_verify_uses_visible_chromium_window() -> None:
+    fetcher = Fetcher(
+        Config(cs2_manual_verify=True, cs2_request_min_gap=0)
+    )
+
+    assert fetcher._headful_enabled() is True
+    args = fetcher._chromium_launch_args()
+    assert "--window-position=0,0" in args
+
+
+def test_browser_context_loads_saved_storage_state(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_file = tmp_path / "playwright_storage_state.json"
+    state_file.write_text('{"cookies": [], "origins": []}', encoding="utf-8")
+
+    class _Browser:
+        async def new_context(self, **kwargs: object) -> dict[str, object]:
+            return kwargs
+
+    fetcher = Fetcher(Config(cs2_request_min_gap=0))
+    monkeypatch.setattr(fetcher, "_storage_state_file", lambda: state_file)
+
+    context = asyncio.run(fetcher._build_context(_Browser()))
+
+    assert context["storage_state"] == str(state_file)
+
+
+def test_manual_verify_saves_state_after_matches_page() -> None:
+    class _Page:
+        closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class _Context:
+        def __init__(self) -> None:
+            self.page = _Page()
+
+        async def new_page(self) -> _Page:
+            return self.page
+
+    fetcher = Fetcher(Config(cs2_request_min_gap=0))
+    fetcher._display = ":99"
+    fetcher.start = AsyncMock()
+    fetcher._new_context = AsyncMock(return_value=_Context())
+    fetcher._guard_top_level_navigation = AsyncMock()
+    fetcher._navigate_html = AsyncMock(
+        return_value="<html><title>Matches | HLTV.org</title></html>"
+    )
+    fetcher._has_cf_clearance = AsyncMock(return_value=True)
+    fetcher._save_storage_state = AsyncMock()
+
+    result = asyncio.run(fetcher.manual_verify())
+
+    assert result.ok is True
+    assert "cf_clearance" in result.message
+    fetcher._save_storage_state.assert_awaited_once()
+    assert fetcher._manual_verify_requested is False
+
+
+def test_start_x11vnc_launches_temporary_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class _Proc:
+        def poll(self) -> None:
+            return None
+
+    def fake_popen(args: list[str], **_kwargs: object) -> _Proc:
+        calls.append(args)
+        return _Proc()
+
+    ready = iter((False, True))
+    fetcher = Fetcher(Config(cs2_request_min_gap=0))
+    monkeypatch.setattr(fetcher_module.shutil, "which", lambda _name: "/usr/bin/x11vnc")
+    monkeypatch.setattr(fetcher_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(fetcher, "_tcp_port_ready", lambda *_args: next(ready))
+
+    fetcher._start_x11vnc(":99")
+
+    assert calls
+    assert calls[0][0] == "/usr/bin/x11vnc"
+    assert calls[0][1:3] == ["-display", ":99"]
+    assert "-forever" in calls[0]
+    assert "-shared" in calls[0]
+
+
+def test_start_novnc_launches_websockify_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class _Proc:
+        def poll(self) -> None:
+            return None
+
+    def fake_popen(args: list[str], **_kwargs: object) -> _Proc:
+        calls.append(args)
+        return _Proc()
+
+    ready = iter((False, True))
+    fetcher = Fetcher(Config(cs2_request_min_gap=0))
+    monkeypatch.setattr(fetcher_module.shutil, "which", lambda _name: "/usr/bin/websockify")
+    monkeypatch.setattr(fetcher_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(fetcher, "_tcp_port_ready", lambda *_args: next(ready))
+    monkeypatch.setattr(fetcher_module.Path, "is_file", lambda _self: True)
+
+    fetcher._start_novnc()
+
+    assert calls
+    assert calls[0][0] == "/usr/bin/websockify"
+    assert calls[0][1].startswith("--web=")
+    assert calls[0][1].endswith("novnc")
+    assert "6080" in calls[0]
+    assert "127.0.0.1:5900" in calls[0]
 
 
 def test_page_fetch_closes_page_but_keeps_shared_context(

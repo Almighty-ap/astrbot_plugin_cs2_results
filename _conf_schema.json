@@ -20,14 +20,20 @@
   "cs2_matches_scan_interval": {
     "description": "/matches 扫描间隔(分钟)",
     "type": "int",
-    "default": 3,
+    "default": 5,
     "hint": "1~1440 分钟"
+  },
+  "cs2_matches_idle_scan_interval": {
+    "description": "无直播时的 /matches 扫描间隔(分钟)",
+    "type": "int",
+    "default": 10,
+    "hint": "1~1440 分钟;有直播时自动使用 cs2_matches_scan_interval"
   },
   "cs2_request_min_gap": {
     "description": "两次抓取之间的最小间隔(秒)",
     "type": "float",
-    "default": 2.5,
-    "hint": "0~3600 秒,防 HLTV 限流"
+    "default": 90,
+    "hint": "0~3600 秒;原项目建议 120,先用 90 兼顾赛果时效,稳定后可提高"
   },
   "cs2_rpm_limit": {
     "description": "出站请求每分钟硬上限",
@@ -59,6 +65,24 @@
     "default": false,
     "hint": "HLTV /events 反爬较严时建议开启;Linux 无 DISPLAY 会自动启动 Xvfb,需安装 xvfb"
   },
+  "cs2_manual_verify": {
+    "description": "手动通过 Cloudflare 人机验证",
+    "type": "bool",
+    "default": false,
+    "hint": "保留有头浏览器并等待人工点击;验证成功后保存 Playwright 登录状态,后续自动复用"
+  },
+  "cs2_manual_verify_timeout": {
+    "description": "手动验证等待超时(秒)",
+    "type": "int",
+    "default": 180,
+    "hint": "10~900 秒;仅 cs2_manual_verify=true 时生效"
+  },
+  "cs2_vnc_ssh_host": {
+    "description": "VNC SSH 隧道连接主机",
+    "type": "string",
+    "default": "",
+    "hint": "填写 VPS 公网 IP 或 SSH Host;/cs2 验证 会据此生成 ssh -L 命令"
+  },
   "cs2_browser_recycle_uses": {
     "description": "Playwright 浏览器栈最大使用次数(0=不按次数回收)",
     "type": "int",
@@ -88,6 +112,18 @@
     "type": "int",
     "default": 1500,
     "hint": "0~30000;挑战页上等待 selector 的超时,超时立刻 reload"
+  },
+  "cs2_challenge_backoff_base_min": {
+    "description": "Cloudflare 挑战退避起始分钟数",
+    "type": "int",
+    "default": 5,
+    "hint": "连续失败后按 5、10、20、40、60 分钟退避;live 优先级和手动验证不受限"
+  },
+  "cs2_challenge_backoff_max_min": {
+    "description": "Cloudflare 挑战退避上限(分钟)",
+    "type": "int",
+    "default": 60,
+    "hint": "1~10080;不能小于起始退避分钟数"
   },
   "cs2_fetch_budget_seconds": {
     "description": "单次抓取占用导航档位的时间预算(秒)",
@@ -139,7 +175,7 @@
   "cs2_scan_cache_max_age": {
     "description": "/matches 扫描可复用缓存的最大年龄(秒)",
     "type": "int",
-    "default": 45,
+    "default": 120,
     "hint": "0~600;0=始终真抓"
   },
   "cs2_stuck_follow_hours": {
@@ -355,13 +391,13 @@
   "cs2_event_warm_interval": {
     "description": "赛事页预热刷新间隔(分钟)",
     "type": "int",
-    "default": 5,
+    "default": 30,
     "hint": "1~1440"
   },
   "cs2_event_warm_cap": {
     "description": "赛事页预热每轮最多抓取数",
     "type": "int",
-    "default": 2,
+    "default": 1,
     "hint": "1~100"
   },
   "cs2_match_day_gap_hours": {

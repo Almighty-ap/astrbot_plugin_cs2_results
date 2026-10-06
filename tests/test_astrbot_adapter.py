@@ -40,6 +40,36 @@ def _cn_timestamp(
     return int(datetime(year, month, day, hour, minute, tzinfo=cn).timestamp() * 1000)
 
 
+def test_matches_scan_interval_uses_idle_and_live_cadence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main, "cfg", main.Config(), raising=False)
+    monkeypatch.setattr(main, "_followed", {}, raising=False)
+
+    assert main._matches_scan_interval_seconds() == 10 * 60
+
+    monkeypatch.setattr(
+        main,
+        "_followed",
+        {"1": main.hltv.LiveMatch("1", "https://www.hltv.org/matches/1/x", "9", "Event")},
+        raising=False,
+    )
+    assert main._matches_scan_interval_seconds() == 5 * 60
+
+
+def test_failure_retry_never_retries_inside_cloudflare_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "fetcher",
+        SimpleNamespace(backoff_remaining_seconds=lambda: 30 * 60),
+        raising=False,
+    )
+
+    assert main._failure_retry_seconds(5 * 60) == 5 * 60
+
+
 def test_previous_match_day_recap_is_available_for_current_day(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

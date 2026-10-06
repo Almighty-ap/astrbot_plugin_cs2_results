@@ -156,14 +156,25 @@ class NewsService:
             await asyncio.sleep(self.cfg.cs2_news_poll_interval * 60)
 
     async def fetch_items(self) -> list[NewsItem]:
-        xml_text = await self.fetcher.fetch_impersonated_text(
+        cached = store.news_http_cache()
+        cached_xml = str(cached.get("xml") or "")
+        result = await self.fetcher.fetch_impersonated_text_conditional(
             self.cfg.cs2_news_rss_url or RSS_URL_DEFAULT,
             accept="application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+            etag=str(cached.get("etag") or "") if cached_xml else "",
+            last_modified=str(cached.get("last_modified") or "") if cached_xml else "",
             priority="scan",
         )
-        if not xml_text:
+        if result.not_modified:
+            return parse_rss(cached_xml) if cached_xml else []
+        if not result.text:
             return []
-        return parse_rss(xml_text)
+        store.news_set_http_cache(
+            etag=result.etag,
+            last_modified=result.last_modified,
+            xml=result.text,
+        )
+        return parse_rss(result.text)
 
     async def latest_item(self) -> Optional[NewsItem]:
         items = await self.fetch_items()

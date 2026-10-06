@@ -20,16 +20,17 @@ class Config(BaseModel):
 
     # —— 轮询频率 ——
     cs2_live_poll_interval: int = Field(default=2, ge=1, le=1440)
-    cs2_matches_scan_interval: int = Field(default=3, ge=1, le=1440)
+    cs2_matches_scan_interval: int = Field(default=5, ge=1, le=1440)
+    cs2_matches_idle_scan_interval: int = Field(default=10, ge=1, le=1440)
     cs2_max_followed: int = Field(default=10, ge=1, le=100)  # 超过此并发直播数时发容量告警
     cs2_featured_refresh_hour: int = Field(default=4, ge=0, le=23)
     cs2_featured_sticky_days: int = Field(default=3, ge=0)
     # 赛事「正在进行」判定:除 HLTV #FEATURED 外,距首个比赛日 ≤ 此天数的即将开赛赛事
     # 也算正在进行(/cs2 赛程 便能在开赛前几天就查到,如开赛前 3 天的 BLAST Bounty)。
     cs2_ongoing_lead_days: int = Field(default=3, ge=0, le=30)
-    # 与 cs2_cache_event_page_ttl(默认 300s)对齐:过期即刷,避免 warm 常命中 max_age 空转
-    cs2_event_warm_interval: int = Field(default=5, ge=1, le=1440)
-    cs2_event_warm_cap: int = Field(default=2, ge=1, le=100)
+    # 赛事页只是后台保鲜,不应和直播轮询争抢全局导航额度。
+    cs2_event_warm_interval: int = Field(default=30, ge=1, le=1440)
+    cs2_event_warm_cap: int = Field(default=1, ge=1, le=100)
 
     # —— /cs2 日程 的「比赛日」切分 ——
     # 一个比赛日按**时间空档聚类**得出,而不是日历日:欧洲赛事常 18:00 开打、跨午夜到
@@ -75,16 +76,23 @@ class Config(BaseModel):
     # —— 抓取(反爬)——
     # Linux 无 DISPLAY 时,插件会自动启动私有 Xvfb;需先安装系统包 xvfb。
     cs2_headful: bool = False
+    # 手动验证模式:保留有头浏览器并等待人工通过 Cloudflare 挑战。适用于本机
+    # 可见窗口,或通过 VNC 连接的 Xvfb。成功后会把 Playwright storage_state
+    # 保存到数据目录,后续浏览器重建时自动复用 cf_clearance。
+    cs2_manual_verify: bool = False
+    cs2_manual_verify_timeout: int = Field(default=180, ge=10, le=900)
+    # /cs2 验证 输出的 SSH 隧道主机名或公网 IP;留空时显示占位符。
+    cs2_vnc_ssh_host: str = ""
     # 启用 curl_cffi(Chrome TLS 指纹伪装)作为优先抓取通道
     # 开启后优先抓 HLTV 页面、搜索与 logo;挑战/超时/异常自动回退 Playwright
     cs2_use_curl_cffi: bool = True
     # curl_cffi 代理地址;留空时依次沿用 HTTPS_PROXY/HTTP_PROXY 环境变量
     # 示例:http://127.0.0.1:7890
     cs2_proxy_url: str = ""
-    # 两次**抓取**之间的最小间隔。注意语义:一次抓取 = 一次 goto + (几乎必然的) 一次
-    # 挑战 reload,这两下共用一个档位(见 fetcher._navigate_html),所以实际请求速率约为
-    # 每 min_gap 两个请求。
-    cs2_request_min_gap: float = Field(default=2.5, ge=0, le=3600)
+    # 两次**抓取**之间的最小间隔。原项目建议 120s;先以 90s 作为兼顾时效的默认值,
+    # 稳定运行后可提高到 120s。一次 goto + 挑战 reload 共用一个逻辑档位,所以页面
+    # 导航速率约为每 min_gap 一次;静态资源和 CF 重载不计入这个档位。
+    cs2_request_min_gap: float = Field(default=90, ge=0, le=3600)
     # 出站 HLTV 请求硬上限,防止异常并发把速率推到平台 429/RPM 限制以上。
     cs2_rpm_limit: int = Field(default=60, ge=1, le=600)
     # 预留给未来 LLM 功能的 token 流控;当前 CS2 查询链不使用 LLM。
@@ -95,6 +103,10 @@ class Config(BaseModel):
     # 实测挑战页干等 40s 也不放行,而 reload 1.5~1.7s 必过,所以这个窗口只是兜底,
     # 别调大——每次抓页都会付这份钱。
     cs2_challenge_grace_ms: int = Field(default=1500, ge=0, le=30000)
+    # Cloudflare 连续失败后暂停低优先级请求,指数退避并以 max 为上限;
+    # live 优先级和手动验证不受限制,保证必要的赛果更新不被暂停。
+    cs2_challenge_backoff_base_min: int = Field(default=5, ge=1, le=1440)
+    cs2_challenge_backoff_max_min: int = Field(default=60, ge=1, le=10080)
     # 单次抓取(含挑战重试)占用导航档位的时间预算(秒)。超预算就不再重试,免得
     # HLTV 超时时连续几个 45s 导航把闸门长占,堵住用户命令和直播轮询。
     cs2_fetch_budget_seconds: float = Field(default=60.0, ge=5, le=600)
@@ -110,7 +122,7 @@ class Config(BaseModel):
     # 进程启动后第一次 /results 补报用更宽窗口,兜住关机过夜等长离线
     cs2_startup_backstop_window_min: int = Field(default=720, ge=1)
     # /matches 扫描可复用最近命令/SWR 刚拉过的页面缓存(秒);0=始终真抓
-    cs2_scan_cache_max_age: int = Field(default=45, ge=0, le=600)
+    cs2_scan_cache_max_age: int = Field(default=120, ge=0, le=600)
     # 追踪中的比赛超过此时长且已离开 /matches 仍无完赛/无 pending 评分 → 放弃(小时)
     cs2_stuck_follow_hours: float = Field(default=4.0, ge=1.0, le=48.0)
     cs2_alert_after_failures: int = Field(default=5, ge=1)
@@ -234,4 +246,8 @@ class Config(BaseModel):
             raise ValueError("cs2_startup_backstop_window_min 不能小于 cs2_backstop_window_min")
         if self.cs2_vrs_min_gap_hours > self.cs2_vrs_max_age_hours:
             raise ValueError("cs2_vrs_min_gap_hours 不能大于 cs2_vrs_max_age_hours（否则永不刷新）")
+        if self.cs2_challenge_backoff_max_min < self.cs2_challenge_backoff_base_min:
+            raise ValueError(
+                "cs2_challenge_backoff_max_min 不能小于 cs2_challenge_backoff_base_min"
+            )
         return self

@@ -128,8 +128,46 @@ cs2_llm_tool_max_image_calls   单次对话最多发送的图片数
 - `cs2_proxy_url` 为空时,依次沿用 `HTTPS_PROXY`、`https_proxy`、`HTTP_PROXY`、
   `http_proxy` 环境变量。
 - `curl_cffi` 遇到 HTTP/Cloudflare 挑战、超时或响应类型异常时自动回退 Playwright。
+- 默认两次逻辑抓取至少间隔 `90` 秒;直播赛果保持最高优先级,空闲时 `/matches`
+  扫描降为 `10` 分钟,有直播时最多 `5` 分钟一次,赛事页预热降为 `30` 分钟。
+- Cloudflare 连续失败会按 `5/10/20/40/60` 分钟退避,退避期间暂停扫描、资讯、
+  用户查询和装饰性资源,但保留直播结果与手动验证通道。
+- RSS 使用 `ETag` / `Last-Modified` 条件请求;返回 `304` 时直接复用本地 XML,
+  不重新下载和解析正文。
 - `cs2_headful` 默认为关闭。若 HLTV 的 `/events` 对无头浏览器返回挑战,可开启该选项;
   Linux 无桌面环境时插件会自动启动私有 `Xvfb`。
+- `cs2_manual_verify` 用于人工通过 Cloudflare。开启后浏览器窗口保持可见,挑战页会等待
+  `cs2_manual_verify_timeout` 秒供手动点击。成功后插件把 Playwright `storage_state`
+  保存为 `data/plugin_data/cs2_results/playwright_storage_state.json`,后续浏览器重建会自动复用。
+  可在本机完成一次验证后,把该文件复制到 VPS 的同一数据目录。
+- Docker/VPS 环境可直接执行 `/cs2 验证`(仅调试群或超管私聊)。插件会复用或启动
+  `Xvfb :99`,把 Chromium 放在窗口 `0,0`,临时启动 `x11vnc` 监听容器 `5900` 端口,
+  并启动 `noVNC` 监听容器 `6080` 端口,成功后自动保存 `cf_clearance` 的
+  `storage_state`。
+
+  本地无需安装 VNC 客户端。容器内的地址不能从 VPS 宿主机 `127.0.0.1` 直连,
+  SSH 隧道目标应写 AstrBot 容器 IP,例如:
+
+  ```bash
+  # 容器 IP 可用 docker inspect 查询
+  ssh -L 6080:172.18.0.4:6080 root@<VPS_IP>
+  ```
+
+  保持 SSH 会话打开,用本机 Edge/Chrome 访问:
+
+  ```text
+  http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale
+  ```
+
+  页面中会显示 VPS 容器内运行的 Chromium。验证窗口仅在 `/cs2 验证` 等待期间开放。
+  容器需安装 `x11vnc`、`noVNC` 和 `websockify`:
+  `apt-get install -y x11vnc novnc websockify`。
+
+  如需原生 VNC 客户端,也可把隧道改为
+  `ssh -L 5900:172.18.0.4:5900 root@<VPS_IP>`,再连接 `127.0.0.1:5900`。
+
+  `cs2_vnc_ssh_host` 可填写 VPS SSH 主机/IP,用于生成完整隧道命令;
+  留空时 `/cs2 验证` 输出 `<VPS_IP>` 占位符。
 - Playwright 的 Node driver 会随反复导航增长内存。插件默认在浏览器抓取满
   `cs2_browser_recycle_uses` 次或运行满 `cs2_browser_recycle_hours` 小时后,在操作间隙
   自动重建整个 Playwright/Chromium 栈;Xvfb 会保留。两个阈值设为 `0` 可分别关闭。

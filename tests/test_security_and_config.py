@@ -105,10 +105,22 @@ class ConfigBoundaryTests(unittest.TestCase):
         self.assertEqual(config.cs2_cache_cleanup_hour, 23)
         self.assertEqual(config.cs2_request_min_gap, 0)
 
+    def test_fetch_reduction_defaults_leave_news_interval_unchanged(self) -> None:
+        config = self.Config()
+
+        self.assertEqual(config.cs2_request_min_gap, 90)
+        self.assertEqual(config.cs2_matches_scan_interval, 5)
+        self.assertEqual(config.cs2_matches_idle_scan_interval, 10)
+        self.assertEqual(config.cs2_scan_cache_max_age, 120)
+        self.assertEqual(config.cs2_event_warm_interval, 30)
+        self.assertEqual(config.cs2_event_warm_cap, 1)
+        self.assertEqual(config.cs2_news_poll_interval, 15)
+
     def test_numeric_fields_reject_values_outside_their_boundaries(self) -> None:
         invalid_cases = (
             {"cs2_live_poll_interval": 0},
             {"cs2_matches_scan_interval": 0},
+            {"cs2_matches_idle_scan_interval": 0},
             {"cs2_max_followed": 0},
             {"cs2_featured_refresh_hour": -1},
             {"cs2_featured_refresh_hour": 24},
@@ -139,6 +151,17 @@ class ConfigBoundaryTests(unittest.TestCase):
             self.Config(
                 cs2_backstop_window_min=200,
                 cs2_startup_backstop_window_min=100,
+            )
+
+    def test_challenge_backoff_max_cannot_be_shorter_than_base(self) -> None:
+        self.Config(
+            cs2_challenge_backoff_base_min=5,
+            cs2_challenge_backoff_max_min=60,
+        )
+        with self.assertRaises(ValidationError):
+            self.Config(
+                cs2_challenge_backoff_base_min=10,
+                cs2_challenge_backoff_max_min=5,
             )
 
     def test_stale_window_is_zero_or_at_least_fresh_ttl(self) -> None:

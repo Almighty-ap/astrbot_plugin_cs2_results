@@ -2599,6 +2599,7 @@ def build_help_html(admin: bool, when_text: str) -> str:
             + _cmd_row("/cs2 重试投递", "重新激活全部或指定比赛的死信", False, tag="仅调试群")
             + _cmd_row("/cs2 刷新名录", "强制刷新战队 / 选手名录(抓一次世界排行榜)", False, tag="仅调试群")
             + _cmd_row("/cs2 刷新VRS", "强制刷新 Valve 世界排名总榜(平时每天自动抓一次)", False, tag="仅调试群")
+            + _cmd_row("/cs2 验证", "启动可见 Chromium + VNC,人工完成 Cloudflare 验证", False, tag="仅调试群")
             + _cmd_row("/cs2 资讯检查", "立即检查并推送 HLTV RSS 新资讯", True, tag="仅调试群")
         )
         sections += _help_section("管理 · 调试", "Admin", admin_rows)
