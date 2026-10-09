@@ -52,10 +52,21 @@ _TEMPORARY_GROUP_MARKERS = (
     "banned",
 )
 
+# sendMsg/WebSocket 超时只代表客户端没有收到确认,不代表 QQ 后端没有接受消息。
+# 这类错误若自动重试,很容易把已经送达的卡片再次发送。为保证 at-most-once,
+# 对结果未知的发送按已提交处理;明确的媒体/网络失败仍走普通重试。
+_AMBIGUOUS_SEND_MARKERS = (
+    "timeout",
+    "timed out",
+    "超时",
+)
+
 _NT_RESULT_RE = re.compile(r'"result"\s*:\s*(-?\d+)')
 
 
-SendFailureKind = Literal["transient", "temporary_group", "permanent_group"]
+SendFailureKind = Literal[
+    "transient", "temporary_group", "permanent_group", "ambiguous"
+]
 
 
 def classify_send_failure(exc: BaseException) -> SendFailureKind:
@@ -65,6 +76,7 @@ def classify_send_failure(exc: BaseException) -> SendFailureKind:
     - ``temporary_group``: 禁言 / 群被封 / NT result 120 — 给该群记一个静默期,卡片顺延到
       解禁再发,**不消耗重试次数**、不告警(见 ``DeliveryWorker._park_muted``)。重试没有
       意义:全员禁言会一直挡着,再试还是 result 120。
+    - ``ambiguous``: sendMsg/WebSocket 超时,服务端可能已接受 — 按已提交处理,不重发
     - ``transient``: infra / media / unknown — retry and alert if it becomes a dead letter
     """
     text = str(exc)
@@ -76,6 +88,11 @@ def classify_send_failure(exc: BaseException) -> SendFailureKind:
     match = _NT_RESULT_RE.search(text)
     if match and int(match.group(1)) in _NT_GROUP_BLOCK_RESULTS:
         return "temporary_group"
+    lower = text.lower()
+    if isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower():
+        return "ambiguous"
+    if any(marker in lower or marker in text for marker in _AMBIGUOUS_SEND_MARKERS):
+        return "ambiguous"
     return "transient"
 
 
@@ -335,6 +352,24 @@ class DeliveryWorker:
                         dead_expected += 1
                     continue
 
+                if kind == "ambiguous":
+                    # OneBot/NapCat 的 sendMsg 超时没有可靠的提交结果。继续重试会把
+                    # 可能已经送达的消息重复发出,这里采用 at-most-once 策略收口。
+                    logger.warning(
+                        f"[cs2] 投递结果未知,按已提交处理并停止重试:"
+                        f"{delivery.match_id}/{delivery.map_key} → 群 {delivery.group_id}: "
+                        f"{err_text[:200]}"
+                    )
+                    updated = store.mark_delivery_sent(
+                        delivery.match_id,
+                        delivery.map_key,
+                        delivery.group_id,
+                        worker_id=self._worker_id,
+                    )
+                    if updated:
+                        sent += 1
+                    continue
+
                 delay = self._cfg.cs2_delivery_retry_base_seconds * (2 ** min(delivery.attempts, 8))
                 updated = store.mark_delivery_failed(
                     delivery.match_id,
@@ -544,6 +579,21 @@ class DeliveryWorker:
                         deferred += 1
                     else:
                         dead_expected += 1
+                    continue
+
+                if kind == "ambiguous":
+                    logger.warning(
+                        f"[cs2] 资讯投递结果未知,按已提交处理并停止重试:"
+                        f"{delivery.guid} → {delivery.unified_msg_origin}: "
+                        f"{err_text[:200]}"
+                    )
+                    updated = store.mark_news_delivery_sent(
+                        delivery.guid,
+                        delivery.unified_msg_origin,
+                        worker_id=self._worker_id,
+                    )
+                    if updated:
+                        sent += 1
                     continue
 
                 delay = self._cfg.cs2_delivery_retry_base_seconds * (

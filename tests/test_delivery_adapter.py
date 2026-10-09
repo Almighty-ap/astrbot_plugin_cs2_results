@@ -210,6 +210,27 @@ def test_muted_group_is_deferred_without_exponential_retry(
     assert "禁言中" in fake_store.deferred[0][1]
 
 
+def test_send_timeout_is_closed_without_retry(
+    monkeypatch: Any,
+) -> None:
+    fake_store = _FakeStore()
+    monkeypatch.setattr(delivery, "store", fake_store)
+    context = SimpleNamespace(
+        send_message=AsyncMock(side_effect=TimeoutError())
+    )
+    worker = delivery.DeliveryWorker(
+        Config(),
+        context=context,
+        origin_resolver=lambda group_id: f"napcat:GroupMessage:{group_id}",
+    )
+
+    result = asyncio.run(worker.run_once())
+
+    assert result.sent == 1
+    assert result.retried == 0
+    assert fake_store.sent == [("4242", "map-1", 10001)]
+
+
 def test_news_delivery_uses_stored_umo_and_text_payload(
     monkeypatch: Any,
 ) -> None:
@@ -244,3 +265,20 @@ def test_news_delivery_failure_enters_retry(
     assert fake_store.sent == []
     assert fake_store.failed[0][0] == "news-1"
     assert fake_store.failed[0][3] == worker._worker_id
+
+
+def test_news_send_timeout_is_closed_without_retry(
+    monkeypatch: Any,
+) -> None:
+    fake_store = _FakeNewsStore()
+    monkeypatch.setattr(delivery, "store", fake_store)
+    context = SimpleNamespace(
+        send_message=AsyncMock(side_effect=RuntimeError("Timeout: sendMsg"))
+    )
+    worker = delivery.DeliveryWorker(Config(), context=context)
+
+    result = asyncio.run(worker.run_once())
+
+    assert result.sent == 1
+    assert result.retried == 0
+    assert fake_store.sent == [("news-1", "napcat:FriendMessage:2002")]
