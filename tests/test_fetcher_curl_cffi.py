@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+import time
 import types
 from typing import ClassVar
 from unittest.mock import AsyncMock
@@ -535,4 +537,158 @@ def test_logo_fetch_does_not_start_browser_when_curl_succeeds(
 
     assert result == {logo_url: b"png-bytes"}
     assert saved == {logo_url: b"png-bytes"}
+    asyncio.run(fetcher.shutdown())
+
+
+def test_storage_cookies_loaded_and_injected_into_curl_cffi(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    curl_cffi_stub: type[_FakeSession],
+) -> None:
+    state_file = tmp_path / "playwright_storage_state.json"
+    state_content = {
+        "cookies": [
+            {
+                "name": "cf_clearance",
+                "value": "mock_cf_clearance_123",
+                "domain": ".hltv.org",
+                "expires": time.time() + 3600,
+            },
+            {
+                "name": "expired_cookie",
+                "value": "old_val",
+                "domain": ".hltv.org",
+                "expires": time.time() - 3600,
+            },
+            {
+                "name": "other_domain_cookie",
+                "value": "other_val",
+                "domain": ".google.com",
+                "expires": time.time() + 3600,
+            },
+        ]
+    }
+    state_file.write_text(json.dumps(state_content), encoding="utf-8")
+
+    fetcher = Fetcher(
+        Config(cs2_use_curl_cffi=True, cs2_request_min_gap=0, cs2_nav_timeout=1000)
+    )
+    monkeypatch.setattr(fetcher, "_storage_state_file", lambda: state_file)
+
+    cookies = fetcher._load_storage_cookies()
+    assert cookies == {"cf_clearance": "mock_cf_clearance_123"}
+
+    _FakeSession.responses.append(
+        _FakeResponse(
+            url="https://www.hltv.org/matches",
+            text="<html><title>Matches | HLTV.org</title><body>Matches</body></html>",
+        )
+    )
+
+    html = asyncio.run(fetcher.get_html("https://www.hltv.org/matches", priority="user"))
+    assert html is not None
+    assert _FakeSession.calls[-1].get("cookies") == {"cf_clearance": "mock_cf_clearance_123"}
+    asyncio.run(fetcher.shutdown())
+
+
+def test_logo_download_does_not_consume_gate_slot(
+    monkeypatch: pytest.MonkeyPatch,
+    curl_cffi_stub: type[_FakeSession],
+) -> None:
+    logo_url = "https://img-cdn.hltv.org/teamlogo/test.png"
+    _FakeSession.responses.append(
+        _FakeResponse(
+            url=logo_url,
+            content=b"logo-data",
+            content_type="image/png",
+        )
+    )
+    fetcher = Fetcher(
+        Config(cs2_use_curl_cffi=True, cs2_request_min_gap=90.0, cs2_nav_timeout=1000)
+    )
+    initial_grant = fetcher._gate._next_grant_at
+    initial_count = fetcher._gate._grant_count
+
+    data = asyncio.run(fetcher._download_logo_via_curl_cffi(logo_url, priority="warm"))
+    assert data == b"logo-data"
+    assert fetcher._gate._next_grant_at == initial_grant
+    assert fetcher._gate._grant_count == initial_count
+    asyncio.run(fetcher.shutdown())
+
+
+def test_close_playwright_stack_saves_storage_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetcher = Fetcher(Config(cs2_request_min_gap=0))
+    saved = False
+
+    async def mock_save(*_args, **_kwargs):
+        nonlocal saved
+        saved = True
+
+    fetcher._save_storage_state = mock_save
+
+    class _MockCtx:
+        async def close(self):
+            pass
+
+    class _MockBrowser:
+        async def close(self):
+            pass
+
+    fetcher._context = _MockCtx()
+    fetcher._browser = _MockBrowser()
+
+    async def run():
+        async with fetcher._lifecycle_lock:
+            await fetcher._close_playwright_stack(stop_xvfb=False)
+
+    asyncio.run(run())
+    assert saved is True
+
+
+def test_concurrent_logos_do_not_delay_subsequent_page_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    curl_cffi_stub: type[_FakeSession],
+) -> None:
+    fetcher = Fetcher(Config(cs2_use_curl_cffi=True, cs2_request_min_gap=90.0))
+    _FakeSession.responses.append(
+        _FakeResponse(
+            url="https://img-cdn.hltv.org/teamlogo/1.png",
+            content=b"1",
+            content_type="image/png",
+        )
+    )
+    _FakeSession.responses.append(
+        _FakeResponse(
+            url="https://img-cdn.hltv.org/teamlogo/2.png",
+            content=b"2",
+            content_type="image/png",
+        )
+    )
+    _FakeSession.responses.append(
+        _FakeResponse(
+            url="https://www.hltv.org/matches",
+            text="<html><title>Matches | HLTV.org</title><body>ok</body></html>",
+        )
+    )
+
+    saved: dict[str, bytes] = {}
+    monkeypatch.setattr(store, "save_logo", lambda url, b: saved.setdefault(url, b))
+
+    async def run() -> None:
+        await fetcher._download_logo_via_curl_cffi(
+            "https://img-cdn.hltv.org/teamlogo/1.png", priority="warm"
+        )
+        await fetcher._download_logo_via_curl_cffi(
+            "https://img-cdn.hltv.org/teamlogo/2.png", priority="warm"
+        )
+        assert fetcher._gate._next_grant_at == 0.0
+        html = await fetcher._fetch_via_curl_cffi(
+            "https://www.hltv.org/matches", priority="user"
+        )
+        assert html is not None
+        assert fetcher._gate._grant_count == 1
+
+    asyncio.run(run())
     asyncio.run(fetcher.shutdown())

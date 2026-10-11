@@ -543,8 +543,6 @@ async def ensure_event_logos(events: list[hltv.EventDetail], cap: int = 0) -> No
 
     只在后台任务/预热里 await 调用(会被 120s 节流拖长),命令路径一律走 _bg_*。
     """
-    from selectolax.parser import HTMLParser
-
     limit = cap or cfg.cs2_events_logo_fetch_cap
     discovered = 0
     for e in events:
@@ -558,7 +556,7 @@ async def ensure_event_logos(events: list[hltv.EventDetail], cap: int = 0) -> No
         html = await fetcher.get_html(url, wait_selector="body", priority="warm")
         if not html:
             continue
-        logo = hltv._pick_logo(HTMLParser(html), "eventlogo", e.name, allow_fallback=True)
+        logo = hltv._pick_logo(hltv.tree(html), "eventlogo", e.name, allow_fallback=True)
         if logo:
             store.set_event_logo_url(e.id, logo)
             discovered += 1

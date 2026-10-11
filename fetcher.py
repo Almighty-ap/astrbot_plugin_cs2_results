@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import html as html_lib
+import json
 import os
 import random
 import re
@@ -215,6 +216,8 @@ class _FairPriorityGate:
 
 
 class Fetcher:
+    _LOGO_FETCH_CONCURRENCY = 3
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self._pw = None
@@ -233,6 +236,7 @@ class Fetcher:
         self._browser_uses = 0
         self._browser_started_at: float | None = None
         self._gate = _FairPriorityGate(cfg.cs2_request_min_gap)
+        self._asset_semaphore = asyncio.Semaphore(self._LOGO_FETCH_CONCURRENCY)
         self._closing = False
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._refreshing: set[str] = set()  # background page refresh dedupe
@@ -404,6 +408,29 @@ class Fetcher:
     def _storage_state_file(self) -> Path:
         return store.DATA_DIR / _STORAGE_STATE_FILENAME
 
+    def _load_storage_cookies(self, domain: str = "hltv.org") -> dict[str, str]:
+        state_file = self._storage_state_file()
+        if not state_file.is_file():
+            return {}
+        try:
+            data = json.loads(state_file.read_text(encoding="utf-8"))
+            cookies: dict[str, str] = {}
+            now = time.time()
+            for item in data.get("cookies", []):
+                item_domain = str(item.get("domain") or "").lstrip(".")
+                if domain in item_domain:
+                    expires = float(item.get("expires", -1) or -1)
+                    if 0 < expires < now:
+                        continue
+                    name = str(item.get("name") or "").strip()
+                    value = str(item.get("value") or "").strip()
+                    if name and value:
+                        cookies[name] = value
+            return cookies
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[cs2] 读取 storage_state 凭证失败: {exc}")
+            return {}
+
     @staticmethod
     def _html_title(html_text: str) -> str:
         match = re.search(r"<title[^>]*>(.*?)</title>", html_text or "", re.I | re.S)
@@ -435,17 +462,21 @@ class Fetcher:
             return None
 
         proxy = self._curl_cffi_proxy()
+        cookies = self._load_storage_cookies()
+        session_kwargs: dict[str, object] = {
+            "impersonate": "chrome",
+            "proxy": proxy,
+            "timeout": self._curl_cffi_timeout(),
+        }
+        if cookies:
+            session_kwargs["cookies"] = cookies
         headers = {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         }
         async with self._gate.slot(priority):
             try:
-                async with AsyncSession(
-                    impersonate="chrome",
-                    proxy=proxy,
-                    timeout=self._curl_cffi_timeout(),
-                ) as session:
+                async with AsyncSession(**session_kwargs) as session:
                     resp = await session.get(url, headers=headers)
                     resp.raise_for_status()
                     final_url = str(getattr(resp, "url", "") or url)
@@ -487,23 +518,30 @@ class Fetcher:
         """用 curl_cffi 的 Chrome TLS 指纹下载队标/赛事 logo 图片。"""
         if not self._curl_cffi_enabled():
             return None
+        if self._backoff_blocks(priority):
+            self._metrics["suppressed"] += 1
+            return None
         try:
             from curl_cffi.requests import AsyncSession
         except ImportError:
             return None
 
         proxy = self._curl_cffi_proxy()
+        cookies = self._load_storage_cookies()
+        session_kwargs: dict[str, object] = {
+            "impersonate": "chrome",
+            "proxy": proxy,
+            "timeout": self._curl_cffi_timeout(),
+        }
+        if cookies:
+            session_kwargs["cookies"] = cookies
         headers = {
             "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
             "Referer": "https://www.hltv.org/",
         }
-        async with self._gate.slot(priority):
+        async with self._asset_semaphore:
             try:
-                async with AsyncSession(
-                    impersonate="chrome",
-                    proxy=proxy,
-                    timeout=self._curl_cffi_timeout(),
-                ) as session:
+                async with AsyncSession(**session_kwargs) as session:
                     resp = await session.get(url, headers=headers)
                     resp.raise_for_status()
                     final_url = str(getattr(resp, "url", "") or url)
@@ -541,6 +579,14 @@ class Fetcher:
             return None
 
         url = f"https://www.hltv.org/search?term={quote_plus(term)}"
+        cookies = self._load_storage_cookies()
+        session_kwargs: dict[str, object] = {
+            "impersonate": "chrome",
+            "proxy": self._curl_cffi_proxy(),
+            "timeout": self._curl_cffi_timeout(),
+        }
+        if cookies:
+            session_kwargs["cookies"] = cookies
         headers = {
             "Accept": "application/json",
             "X-Requested-With": "XMLHttpRequest",
@@ -548,11 +594,7 @@ class Fetcher:
         }
         async with self._gate.slot(priority):
             try:
-                async with AsyncSession(
-                    impersonate="chrome",
-                    proxy=self._curl_cffi_proxy(),
-                    timeout=self._curl_cffi_timeout(),
-                ) as session:
+                async with AsyncSession(**session_kwargs) as session:
                     resp = await session.get(url, headers=headers)
                     if resp.status_code != 200:
                         return None
@@ -615,6 +657,7 @@ class Fetcher:
             )
             return ConditionalTextResult()
         proxy = self._curl_cffi_proxy()
+        cookies = self._load_storage_cookies()
         headers = {"Accept": accept}
         if etag:
             headers["If-None-Match"] = etag
@@ -626,12 +669,16 @@ class Fetcher:
             try:
                 from curl_cffi.requests import AsyncSession
 
+                session_kwargs: dict[str, object] = {
+                    "impersonate": profile,
+                    "proxy": proxy,
+                    "timeout": self._curl_cffi_timeout(),
+                }
+                if cookies:
+                    session_kwargs["cookies"] = cookies
+
                 async with self._gate.slot(normalized_priority):
-                    async with AsyncSession(
-                        impersonate=profile,
-                        proxy=proxy,
-                        timeout=self._curl_cffi_timeout(),
-                    ) as session:
+                    async with AsyncSession(**session_kwargs) as session:
                         resp = await session.get(url, headers=headers)
                         if resp.status_code == 304:
                             if profile != self._working_impersonate:
@@ -690,18 +737,23 @@ class Fetcher:
             self._metrics["suppressed"] += 1
             return None
         proxy = self._curl_cffi_proxy()
+        cookies = self._load_storage_cookies()
         headers = {"Accept": accept, "Referer": "https://www.hltv.org/"}
         last_error: Exception | None = None
         for profile in self._impersonate_candidates():
             try:
                 from curl_cffi.requests import AsyncSession
 
-                async with self._gate.slot(normalized_priority):
-                    async with AsyncSession(
-                        impersonate=profile,
-                        proxy=proxy,
-                        timeout=self._curl_cffi_timeout(),
-                    ) as session:
+                session_kwargs: dict[str, object] = {
+                    "impersonate": profile,
+                    "proxy": proxy,
+                    "timeout": self._curl_cffi_timeout(),
+                }
+                if cookies:
+                    session_kwargs["cookies"] = cookies
+
+                async with self._asset_semaphore:
+                    async with AsyncSession(**session_kwargs) as session:
                         resp = await session.get(url, headers=headers)
                         if resp.status_code >= 400:
                             last_error = RuntimeError(
@@ -1056,16 +1108,16 @@ class Fetcher:
             context_options["storage_state"] = str(state_file)
         return await browser.new_context(**context_options)
 
-    async def _save_storage_state(self) -> None:
+    async def _save_storage_state(self, *, context=None) -> None:
         """Persist cookies/local storage after a manual Cloudflare verification."""
-        context = self._context
-        if context is None:
+        ctx = context or self._context
+        if ctx is None:
             return
         state_file = self._storage_state_file()
         tmp_file = state_file.with_name(f".{state_file.name}.tmp")
         try:
             state_file.parent.mkdir(parents=True, exist_ok=True)
-            await context.storage_state(path=str(tmp_file))
+            await ctx.storage_state(path=str(tmp_file))
             await asyncio.to_thread(os.replace, tmp_file, state_file)
             logger.info(f"[cs2] 已保存 Playwright 验证状态: {state_file}")
         except asyncio.CancelledError:
@@ -1200,6 +1252,10 @@ class Fetcher:
         self._browser_started_at = None
         try:
             if context:
+                try:
+                    await self._save_storage_state(context=context)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[cs2] 浏览器栈关闭前保存验证状态失败: {exc}")
                 await self._close_context(context)
         finally:
             try:
@@ -1435,7 +1491,9 @@ class Fetcher:
                 if self._is_error_page(title, html):
                     logger.warning(f"[cs2] 拒绝缓存错误页 {title!r}: {url}")
                     return None
-                if manual_verify and was_challenge:
+                if (manual_verify and was_challenge) or (
+                    was_challenge and await self._has_cf_clearance()
+                ):
                     await self._save_storage_state()
                 self._record_fetch_success()
                 return html
