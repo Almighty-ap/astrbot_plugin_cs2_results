@@ -202,20 +202,22 @@ def _rating_color(r: float) -> str:
 
 
 # ———————————————————— 通用:外壳 + 徽标 ————————————————————
-def _shell(body: str, pad: str) -> str:
+def _shell(body: str, pad: str, min_width: str = "") -> str:
     """米色页面 + 圆角卡外壳;pad = 卡片内边距(如 "44px 48px 40px")。
 
     font-family 必须写在 <style> 里而非内联 style="...":字体栈里的双引号会把
     双引号包裹的 style 属性提前截断,导致整个字体声明失效(回退衬线体)。"""
+    wrap_style = f"min-width:{min_width};display:inline-flex;" if min_width else "display:flex;"
+    card_style = f"width:{min_width};min-width:{min_width};" if min_width else "width:100%;max-width:1200px;"
     return f"""<style>{_font_face()}
 *{{margin:0;padding:0;box-sizing:border-box;}}
-html,body{{background:{PAGE};}}
+html,body{{background:{PAGE};min-width:fit-content;width:100%;}}
 body{{font-family:{FONT};}}
 </style>
 <div style="background:{PAGE};padding:clamp(28px,7vw,56px) clamp(24px,5vw,60px);
-     display:flex;justify-content:center;
+     {wrap_style}justify-content:center;
      color:{INK};-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;">
- <div style="width:100%;max-width:1200px;background:{CARD};border:1px solid {BORDER};
+ <div style="{card_style}background:{CARD};border:1px solid {BORDER};
       border-radius:24px;
       box-shadow:{_SHADOW};padding:{pad};">
 {body}
@@ -2257,7 +2259,7 @@ def build_news_html(
    <span>{_esc(pub_time_text)}</span>
    {link_html}
   </div>"""
-    return _shell(body, "42px 48px 38px")
+    return _shell(body, "42px 46px 36px", min_width="880px")
 
 
 async def render_news_card(
@@ -2549,6 +2551,226 @@ async def render_team_profile_card(profile: TeamProfile, when_text: str) -> byte
     return await _render_png(build_team_profile_html(profile, when_text))
 
 
+def _ranking_team_row(t: dict, is_last: bool = False) -> str:
+    rk = int(t.get("rank") or 0)
+    name = str(t.get("name") or "")
+    pts = t.get("points")
+    reg = str(t.get("region") or "").strip()
+    players = t.get("players") or []
+    logo_url = t.get("logo_url")
+    country = str(t.get("country") or "").strip()
+    rank_change = str(t.get("rank_change") or "").strip()
+
+    if rk == 1:
+        rk_badge = (
+            f'<div style="width:28px;height:28px;border-radius:8px;background:#D48B28;color:#FFF;'
+            f'display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;'
+            f'box-shadow:0 3px 8px -2px rgba(212,139,40,0.55);flex:none;">1</div>'
+        )
+    elif rk == 2:
+        rk_badge = (
+            f'<div style="width:28px;height:28px;border-radius:8px;background:#7A828A;color:#FFF;'
+            f'display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;'
+            f'box-shadow:0 3px 8px -2px rgba(122,130,138,0.55);flex:none;">2</div>'
+        )
+    elif rk == 3:
+        rk_badge = (
+            f'<div style="width:28px;height:28px;border-radius:8px;background:#A56837;color:#FFF;'
+            f'display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;'
+            f'box-shadow:0 3px 8px -2px rgba(165,104,55,0.55);flex:none;">3</div>'
+        )
+    else:
+        rk_badge = (
+            f'<div style="width:28px;height:28px;border-radius:8px;background:{PANEL};color:{SUB};'
+            f'display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;'
+            f'flex:none;">{rk}</div>'
+        )
+
+    team_badge = _badge(logo_url, name, 32, DARK2, CARD)
+    stars = _stars(majors.team_titles(name), 10, "right")
+
+    meta_tags = []
+    if reg:
+        meta_tags.append(
+            f'<span style="font-size:11px;font-weight:700;color:{MUTE};background:{PANEL};'
+            f'border-radius:4px;padding:1px 5px;line-height:1.2;">{_esc(reg)}</span>'
+        )
+    if pts is not None:
+        meta_tags.append(
+            f'<span style="font-size:13px;font-weight:700;color:{ACCENT_D};'
+            f'font-variant-numeric:tabular-nums;white-space:nowrap;">{pts:,} pts</span>'
+        )
+    if rank_change:
+        if rank_change.startswith("+") or (rank_change.isdigit() and int(rank_change) > 0):
+            val = rank_change.lstrip("+")
+            meta_tags.append(
+                f'<span style="font-size:11px;font-weight:800;color:#2E7D32;background:rgba(46,125,50,0.10);'
+                f'border:1px solid rgba(46,125,50,0.25);border-radius:4px;padding:1px 5px;'
+                f'display:inline-flex;align-items:center;gap:1px;font-variant-numeric:tabular-nums;line-height:1.2;">'
+                f'↑{_esc(val)}</span>'
+            )
+        elif rank_change.startswith("-") and len(rank_change) > 1 and rank_change[1:].isdigit():
+            val = rank_change.lstrip("-")
+            meta_tags.append(
+                f'<span style="font-size:11px;font-weight:800;color:#C62828;background:rgba(198,40,40,0.09);'
+                f'border:1px solid rgba(198,40,40,0.25);border-radius:4px;padding:1px 5px;'
+                f'display:inline-flex;align-items:center;gap:1px;font-variant-numeric:tabular-nums;line-height:1.2;">'
+                f'↓{_esc(val)}</span>'
+            )
+        elif rank_change.upper() == "NEW":
+            meta_tags.append(
+                f'<span style="font-size:10px;font-weight:800;color:#B36B15;background:rgba(212,139,40,0.12);'
+                f'border:1px solid rgba(212,139,40,0.30);border-radius:4px;padding:1px 4px;'
+                f'line-height:1.2;">NEW</span>'
+            )
+        elif rank_change in ("-", "0"):
+            meta_tags.append(
+                f'<span style="font-size:12px;font-weight:700;color:{FAINT};padding:0 2px;">-</span>'
+            )
+        else:
+            meta_tags.append(
+                f'<span style="font-size:11px;font-weight:700;color:{MUTE};background:{PANEL};'
+                f'border-radius:4px;padding:1px 5px;line-height:1.2;">{_esc(rank_change)}</span>'
+            )
+    meta_html = "".join(meta_tags)
+
+    country_pill = ""
+    if country:
+        country_pill = (
+            f'<span style="font-size:10px;font-weight:700;color:{MUTE};background:{PANEL};'
+            f'border-radius:4px;padding:1px 5px;line-height:1.3;flex:none;white-space:nowrap;">'
+            f'{_esc(country)}</span>'
+        )
+
+    roster_text = " · ".join(_esc(p) for p in players) if players else "暂无在役名单"
+    bb = "" if is_last else f"border-bottom:1px solid {BORDER_R};"
+
+    return (
+        f'<div style="display:flex;align-items:center;gap:10px;padding:10px 4px;{bb}">'
+        f"{rk_badge}"
+        f"{team_badge}"
+        f'<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;">'
+        f'<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">'
+        f'<div style="display:flex;align-items:center;gap:4px;min-width:0;flex:1;">'
+        f'<span style="font-size:15px;font-weight:800;color:{INK};white-space:nowrap;'
+        f'overflow:hidden;text-overflow:ellipsis;min-width:0;">{_esc(name)}</span>'
+        f"{stars}</div>"
+        f'<div style="display:flex;align-items:center;gap:6px;flex:none;">{meta_html}</div></div>'
+        f'<div style="display:flex;align-items:center;gap:6px;min-width:0;">'
+        f"{country_pill}"
+        f'<span style="font-size:11px;color:{MUTE};white-space:nowrap;overflow:hidden;'
+        f'text-overflow:ellipsis;min-width:0;">{roster_text}</span></div>'
+        f"</div></div>"
+    )
+
+
+def build_ranking_html(teams: list[dict], meta: dict, when_text: str) -> str:
+    """Build the warm CS2 world ranking leaderboard card (TOP 15 / TOP 20)."""
+    src = str(meta.get("source") or "hltv").lower().strip()
+    total = meta.get("total_teams") or len(teams)
+    snapshot = str(meta.get("snapshot") or "").strip()
+
+    if src == "vrs":
+        title = "Valve VRS 世界排名"
+        sub = "Valve Regional Standings · 官方区域排名总榜"
+        if snapshot:
+            sub += f" · {snapshot}"
+        tag_label = "Valve VRS 榜单"
+        source_note = f'Valve · <span style="color:{ACCENT};font-weight:600;">Regional Standings</span>'
+    else:
+        title = "HLTV 战队世界排名"
+        sub = "Counter-Strike 战队官方积分排名"
+        tag_label = "HLTV 官方榜"
+        source_note = f'HLTV · <span style="color:{ACCENT};font-weight:600;">hltv.org</span>'
+
+    trophy_svg = (
+        f'<span style="width:60px;height:60px;border-radius:18px;background:{ACCENT};'
+        f'display:inline-flex;align-items:center;justify-content:center;flex:none;'
+        f'box-shadow:0 5px 14px -5px rgba(196,112,78,0.65);">'
+        f'<svg width="32" height="32" viewBox="0 0 24 24" fill="{CARD}">'
+        f'<path d="M19 5h-2V3H7v2H5c-1.1 0-2 .9-2 2v1c0 2.55 1.92 4.63 4.39 4.94A5.01 5.01 0 0 0 11 15.9V19H8v2h8v-2h-3v-3.1'
+        f'c1.78-.46 3.19-1.93 3.61-3.96C19.08 11.63 21 9.55 21 7V7c0-1.1-.9-2-2-2zM5 8V7h2v3.82C5.84 10.4 5 9.3 5 8zm14 0'
+        f'c0 1.3-.84 2.4-2 2.82V7h2v1z"/></svg></span>'
+    )
+
+    min_w = "640px"
+    if not teams:
+        columns_html = (
+            f'<div style="margin-top:28px;background:{INNER};border:1px solid {BORDER};'
+            f'border-radius:18px;padding:48px 24px;text-align:center;color:{MUTE};font-size:16px;">'
+            f'暂无本地排名数据，正在同步名录中…</div>'
+        )
+    else:
+        half = (len(teams) + 1) // 2
+        left_teams = teams[:half]
+        right_teams = teams[half:]
+
+        left_rows = "".join(
+            _ranking_team_row(t, is_last=(i == len(left_teams) - 1))
+            for i, t in enumerate(left_teams)
+        )
+        right_rows = "".join(
+            _ranking_team_row(t, is_last=(i == len(right_teams) - 1))
+            for i, t in enumerate(right_teams)
+        ) if right_teams else ""
+
+        col_style = (
+            f'background:{INNER};border:1px solid {BORDER};border-radius:18px;'
+            f'padding:10px 16px;display:flex;flex-direction:column;'
+        )
+
+        if right_rows:
+            min_w = "1060px"
+            columns_html = (
+                f'<div style="margin-top:28px;display:grid;grid-template-columns:repeat(2, minmax(0, 1fr));gap:16px;align-items:start;">'
+                f'<div style="{col_style}">{left_rows}</div>'
+                f'<div style="{col_style}">{right_rows}</div>'
+                f'</div>'
+            )
+        else:
+            min_w = "640px"
+            columns_html = (
+                f'<div style="margin-top:28px;max-width:560px;margin-left:auto;margin-right:auto;">'
+                f'<div style="{col_style}">{left_rows}</div>'
+                f'</div>'
+            )
+
+    body = f"""
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:18px;">
+   <div style="display:flex;align-items:center;gap:18px;min-width:0;">
+    {trophy_svg}
+    <div style="display:flex;flex-direction:column;gap:4px;min-width:0;">
+     <div style="font-size:28px;font-weight:700;color:{INK};letter-spacing:-0.3px;line-height:1.1;">
+      {_esc(title)}
+     </div>
+     <div style="font-size:15px;color:{SUB};font-weight:500;">{_esc(sub)}</div>
+    </div>
+   </div>
+   <div style="text-align:right;flex:none;">
+    <div style="display:inline-flex;align-items:center;background:{ACCENT_BG};
+         border:1px solid rgba(196,112,78,0.22);border-radius:999px;padding:7px 15px;
+         font-size:14px;font-weight:700;color:{ACCENT_D};white-space:nowrap;">
+     {_esc(tag_label)} · TOP {len(teams)}
+    </div>
+    <div style="font-size:13px;color:{MUTE};margin-top:5px;">已收录 {_esc(str(total))} 支战队</div>
+   </div>
+  </div>
+
+  {columns_html}
+
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-top:28px;
+       padding-top:18px;border-top:1px solid {BORDER};font-size:14px;color:{FAINT};">
+   <span>{_esc(when_text)}</span>
+   <div style="color:{MUTE};">{source_note}</div>
+  </div>"""
+    return _shell(body, "36px 40px 32px", min_width=min_w)
+
+
+async def render_ranking_card(teams: list[dict], meta: dict, when_text: str) -> bytes:
+    return await _render_png(build_ranking_html(teams, meta, when_text))
+
+
+
 def build_help_html(admin: bool, when_text: str) -> str:
     callout = (
         f'<div style="margin-top:24px;background:{ACCENT_BG};border:1px solid rgba(196,112,78,0.22);'
@@ -2570,6 +2792,7 @@ def build_help_html(admin: bool, when_text: str) -> str:
         _cmd_row("/cs2 赛事", "未来 3 个月的顶级赛事一览", False)
         + _cmd_row("/cs2 日程", "今日关注赛事的比赛 · 赛果 / 直播 / 待开始;无赛则看下个比赛日", False)
         + _cmd_row("/cs2 战况 <战队>", "查询指定战队近期比赛、当前比分与赛果", False)
+        + _cmd_row("/cs2 排名 [vrs|hltv]", "查看战队世界排名 TOP 20 榜单 (Valve VRS / HLTV)", False)
         + _cmd_row("/cs2 查询 选手 <名字>", "查看选手近期 Rating / K/D、角色分和 Major 荣誉", False)
         + _cmd_row("/cs2 查询 战队 <名字>", "查看阵容、世界 / VRS 排名和近期战绩", False)
         + _cmd_row("/cs2 赛程", "正在进行 / 即将开赛赛事的完整对阵 · 小组赛 / 淘汰赛,可指定其一", True)

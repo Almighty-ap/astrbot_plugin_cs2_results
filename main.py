@@ -16,6 +16,7 @@
                       时间空档聚类,不按日历日切——欧洲赛事跨午夜的末场仍算同一晚;
                       有上一比赛日赛果时,会一并展示在当前日程上方
   /cs2 赛程 [赛事名]    正在进行/即将开赛赛事的完整赛程(小组赛/淘汰赛)
+  /cs2 排名 [vrs|hltv]    查看战队世界排名 TOP 20 榜单 (默认 Valve VRS 榜)
   /cs2 查询 选手 <名字>  选手近期 Rating / K/D、角色分与 Major 荣誉
   /cs2 查询 战队 <名字>  战队阵容、世界 / VRS 排名与近期战绩
 
@@ -1876,8 +1877,11 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
             await _handle_player_detail(name)
         if kind in _TEAM_WORDS:
             await _handle_team_detail(name)
+        if kind in ("排名", "rank", "ranking", "排行榜", "榜单"):
+            source = name.lower() if name else "vrs"
+            await _handle_ranking(source)
         await cs2.finish(
-            "用法:/cs2 查询 选手 <名字> 或 /cs2 查询 战队 <名字>"
+            "用法:/cs2 查询 选手 <名字> 或 /cs2 查询 战队 <名字> 或 /cs2 排名 [vrs|hltv]"
         )
 
     # 兼容旧版直接以实体类型开头的查询写法。
@@ -1886,6 +1890,10 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
 
     if sub in ("战队", "team"):
         await _handle_team_detail(" ".join(parts[1:]).strip())
+
+    if sub in ("排名", "rank", "ranking", "排行榜"):
+        source = parts[1].lower() if len(parts) > 1 else "vrs"
+        await _handle_ranking(source)
 
     if sub in ("赛程", "bracket", "对阵", "赛程表"):
         await _handle_bracket(" ".join(parts[1:]).strip() or None)
@@ -2013,6 +2021,7 @@ async def _send_help(admin: bool) -> None:
             "/cs2 赛事 —— 未来 3 个月顶级赛事",
             "/cs2 日程 —— 当前/下个比赛日的关注赛事比赛(含赛果与直播)",
             "/cs2 赛程 [赛事名] —— 正在进行赛事的完整赛程(小组赛/淘汰赛)",
+            "/cs2 排名 [vrs|hltv] —— 查看战队世界排名 TOP 20 榜单 (默认 Valve VRS)",
             "/cs2 查询 选手 <名字> —— 选手近期 Rating / K/D、角色分与 Major 荣誉",
             "/cs2 查询 战队 <名字> —— 战队阵容、世界 / VRS 排名与近期战绩",
             "/cs2 订阅 / 退订 —— 本群加入/退出推送(群管理员)",
@@ -2033,6 +2042,26 @@ async def _send_help(admin: bool) -> None:
                 "/cs2 资讯检查 —— 立即检查并推送 HLTV RSS 新资讯(仅调试群)",
             ]
         await cs2.finish("\n".join(lines))
+    await cs2.finish(png)
+
+
+async def _handle_ranking(source: str = "vrs") -> None:
+    src = "hltv" if str(source or "").lower().strip() in ("hltv",) else "vrs"
+    teams, meta = store.get_ranking_overview(source=src, limit=20)
+    if not teams:
+        label = "HLTV" if src == "hltv" else "Valve VRS"
+        if src == "vrs":
+            _spawn_background(refresh_vrs_ranking(force=True, priority="user"), name="vrs-refresh")
+        else:
+            _spawn_background(refresh_roster(force=True, priority="user"), name="roster-refresh")
+        await cs2.finish(f"本地 {label} 战队名录正在初始化同步中，已触发后台刷新，请稍后再试")
+
+    when_text = _now()
+    try:
+        png = await card.render_ranking_card(teams, meta, when_text)
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"[cs2] 排名卡渲染失败: {e}")
+        await cs2.finish("排名卡渲染失败，请稍后再试")
     await cs2.finish(png)
 
 
@@ -2950,18 +2979,36 @@ class Cs2ResultsPlugin(Star):
             f"已发送 {team} 的比赛状态卡片。",
         )
 
+    @filter.llm_tool(name="query_cs2_ranking")
+    async def query_cs2_ranking(
+        self,
+        event: AstrMessageEvent,
+        source: str = "vrs",
+    ) -> str:
+        """查询 CS2 战队世界排名榜单卡片（TOP 20）。
+
+        Args:
+            source(string): 排名体系，可选 vrs（Valve VRS 区域排名榜，默认）或 hltv（HLTV 积分榜）。
+        """
+        source = source.strip().lower() or "vrs"
+        return await self._run_llm_tool_command(
+            event,
+            f"排名 {source}".strip(),
+            f"已发送 CS2 战队世界排名卡片（{source.upper()} 榜单）。",
+        )
+
     @filter.on_llm_request()
     async def add_cs2_llm_tool_hint(self, event: AstrMessageEvent, req: Any) -> None:
         if not cfg.cs2_llm_tools_enabled or not cfg.cs2_llm_tool_intent_hint:
             return
         text = (event.message_str or "").casefold()
         if not re.search(
-            r"cs2|hltv|比赛|赛程|战况|赛况|比分|赛果|战队|选手|资讯",
+            r"cs2|hltv|比赛|赛程|战况|赛况|比分|赛果|战队|选手|资讯|排名|排行|rank",
             text,
         ):
             return
         req.system_prompt = (getattr(req, "system_prompt", "") or "") + (
-            "\n用户在询问 CS2/HLTV 赛事、战况、赛程或资讯。"
+            "\n用户在询问 CS2/HLTV 赛事、战况、赛程、排名或资讯。"
             "请优先调用 query_cs2_* 工具获取实时数据，不要凭记忆回答。"
         )
 

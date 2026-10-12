@@ -428,3 +428,63 @@ def test_query_subcommand_routes_player_and_team_details(
             asyncio.run(main.handle_cs2(event, raw))
 
     assert calls == [("player", "s1mple"), ("team", "NAVI")]
+
+
+def test_ranking_subcommand_routes_hltv_and_vrs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = SimpleNamespace(
+        is_group=False,
+        group_id=None,
+        user_id="10001",
+    )
+    calls: list[str] = []
+
+    async def fake_ranking(source: str) -> None:
+        calls.append(source)
+        raise main._CommandFinished
+
+    monkeypatch.setattr(main, "_cooldown_left", lambda _event: 0)
+    monkeypatch.setattr(main, "_admin_ctx", lambda _event: False)
+    monkeypatch.setattr(main, "_handle_ranking", fake_ranking)
+
+    for raw in ("排名", "rank vrs", "排行榜 hltv", "查询 排名", "查询 排名 hltv"):
+        with pytest.raises(main._CommandFinished):
+            asyncio.run(main.handle_cs2(event, raw))
+
+    assert calls == ["vrs", "vrs", "hltv", "vrs", "hltv"]
+
+
+def test_handle_ranking_executes_and_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    finished_messages: list[Any] = []
+
+    async def fake_finish(msg: Any) -> None:
+        finished_messages.append(msg)
+        raise main._CommandFinished
+
+    monkeypatch.setattr(main.cs2, "finish", fake_finish)
+
+    # 1. When teams exist
+    mock_teams = [{"rank": 1, "name": "Spirit", "players": ["donk"]}]
+    mock_meta = {"source": "hltv", "total_teams": 1}
+    monkeypatch.setattr(main.store, "get_ranking_overview", lambda source, limit: (mock_teams, mock_meta))
+    monkeypatch.setattr(main.card, "render_ranking_card", AsyncMock(return_value=b"fake-png-ranking"))
+
+    with pytest.raises(main._CommandFinished):
+        asyncio.run(main._handle_ranking("hltv"))
+    assert finished_messages[-1] == b"fake-png-ranking"
+
+    # 2. When empty
+    spawned = []
+    def fake_spawn(coro, name):
+        spawned.append(name)
+        coro.close()
+    monkeypatch.setattr(main, "_spawn_background", fake_spawn)
+    monkeypatch.setattr(main.store, "get_ranking_overview", lambda source, limit: ([], {"source": "vrs", "total_teams": 0}))
+
+    with pytest.raises(main._CommandFinished):
+        asyncio.run(main._handle_ranking("vrs"))
+    assert "正在初始化同步中" in str(finished_messages[-1])
+    assert "vrs-refresh" in spawned

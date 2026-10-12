@@ -68,7 +68,7 @@ def _create_future_database(data_dir: Path) -> None:
         conn.executescript(
             """
             CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            INSERT INTO metadata VALUES ('schema_version', '7');
+            INSERT INTO metadata VALUES ('schema_version', '8');
             """
         )
 
@@ -134,7 +134,7 @@ def test_legacy_subscription_migration_is_idempotent(
 ) -> None:
     store = store_factory([1001, 1002, 1002])
 
-    assert store.schema_version() == 6
+    assert store.schema_version() == 7
     assert store.get_subscriptions() == {1001, 1002}
     assert store.subscription_count() == 2
 
@@ -149,7 +149,7 @@ def test_schema_v1_migrates_to_v2_without_losing_state(
 ) -> None:
     store = store_factory([], _create_v1_database)
 
-    assert store.schema_version() == 6
+    assert store.schema_version() == 7
     assert store.get_subscriptions() == {4242}
     delivery = store.get_delivery("legacy-match", "legacy-map", 4242)
     assert delivery.status == "retry"
@@ -167,7 +167,7 @@ def test_schema_v1_migrates_to_v2_without_losing_state(
 def test_future_schema_is_rejected_without_downgrade(
     store_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
-    with pytest.raises(RuntimeError, match="状态库版本为 7"):
+    with pytest.raises(RuntimeError, match="8"):
         store_factory([], _create_future_database)
 
     databases = list(tmp_path.glob("case-*/plugin/data/state.sqlite3"))
@@ -176,7 +176,7 @@ def test_future_schema_is_rejected_without_downgrade(
         version = conn.execute(
             "SELECT value FROM metadata WHERE key = 'schema_version'"
         ).fetchone()[0]
-    assert version == "7"
+    assert version == "8"
 
 
 def test_config_seed_once_does_not_resurrect_unsubscribed_group(
@@ -550,3 +550,76 @@ def test_release_claim_clears_only_owned_row(
 
     again = store.claim_due_deliveries("worker-b", lease_seconds=300, limit=10)
     assert [d.group_id for d in again] == [1001]
+
+
+def test_get_ranking_overview_hltv_and_vrs(
+    store_factory: Callable[..., Any],
+) -> None:
+    from types import SimpleNamespace
+
+    store = store_factory([])
+
+    # Empty initially
+    empty_teams, empty_meta = store.get_ranking_overview("hltv")
+    assert empty_teams == []
+    assert empty_meta["total_teams"] == 0
+
+    # Populate HLTV ranking in team_index with logo, change and country
+    ranked_teams = [
+        SimpleNamespace(
+            name="Spirit", team_id="7020", rank=1, players=[("1", "donk"), ("2", "sh1ro")],
+            logo_url="https://img-cdn.hltv.org/spirit.png", rank_change="+1", country="Russia",
+        ),
+        SimpleNamespace(
+            name="Vitality", team_id="9565", rank=2, players=[("3", "ZywOo"), ("4", "apEX")],
+            logo_url="https://img-cdn.hltv.org/vitality.png", rank_change="-1", country="France",
+        ),
+    ]
+    store.upsert_ranking(ranked_teams)
+    store.set_meta("roster_refreshed_at", "1700000000.0")
+
+    teams, meta = store.get_ranking_overview("hltv", limit=10)
+    assert len(teams) == 2
+    assert meta["source"] == "hltv"
+    assert meta["total_teams"] == 2
+    assert meta["refreshed_at"] == 1700000000.0
+    assert teams[0]["rank"] == 1
+    assert teams[0]["name"] == "Spirit"
+    assert teams[0]["logo_url"] == "https://img-cdn.hltv.org/spirit.png"
+    assert teams[0]["rank_change"] == "+1"
+    assert teams[0]["country"] == "Russia"
+    assert "donk" in teams[0]["players"]
+    assert "sh1ro" in teams[0]["players"]
+    assert teams[1]["rank"] == 2
+    assert teams[1]["name"] == "Vitality"
+    assert teams[1]["logo_url"] == "https://img-cdn.hltv.org/vitality.png"
+    assert teams[1]["rank_change"] == "-1"
+    assert teams[1]["country"] == "France"
+
+    # Populate VRS ranking
+    vrs_teams = [
+        SimpleNamespace(
+            name="Vitality", team_id="9565", rank=1, points=1977, region="EU", players=["3", "4"],
+            logo_url="https://img-cdn.hltv.org/vitality.png", country="France",
+        ),
+        SimpleNamespace(
+            name="MOUZ", team_id="4494", rank=2, points=1946, region="EU", players=["5", "6"],
+            logo_url=None, country=None,
+        ),
+    ]
+    store.upsert_vrs_ranking(vrs_teams)
+    store.set_meta("vrs_snapshot_date", "July 23rd, 2026")
+    store.set_meta("vrs_refreshed_at", "1700000100.0")
+
+    v_teams, v_meta = store.get_ranking_overview("vrs", limit=10)
+    assert len(v_teams) == 2
+    assert v_meta["source"] == "vrs"
+    assert v_meta["total_teams"] == 2
+    assert v_meta["snapshot"] == "July 23rd, 2026"
+    assert v_teams[0]["rank"] == 1
+    assert v_teams[0]["name"] == "Vitality"
+    assert v_teams[0]["points"] == 1977
+    assert v_teams[0]["region"] == "EU"
+    assert v_teams[0]["logo_url"] == "https://img-cdn.hltv.org/vitality.png"
+    assert v_teams[0]["country"] == "France"
+    assert "ZywOo" in v_teams[0]["players"]

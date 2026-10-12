@@ -1660,6 +1660,30 @@ class RankedTeam:
     name: str
     team_id: Optional[str]
     players: list[tuple[str, str]] = field(default_factory=list)  # [(player_id, nick), ...]
+    logo_url: Optional[str] = None
+    rank_change: Optional[str] = None
+    country: Optional[str] = None
+
+
+def _pick_ranking_team_logo(b: Node) -> Optional[str]:
+    best, best_rank = None, 99
+    for img in b.css(".team-logo img, img"):
+        u = img.attributes.get("data-cookieblock-src") or img.attributes.get("src") or ""
+        if not u or "teamlogo/" not in u:
+            continue
+        rank = _logo_variant_rank(img.attributes.get("class") or "")
+        if rank < best_rank:
+            best, best_rank = u, rank
+            if rank == 0:
+                break
+    return best
+
+
+def _pick_ranking_country(b: Node) -> Optional[str]:
+    flag = b.css_first("img.flag") or b.css_first(".flag")
+    if flag:
+        return (flag.attributes.get("title") or flag.attributes.get("alt") or "").strip() or None
+    return None
 
 
 def parse_ranking(ranking_html: Html) -> list[RankedTeam]:
@@ -1699,7 +1723,17 @@ def parse_ranking(ranking_html: Html) -> list[RankedTeam]:
                 continue
             seen.add(m.group(1))
             players.append((m.group(1), nick))
-        out.append(RankedTeam(rank, name, team_id, players))
+        rank_change = None
+        ch_el = b.css_first(".change") or b.css_first(".ranking-header .change")
+        if ch_el:
+            ch_raw = _txt(ch_el).strip()
+            if ch_raw:
+                rank_change = ch_raw
+        elif pos and (cm := re.search(r"\(([\+\-]?\d+|NEW|\-)\)", _txt(pos))):
+            rank_change = cm.group(1).strip()
+        logo_url = _pick_ranking_team_logo(b)
+        country = _pick_ranking_country(b)
+        out.append(RankedTeam(rank, name, team_id, players, logo_url, rank_change, country))
     return out
 
 
@@ -1713,6 +1747,8 @@ class VrsTeam:
     points: Optional[int] = None
     region: str = ""  # EU / AM / AS(HLTV 的大区标)
     players: list[str] = field(default_factory=list)  # 该条目对应阵容的 player_id(2–5 个)
+    logo_url: Optional[str] = None
+    country: Optional[str] = None
 
 
 def parse_vrs_ranking(ranking_html: Html) -> tuple[list[VrsTeam], str]:
@@ -1757,9 +1793,18 @@ def parse_vrs_ranking(ranking_html: Html) -> tuple[list[VrsTeam], str]:
             if mm := re.search(r"/player/(\d+)/", a.attributes.get("href", "") or ""):
                 if mm.group(1) not in players:
                     players.append(mm.group(1))
+        logo_url = _pick_ranking_team_logo(b)
+        country = _pick_ranking_country(b)
         out.append(
             VrsTeam(
-                rank, name, team_id, points, _txt(b.css_first(".teamLine .region")), players
+                rank,
+                name,
+                team_id,
+                points,
+                _txt(b.css_first(".teamLine .region")),
+                players,
+                logo_url,
+                country,
             )
         )
     return out, date_text

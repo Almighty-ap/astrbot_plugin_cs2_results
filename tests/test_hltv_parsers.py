@@ -478,5 +478,54 @@ class HltvParserDegradedInputContractTests(unittest.TestCase):
         self.assertEqual(schedule.groups, [])
 
 
+    def test_parse_vrs_ranking_extracts_logos_and_countries(self) -> None:
+        fixture_path = FIXTURES / "ranking_cache_sample.html"
+        if not fixture_path.exists():
+            return
+        html = fixture_path.read_text(encoding="utf-8")
+        teams, date_text = self.hltv.parse_vrs_ranking(html)
+        self.assertTrue(len(teams) > 0)
+        self.assertTrue("July 23rd, 2026" in date_text or "2026" in date_text)
+        top1 = teams[0]
+        self.assertEqual(top1.name, "Vitality")
+        self.assertEqual(top1.rank, 1)
+        self.assertEqual(top1.country, "France")
+        self.assertTrue(top1.logo_url and "teamlogo/" in top1.logo_url)
+        self.assertEqual(top1.points, 1977)
+        self.assertEqual(top1.region, "EU")
+
+    def test_parse_ranking_extracts_rank_change_and_country(self) -> None:
+        sample_html = """
+        <div class="ranked-team">
+            <div class="ranking-header">
+                <span class="position">#5</span>
+                <span class="change positive">+2</span>
+                <div class="teamLine">
+                    <img class="flag" src="/flag.gif" title="China" alt="China" />
+                    <span class="name">TYLOO</span>
+                    <a href="/team/4863/tyloo">HLTV Team</a>
+                </div>
+            </div>
+            <div class="team-logo">
+                <img class="day-only" src="https://img-cdn.hltv.org/teamlogo/tyloo.png" alt="TYLOO" />
+            </div>
+            <div class="players">
+                <a href="/player/19698/jamyoung"><span class="nick">JamYoung</span></a>
+                <a href="/player/11271/advent"><span class="nick">advent</span></a>
+            </div>
+        </div>
+        """
+        teams = self.hltv.parse_ranking(sample_html)
+        self.assertEqual(len(teams), 1)
+        t = teams[0]
+        self.assertEqual(t.name, "TYLOO")
+        self.assertEqual(t.rank, 5)
+        self.assertEqual(t.team_id, "4863")
+        self.assertEqual(t.rank_change, "+2")
+        self.assertEqual(t.country, "China")
+        self.assertEqual(t.logo_url, "https://img-cdn.hltv.org/teamlogo/tyloo.png")
+        self.assertEqual(t.players, [("19698", "JamYoung"), ("11271", "advent")])
+
+
 if __name__ == "__main__":
     unittest.main()

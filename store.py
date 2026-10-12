@@ -48,7 +48,7 @@ _NEWS_STATE = DATA_DIR / "news_state.json"
 _DB = DATA_DIR / "state.sqlite3"
 
 _JSON_LOCK = threading.RLock()
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 
 
 class PersistenceError(RuntimeError):
@@ -449,6 +449,22 @@ def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
+    """v7: 扩展战队排行榜展示要素（logo_url、rank_change、country）。"""
+    conn.executescript(
+        """
+        BEGIN IMMEDIATE;
+        ALTER TABLE team_index ADD COLUMN logo_url TEXT;
+        ALTER TABLE team_index ADD COLUMN rank_change TEXT;
+        ALTER TABLE team_index ADD COLUMN country TEXT;
+        ALTER TABLE vrs_ranking ADD COLUMN logo_url TEXT;
+        ALTER TABLE vrs_ranking ADD COLUMN country TEXT;
+        UPDATE metadata SET value = '7' WHERE key = 'schema_version' AND value = '6';
+        COMMIT;
+        """
+    )
+
+
 def _initialize_database() -> None:
     conn = _connect()
     try:
@@ -465,26 +481,34 @@ def _initialize_database() -> None:
             _migrate_v3_to_v4(conn)
             _migrate_v4_to_v5(conn)
             _migrate_v5_to_v6(conn)
+            _migrate_v6_to_v7(conn)
         elif version == 1:
             _migrate_v1_to_v2(conn)
             _migrate_v2_to_v3(conn)
             _migrate_v3_to_v4(conn)
             _migrate_v4_to_v5(conn)
             _migrate_v5_to_v6(conn)
+            _migrate_v6_to_v7(conn)
         elif version == 2:
             _migrate_v2_to_v3(conn)
             _migrate_v3_to_v4(conn)
             _migrate_v4_to_v5(conn)
             _migrate_v5_to_v6(conn)
+            _migrate_v6_to_v7(conn)
         elif version == 3:
             _migrate_v3_to_v4(conn)
             _migrate_v4_to_v5(conn)
             _migrate_v5_to_v6(conn)
+            _migrate_v6_to_v7(conn)
         elif version == 4:
             _migrate_v4_to_v5(conn)
             _migrate_v5_to_v6(conn)
+            _migrate_v6_to_v7(conn)
         elif version == 5:
             _migrate_v5_to_v6(conn)
+            _migrate_v6_to_v7(conn)
+        elif version == 6:
+            _migrate_v6_to_v7(conn)
         elif version != _SCHEMA_VERSION:
             raise PersistenceError(f"不支持的状态库版本: {version}")
         final_version = _database_version(conn)
@@ -1120,14 +1144,30 @@ def upsert_ranking(teams: Iterable) -> tuple[int, int]:
             name = str(getattr(t, "name", "") or "").strip()
             if not name:
                 continue
+            logo_url = getattr(t, "logo_url", None)
+            rank_change = getattr(t, "rank_change", None)
+            country = getattr(t, "country", None)
             conn.execute(
-                """INSERT INTO team_index(team_key, name, team_id, rank, updated_at)
-                   VALUES (?, ?, ?, ?, ?)
+                """INSERT INTO team_index(
+                       team_key, name, team_id, rank, logo_url, rank_change, country, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(team_key) DO UPDATE SET
                      name=excluded.name, team_id=excluded.team_id,
-                     rank=excluded.rank, updated_at=excluded.updated_at""",
-                (name.casefold(), name, getattr(t, "team_id", None),
-                 getattr(t, "rank", None), now),
+                     rank=excluded.rank,
+                     logo_url=COALESCE(excluded.logo_url, team_index.logo_url),
+                     rank_change=COALESCE(excluded.rank_change, team_index.rank_change),
+                     country=COALESCE(excluded.country, team_index.country),
+                     updated_at=excluded.updated_at""",
+                (
+                    name.casefold(),
+                    name,
+                    getattr(t, "team_id", None),
+                    getattr(t, "rank", None),
+                    logo_url,
+                    rank_change,
+                    country,
+                    now,
+                ),
             )
             n_teams += 1
             for pid, nick in getattr(t, "players", []) or []:
@@ -1259,13 +1299,17 @@ def upsert_vrs_ranking(teams: Iterable, keep_match_window_s: float = 3600.0) -> 
                 )
                 continue
             t = _pick_vrs_entry(cands, rosters)
+            logo_url = getattr(t, "logo_url", None)
+            country = getattr(t, "country", None)
             conn.execute(
                 """INSERT INTO vrs_ranking(
-                       team_key, name, team_id, rank, points, region, source, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, 'ranking', ?)
+                       team_key, name, team_id, rank, points, region, logo_url, country, source, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ranking', ?)
                    ON CONFLICT(team_key) DO UPDATE SET
                      name=excluded.name, team_id=excluded.team_id, rank=excluded.rank,
                      points=excluded.points, region=excluded.region,
+                     logo_url=COALESCE(excluded.logo_url, vrs_ranking.logo_url),
+                     country=COALESCE(excluded.country, vrs_ranking.country),
                      source=excluded.source, updated_at=excluded.updated_at""",
                 (
                     key,
@@ -1274,6 +1318,8 @@ def upsert_vrs_ranking(teams: Iterable, keep_match_window_s: float = 3600.0) -> 
                     getattr(t, "rank", None),
                     getattr(t, "points", None),
                     getattr(t, "region", "") or "",
+                    logo_url,
+                    country,
                     now,
                 ),
             )
@@ -1330,6 +1376,112 @@ def vrs_overview() -> dict:
         "refreshed_at": float(ts) if ts else None,
         "snapshot": get_meta("vrs_snapshot_date") or "",
     }
+
+
+def get_ranking_overview(source: str = "vrs", limit: int = 20) -> tuple[list[dict], dict]:
+    """返回 (TOP 队伍列表, 元信息字典)。全程只查本地 SQLite，零网络请求。
+
+    队伍字典包含:
+      - rank: int
+      - name: str
+      - team_key: str
+      - team_id: str | None
+      - points: int | None
+      - region: str
+      - players: list[str] (在役选手列表，最多 5 人)
+    元信息字典包含:
+      - source: "vrs" | "hltv"
+      - total_teams: int
+      - refreshed_at: float | None
+      - snapshot: str
+    """
+    src = "hltv" if str(source or "").lower().strip() in ("hltv",) else "vrs"
+    with _transaction() as conn:
+        if src == "vrs":
+            rows = conn.execute(
+                """SELECT v.team_key, v.name, v.team_id, v.rank, v.points, v.region,
+                          COALESCE(v.logo_url, t.logo_url) AS logo_url,
+                          COALESCE(v.country, t.country) AS country
+                   FROM vrs_ranking v
+                   LEFT JOIN team_index t ON t.team_key = v.team_key
+                   WHERE v.rank IS NOT NULL AND v.rank > 0
+                   ORDER BY v.rank ASC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            total_row = conn.execute(
+                "SELECT COUNT(*) AS n FROM vrs_ranking WHERE rank IS NOT NULL AND rank > 0"
+            ).fetchone()
+            total = int(total_row["n"]) if total_row else len(rows)
+            ts = get_meta("vrs_refreshed_at")
+            snapshot = get_meta("vrs_snapshot_date") or ""
+        else:
+            rows = conn.execute(
+                """SELECT team_key, name, team_id, rank, logo_url, rank_change, country
+                   FROM team_index
+                   WHERE rank IS NOT NULL AND rank > 0
+                   ORDER BY rank ASC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            total_row = conn.execute(
+                "SELECT COUNT(*) AS n FROM team_index WHERE rank IS NOT NULL AND rank > 0"
+            ).fetchone()
+            total = int(total_row["n"]) if total_row else len(rows)
+            ts = get_meta("roster_refreshed_at")
+            snapshot = ""
+
+        if not rows:
+            return [], {
+                "source": src,
+                "total_teams": 0,
+                "refreshed_at": float(ts) if ts else None,
+                "snapshot": snapshot,
+            }
+
+        team_keys = [r["team_key"] for r in rows if r["team_key"]]
+        rosters: dict[str, list[str]] = {}
+        if team_keys:
+            placeholders = ",".join("?" * len(team_keys))
+            p_rows = conn.execute(
+                f"""SELECT team_key, nick
+                    FROM player_team_cache
+                    WHERE team_key IN ({placeholders})
+                    ORDER BY updated_at DESC, player_id ASC""",
+                team_keys,
+            ).fetchall()
+
+            for pr in p_rows:
+                tk = pr["team_key"]
+                nick = str(pr["nick"] or "").strip()
+                if tk and nick:
+                    lst = rosters.setdefault(tk, [])
+                    if nick not in lst:
+                        lst.append(nick)
+
+        teams: list[dict] = []
+        for r in rows:
+            tk = r["team_key"]
+            keys = r.keys()
+            teams.append({
+                "rank": int(r["rank"]),
+                "name": str(r["name"]),
+                "team_key": tk,
+                "team_id": str(r["team_id"]) if r["team_id"] else None,
+                "points": int(r["points"]) if "points" in keys and r["points"] is not None else None,
+                "region": str(r["region"]) if "region" in keys and r["region"] else "",
+                "logo_url": str(r["logo_url"]) if "logo_url" in keys and r["logo_url"] else None,
+                "rank_change": str(r["rank_change"]) if "rank_change" in keys and r["rank_change"] else None,
+                "country": str(r["country"]) if "country" in keys and r["country"] else None,
+                "players": rosters.get(tk, [])[:5],
+            })
+
+        return teams, {
+            "source": src,
+            "total_teams": total,
+            "refreshed_at": float(ts) if ts else None,
+            "snapshot": snapshot,
+        }
 
 
 # —————————— 逐群投递 outbox ——————————

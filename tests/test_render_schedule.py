@@ -170,3 +170,38 @@ def test_team_profile_card_contains_rankings_roster_and_results() -> None:
     assert "最近 5 场 · 比分" in html
     assert "width:100%;max-width:1200px" in html
     assert 'style="width:1200px;' not in html
+
+
+def test_build_ranking_html_renders_hltv_and_vrs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(render.store, "logo_data_uri", lambda u: f"data:image/png;base64,{u}" if u else None)
+    hltv_teams = [
+        {"rank": 1, "name": "Spirit", "team_key": "spirit", "team_id": "7020", "points": None, "region": "", "players": ["donk", "sh1ro"], "logo_url": "https://img-cdn.hltv.org/spirit.png", "rank_change": "+2", "country": "Russia"},
+        {"rank": 2, "name": "Vitality", "team_key": "vitality", "team_id": "9565", "points": None, "region": "", "players": ["ZywOo", "apEX"], "logo_url": "https://img-cdn.hltv.org/vitality.png", "rank_change": "-1", "country": "France"},
+    ]
+    html_hltv = render.build_ranking_html(hltv_teams, {"source": "hltv", "total_teams": 2}, "2026-10-12 12:00")
+    assert "HLTV 战队世界排名" in html_hltv
+    assert "Spirit" in html_hltv
+    assert "Vitality" in html_hltv
+    assert "donk" in html_hltv
+    assert "Russia" in html_hltv
+    assert "France" in html_hltv
+    assert "↑2" in html_hltv
+    assert "↓1" in html_hltv
+    assert "https://img-cdn.hltv.org/spirit.png" in html_hltv
+    assert "零网络" not in html_hltv
+    assert "本地数据名录" not in html_hltv
+    assert "hltv.org" in html_hltv
+
+    vrs_teams = [
+        {"rank": 1, "name": "Vitality", "team_key": "vitality", "team_id": "9565", "points": 1977, "region": "EU", "players": ["ZywOo", "apEX"]},
+        {"rank": 2, "name": "MOUZ", "team_key": "mouz", "team_id": "4494", "points": 1946, "region": "EU", "players": ["torzsi", "Spinx"]},
+    ]
+    html_vrs = render.build_ranking_html(vrs_teams, {"source": "vrs", "total_teams": 2, "snapshot": "July 23rd, 2026"}, "2026-10-12 12:00")
+    assert "Valve VRS 世界排名" in html_vrs
+    assert "1,977 pts" in html_vrs
+    assert "EU" in html_vrs
+    assert "Regional Standings" in html_vrs
+    assert "零网络" not in html_vrs
+
+    html_empty = render.build_ranking_html([], {"source": "hltv", "total_teams": 0}, "2026-10-12 12:00")
+    assert "暂无本地排名数据" in html_empty
