@@ -2563,21 +2563,21 @@ def _ranking_team_row(t: dict, is_last: bool = False) -> str:
 
     if rk == 1:
         rk_badge = (
-            f'<div style="width:28px;height:28px;border-radius:8px;background:#D48B28;color:#FFF;'
-            f'display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;'
-            f'box-shadow:0 3px 8px -2px rgba(212,139,40,0.55);flex:none;">1</div>'
+            '<div style="width:28px;height:28px;border-radius:8px;background:#D48B28;color:#FFF;'
+            'display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;'
+            'box-shadow:0 3px 8px -2px rgba(212,139,40,0.55);flex:none;">1</div>'
         )
     elif rk == 2:
         rk_badge = (
-            f'<div style="width:28px;height:28px;border-radius:8px;background:#7A828A;color:#FFF;'
-            f'display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;'
-            f'box-shadow:0 3px 8px -2px rgba(122,130,138,0.55);flex:none;">2</div>'
+            '<div style="width:28px;height:28px;border-radius:8px;background:#7A828A;color:#FFF;'
+            'display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;'
+            'box-shadow:0 3px 8px -2px rgba(122,130,138,0.55);flex:none;">2</div>'
         )
     elif rk == 3:
         rk_badge = (
-            f'<div style="width:28px;height:28px;border-radius:8px;background:#A56837;color:#FFF;'
-            f'display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;'
-            f'box-shadow:0 3px 8px -2px rgba(165,104,55,0.55);flex:none;">3</div>'
+            '<div style="width:28px;height:28px;border-radius:8px;background:#A56837;color:#FFF;'
+            'display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;'
+            'box-shadow:0 3px 8px -2px rgba(165,104,55,0.55);flex:none;">3</div>'
         )
     else:
         rk_badge = (
@@ -2619,9 +2619,9 @@ def _ranking_team_row(t: dict, is_last: bool = False) -> str:
             )
         elif rank_change.upper() == "NEW":
             meta_tags.append(
-                f'<span style="font-size:10px;font-weight:800;color:#B36B15;background:rgba(212,139,40,0.12);'
-                f'border:1px solid rgba(212,139,40,0.30);border-radius:4px;padding:1px 4px;'
-                f'line-height:1.2;">NEW</span>'
+                '<span style="font-size:10px;font-weight:800;color:#B36B15;background:rgba(212,139,40,0.12);'
+                'border:1px solid rgba(212,139,40,0.30);border-radius:4px;padding:1px 4px;'
+                'line-height:1.2;">NEW</span>'
             )
         elif rank_change in ("-", "0"):
             meta_tags.append(

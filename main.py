@@ -1585,9 +1585,14 @@ async def _target_remove(
     hit = None
     for t in mine:
         if (
-            names.nick_matches(name, t.display)
-            or names.cf(name) == names.cf(t.display)
-            or (kind == "team" and names.team_key(name) == t.target_key)
+            names.target_matches(name, t.display, kind)
+            or (
+                kind == "team"
+                and (
+                    names.team_key(name) == t.target_key
+                    or names.team_key(names.canonical_team(name)) == t.target_key
+                )
+            )
         ):
             hit = t
             break
@@ -2281,21 +2286,23 @@ async def _handle_schedule(team_filter: str | None = None) -> None:
         logger.warning("[cs2] /results 抓取失败,日程卡降级为不含已结束比赛")
 
     if team_filter:
-        query = names.cf(team_filter)
         ups = [
             m
             for m in ups
-            if query in names.cf(m.team1) or query in names.cf(m.team2)
+            if names.team_matches_filter(team_filter, m.team1)
+            or names.team_matches_filter(team_filter, m.team2)
         ]
         lives = [
             m
             for m in lives
-            if query in names.cf(m.team1) or query in names.cf(m.team2)
+            if names.team_matches_filter(team_filter, m.team1)
+            or names.team_matches_filter(team_filter, m.team2)
         ]
         fins = [
             m
             for m in fins
-            if query in names.cf(m.team1) or query in names.cf(m.team2)
+            if names.team_matches_filter(team_filter, m.team1)
+            or names.team_matches_filter(team_filter, m.team2)
         ]
 
     days = _cluster_match_days(fins + ups)

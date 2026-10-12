@@ -175,16 +175,500 @@ def _suggest(query: str, items: list, name_of, limit: int = 6) -> list:
     return out
 
 
-# 常用俗称 → HLTV 正式队名(只收社区高频且与正式名对不上的;正式名能直接命中的不用进来)
-_TEAM_ALIASES = {
+# 战队俗称/缩写/中文别名 → HLTV 正式队名
+_TEAM_ALIASES: dict[str, str] = {
+    # Vitality
+    "小蜜蜂": "Vitality",
+    "小峰": "Vitality",
+    "蜜蜂": "Vitality",
+    "vita": "Vitality",
+    "vitality": "Vitality",
+    "team vitality": "Vitality",
+    # Spirit
+    "绿龙": "Spirit",
+    "雪碧": "Spirit",
+    "ts": "Spirit",
+    "spirit": "Spirit",
+    "team spirit": "Spirit",
+    # FaZe
+    "银河战舰": "FaZe",
+    "大飞": "FaZe",
+    "faze": "FaZe",
+    "faze clan": "FaZe",
+    # Natus Vincere
     "navi": "Natus Vincere",
     "na'vi": "Natus Vincere",
-    "nip": "Ninjas in Pyjamas",
+    "黄黑军团": "Natus Vincere",
+    "纳维": "Natus Vincere",
+    "natus vincere": "Natus Vincere",
+    # MOUZ
+    "老鼠": "MOUZ",
+    "老鼠队": "MOUZ",
+    "mouz": "MOUZ",
+    "mousesports": "MOUZ",
+    # G2
+    "g2": "G2",
+    "武士": "G2",
+    "g2 esports": "G2",
+    # Virtus.pro
     "vp": "Virtus.pro",
     "virtus pro": "Virtus.pro",
+    "virtus.pro": "Virtus.pro",
+    "北极熊": "Virtus.pro",
+    # Astralis
+    "a队": "Astralis",
+    "ast": "Astralis",
+    "astralis": "Astralis",
+    "星队": "Astralis",
+    # Ninjas in Pyjamas
+    "nip": "Ninjas in Pyjamas",
+    "睡衣忍者": "Ninjas in Pyjamas",
+    "忍者": "Ninjas in Pyjamas",
+    "ninjas in pyjamas": "Ninjas in Pyjamas",
+    # FURIA
+    "黑豹": "FURIA",
+    "巴西黑豹": "FURIA",
+    "furia": "FURIA",
+    "furia esports": "FURIA",
+    # The MongolZ
     "mongolz": "The MongolZ",
+    "the mongolz": "The MongolZ",
+    "蒙古": "The MongolZ",
+    "蒙古队": "The MongolZ",
+    # TYLOO
+    "天禄": "TYLOO",
+    "天禄队": "TYLOO",
+    "tyloo": "TYLOO",
+    # Lynn Vision
     "lvg": "Lynn Vision",
+    "飞龙": "Lynn Vision",
+    "领航": "Lynn Vision",
+    "lynn vision": "Lynn Vision",
+    # HEROIC
+    "小火龙": "HEROIC",
+    "英雄": "HEROIC",
+    "heroic": "HEROIC",
+    # Complexity
+    "col": "Complexity",
+    "complexity": "Complexity",
+    # Eternal Fire
+    "ef": "Eternal Fire",
+    "永恒之火": "Eternal Fire",
+    "土耳其": "Eternal Fire",
+    "eternal fire": "Eternal Fire",
+    # Liquid
+    "液体": "Liquid",
+    "tl": "Liquid",
+    "team liquid": "Liquid",
+    "liquid": "Liquid",
+    # Cloud9
+    "c9": "Cloud9",
+    "云九": "Cloud9",
+    "cloud9": "Cloud9",
+    # Falcons
+    "猎鹰": "Falcons",
+    "沙特猎鹰": "Falcons",
+    "falcons": "Falcons",
+    "team falcons": "Falcons",
+    # 3DMAX
+    "3d": "3DMAX",
+    "3dmax": "3DMAX",
+    # Rare Atom
+    "ra": "Rare Atom",
+    "稀有原子": "Rare Atom",
+    "rare atom": "Rare Atom",
+    # Steel Helmet
+    "钢盔": "Steel Helmet",
+    "steel helmet": "Steel Helmet",
+    # fnatic
+    "fnatic": "fnatic",
+    "橙黑军团": "fnatic",
+    # BIG
+    "big": "BIG",
+    # ENCE
+    "ence": "ENCE",
+    # GamerLegion
+    "gl": "GamerLegion",
+    "gamerlegion": "GamerLegion",
+    # paiN
+    "pain": "paiN",
+    "pain gaming": "paiN",
+    # Imperial
+    "帝国": "Imperial",
+    "imperial": "Imperial",
+    # Aurora
+    "极光": "Aurora",
+    "aurora": "Aurora",
+    # M80
+    "m80": "M80",
+    # FlyQuest
+    "flyquest": "FlyQuest",
+    # Wildcard
+    "wildcard": "Wildcard",
+    "外卡": "Wildcard",
+    # PARIVISION
+    "parivision": "PARIVISION",
+    # BetBoom
+    "bb": "BetBoom",
+    "betboom": "BetBoom",
+    # AMKAL
+    "amkal": "AMKAL",
+    # Sashi
+    "sashi": "Sashi",
+    # OG
+    "og": "OG",
+    # SAW
+    "saw": "SAW",
+    # B8
+    "b8": "B8",
 }
+
+# 选手外号/中文俗称 → HLTV 正式选手昵称
+_PLAYER_ALIASES: dict[str, str] = {
+    # ZywOo
+    "载物": "ZywOo",
+    "薯茄": "ZywOo",
+    "大番茄": "ZywOo",
+    "番茄": "ZywOo",
+    "zywoo": "ZywOo",
+    # s1mple
+    "森破": "s1mple",
+    "简单男孩": "s1mple",
+    "simple": "s1mple",
+    "s1": "s1mple",
+    "s1mple": "s1mple",
+    # m0NESY
+    "小孩": "m0NESY",
+    "太子": "m0NESY",
+    "莫西": "m0NESY",
+    "monesy": "m0NESY",
+    "m0nesy": "m0NESY",
+    # karrigan
+    "大表哥": "karrigan",
+    "卡利甘": "karrigan",
+    "表哥": "karrigan",
+    "karrigan": "karrigan",
+    # Twistzz
+    "总监": "Twistzz",
+    "发型总监": "Twistzz",
+    "扭扭": "Twistzz",
+    "twistzz": "Twistzz",
+    # rain
+    "雨神": "rain",
+    "rain": "rain",
+    # donk
+    "顿克": "donk",
+    "东克": "donk",
+    "绿龙大爹": "donk",
+    "donk": "donk",
+    # sh1ro
+    "四哥": "sh1ro",
+    "白哥": "sh1ro",
+    "shiro": "sh1ro",
+    "sh1ro": "sh1ro",
+    # broky
+    "牢布": "broky",
+    "布罗基": "broky",
+    "broky": "broky",
+    # ropz
+    "罗普兹": "ropz",
+    "罗普斯": "ropz",
+    "跑跑卡丁车": "ropz",
+    "罗子": "ropz",
+    "ropz": "ropz",
+    # frozen
+    "寒冰": "frozen",
+    "弗拉森": "frozen",
+    "frozen": "frozen",
+    # b1t
+    "大b哥": "b1t",
+    "比特": "b1t",
+    "b1t": "b1t",
+    "bit": "b1t",
+    # jL
+    "大笑哥": "jL",
+    "jl": "jL",
+    # iM
+    "小m": "iM",
+    "im": "iM",
+    # Aleksib
+    "小李子": "Aleksib",
+    "芬兰小李": "Aleksib",
+    "aleksib": "Aleksib",
+    # w0nderful
+    "旺德福": "w0nderful",
+    "奇迹哥": "w0nderful",
+    "wonderful": "w0nderful",
+    "w0nderful": "w0nderful",
+    # chopper
+    "直升机": "chopper",
+    "老倒霉蛋": "chopper",
+    "chopper": "chopper",
+    # zont1x
+    "伞兵": "zont1x",
+    "冷血": "zont1x",
+    "zont1x": "zont1x",
+    # device
+    "阿汤哥": "device",
+    "阿汤": "device",
+    "德伟": "device",
+    "device": "device",
+    "dev1ce": "device",
+    # NiKo
+    "尼公子": "NiKo",
+    "波黑波霸": "NiKo",
+    "niko": "NiKo",
+    # huNter-
+    "堂哥": "huNter-",
+    "猎人": "huNter-",
+    "hunter": "huNter-",
+    "hunter-": "huNter-",
+    # Snax
+    "大菠萝": "Snax",
+    "苹果神": "Snax",
+    "snax": "Snax",
+    # malbsMd
+    "马尔布斯": "malbsMd",
+    "危地马拉战神": "malbsMd",
+    "malbsmd": "malbsMd",
+    "malbs": "malbsMd",
+    # torzsi
+    "托西": "torzsi",
+    "小红帽": "torzsi",
+    "torzsi": "torzsi",
+    # xertioN
+    "吉姆": "xertioN",
+    "吉姆哥": "xertioN",
+    "xertion": "xertioN",
+    # siuhy
+    "修嗨": "siuhy",
+    "水孩": "siuhy",
+    "siuhy": "siuhy",
+    # Brollan
+    "宝蓝": "Brollan",
+    "brollan": "Brollan",
+    # Jame
+    "上帝": "Jame",
+    "六阶上帝": "Jame",
+    "jame": "Jame",
+    # FL1T
+    "飞利浦": "FL1T",
+    "fl1t": "FL1T",
+    # fame
+    "菲姆": "fame",
+    "fame": "fame",
+    # n0rb3r7
+    "诺波特": "n0rb3r7",
+    "诺博": "n0rb3r7",
+    "norbert": "n0rb3r7",
+    "n0rb3r7": "n0rb3r7",
+    # 国内知名选手
+    "小鬼": "somebody",
+    "鬼鬼": "somebody",
+    "somebody": "somebody",
+    "白菜": "Attacker",
+    "attacker": "Attacker",
+    "蛋总": "Danking",
+    "danking": "Danking",
+    "茄子": "qz",
+    "qz": "qz",
+    "老队长": "captainMo",
+    "mo": "captainMo",
+    "259": "advent",
+    "爱抚": "advent",
+    "advent": "advent",
+    "杨哥": "JamYoung",
+    "小杨": "JamYoung",
+    "jamyoung": "JamYoung",
+    "西瓜": "westmelon",
+    "westmelon": "westmelon",
+    "繁星": "Starry",
+    "starry": "Starry",
+    "吉哥": "Jee",
+    "jee": "Jee",
+    "莫西雅": "Moseyuh",
+    "moseyuh": "Moseyuh",
+    "飞飞": "Flying",
+    "flying": "Flying",
+    "卡尔萨": "Karsa",
+    "karsa": "Karsa",
+    # XANTARES
+    "大坑": "XANTARES",
+    "狠特": "XANTARES",
+    "xantares": "XANTARES",
+    # woxic
+    "左手狙神": "woxic",
+    "沃西克": "woxic",
+    "woxic": "woxic",
+    # Calyx
+    "菜丽克斯": "Calyx",
+    "calyx": "Calyx",
+    # MAJ3R
+    "少校": "MAJ3R",
+    "maj3r": "MAJ3R",
+    # Wicadia
+    "维卡迪亚": "Wicadia",
+    "wicadia": "Wicadia",
+    # electroNic
+    "电子哥": "electroNic",
+    "电子": "electroNic",
+    "electronic": "electroNic",
+    # Perfecto
+    "p元帅": "Perfecto",
+    "p神": "Perfecto",
+    "perfecto": "Perfecto",
+    # Boombl4
+    "胖球": "Boombl4",
+    "boombl4": "Boombl4",
+    # EliGE
+    "鸡哥": "EliGE",
+    "大光头": "EliGE",
+    "elige": "EliGE",
+    # NAF
+    "大头": "NAF",
+    "树懒": "NAF",
+    "naf": "NAF",
+    # apEX
+    "豆豆": "apEX",
+    "憨豆": "apEX",
+    "apex": "apEX",
+    # Spinx
+    "刺头": "Spinx",
+    "斯宾克斯": "Spinx",
+    "spinx": "Spinx",
+    # flameZ
+    "火男": "flameZ",
+    "flamez": "flameZ",
+    # mezii
+    "美滋滋": "mezii",
+    "梅子": "mezii",
+    "mezii": "mezii",
+    # magixx
+    "魔法少女": "magixx",
+    "魔法哥": "magixx",
+    "magixx": "magixx",
+    # stavn
+    "史塔温": "stavn",
+    "stavn": "stavn",
+    # jabbi
+    "贾比": "jabbi",
+    "嘉比": "jabbi",
+    "jabbi": "jabbi",
+    # Staehr
+    "斯太尔": "Staehr",
+    "staehr": "Staehr",
+    # blameF
+    "大壮": "blameF",
+    "脑弹": "blameF",
+    "blamef": "blameF",
+    # k0nfig
+    "狂哥": "k0nfig",
+    "k0nfig": "k0nfig",
+    # SunPayus
+    "太阳神": "SunPayus",
+    "sunpayus": "SunPayus",
+    # Maden
+    "马灯": "Maden",
+    "maden": "Maden",
+    # TeSeS
+    "特色斯": "TeSeS",
+    "teses": "TeSeS",
+    # sjuush
+    "刷子": "sjuush",
+    "sjuush": "sjuush",
+    # degster
+    "迪格斯特": "degster",
+    "拍巴掌": "degster",
+    "degster": "degster",
+    # kyxsan
+    "凯克桑": "kyxsan",
+    "kyxsan": "kyxsan",
+    # NertZ
+    "内茨": "NertZ",
+    "nertz": "NertZ",
+    # Senzu
+    "仙豆": "Senzu",
+    "senzu": "Senzu",
+    # Techno
+    "技术哥": "Techno",
+    "techno": "Techno",
+    "techno4k": "Techno",
+    # bLitz
+    "闪电": "bLitz",
+    "blitz": "bLitz",
+    # Hallzerk
+    "浩克": "Hallzerk",
+    "大汉": "Hallzerk",
+    "hallzerk": "Hallzerk",
+    # Grim
+    "格里姆": "Grim",
+    "grim": "Grim",
+    # JT
+    "jt": "JT",
+    # floppy
+    "拖鞋": "floppy",
+    "floppy": "floppy",
+}
+
+# 确保所有 key 均经 cf 归一
+_TEAM_ALIASES = {cf(k): v for k, v in _TEAM_ALIASES.items()}
+_PLAYER_ALIASES = {cf(k): v for k, v in _PLAYER_ALIASES.items()}
+TEAM_ALIASES = _TEAM_ALIASES
+PLAYER_ALIASES = _PLAYER_ALIASES
+
+
+def canonical_team(name: str) -> str:
+    """把战队别名/俗称转为 HLTV 官方规范队名,未收录则返回原输入。"""
+    q = cf(name)
+    return _TEAM_ALIASES.get(q, (name or "").strip())
+
+
+def canonical_player(nick: str) -> str:
+    """把选手外号/中文俗称转为 HLTV 官方规范昵称,未收录则返回原输入。"""
+    q = cf(nick)
+    return _PLAYER_ALIASES.get(q, (nick or "").strip())
+
+
+def target_matches(query: str, display: str, kind: str = "team") -> bool:
+    """检查用户输入的 query 是否命中已有订阅的目标(支持大小写、leet 还原及中英文俗称/外号)。"""
+    q = cf(query)
+    disp = cf(display)
+    if not q or not disp:
+        return False
+    if q == disp or nick_matches(query, display):
+        return True
+    if kind == "team":
+        canon = cf(canonical_team(query))
+        if canon and (canon == disp or nick_matches(canon, display)):
+            return True
+        variants = team_alias_variants(display)
+        if q in variants:
+            return True
+    elif kind == "player":
+        canon = cf(canonical_player(query))
+        if canon and (canon == disp or nick_matches(canon, display)):
+            return True
+        variants = player_alias_variants(display)
+        if q in variants:
+            return True
+    return False
+
+
+def team_matches_filter(filter_str: str, team_name: str) -> bool:
+    """判断战队名 team_name 是否命中过滤词 filter_str (支持子串包含与别名归一化)。"""
+    q = cf(filter_str)
+    t = cf(team_name)
+    if not q or not t:
+        return False
+    if q in t:
+        return True
+    canon_q = cf(canonical_team(filter_str))
+    if canon_q and canon_q in t:
+        return True
+    variants = team_alias_variants(team_name)
+    if any(q in v or v in q for v in variants):
+        return True
+    return False
 
 
 def team_alias_variants(name: str) -> set[str]:
@@ -195,6 +679,68 @@ def team_alias_variants(name: str) -> set[str]:
         for alias, target in _TEAM_ALIASES.items()
         if cf(target) == formal
     }
+
+
+def player_alias_variants(nick: str) -> set[str]:
+    """Return aliases that resolve to an HLTV player's formal nick."""
+    formal = cf(nick)
+    return {
+        alias
+        for alias, target in _PLAYER_ALIASES.items()
+        if cf(target) == formal
+    }
+
+
+def _suggest_teams(query: str, items: list[hltv.SearchTeam], limit: int = 6) -> list[hltv.SearchTeam]:
+    """错拼/漏拼时的战队就近建议。"""
+    q, dq = cf(query), deleet(query)
+    if not q:
+        return []
+    out: list[hltv.SearchTeam] = []
+    seen: set[str] = set()
+    for it in items:
+        n = it.name
+        if q in cf(n) or dq in deleet(n):
+            out.append(it)
+            seen.add(it.id)
+            if len(out) >= limit:
+                return out
+    if len(q) >= 2:
+        for alias_key, target in _TEAM_ALIASES.items():
+            if q in alias_key:
+                for it in items:
+                    if it.id not in seen and nick_matches(target, it.name):
+                        out.append(it)
+                        seen.add(it.id)
+                        if len(out) >= limit:
+                            return out
+    return out
+
+
+def _suggest_players(query: str, items: list[hltv.SearchPlayer], limit: int = 6) -> list[hltv.SearchPlayer]:
+    """错拼/漏拼时的选手就近建议。"""
+    q, dq = cf(query), deleet(query)
+    if not q:
+        return []
+    out: list[hltv.SearchPlayer] = []
+    seen: set[str] = set()
+    for it in items:
+        n = it.nick
+        if q in cf(n) or dq in deleet(n):
+            out.append(it)
+            seen.add(it.id)
+            if len(out) >= limit:
+                return out
+    if len(q) >= 2:
+        for alias_key, target in _PLAYER_ALIASES.items():
+            if q in alias_key:
+                for it in items:
+                    if it.id not in seen and nick_matches(target, it.nick):
+                        out.append(it)
+                        seen.add(it.id)
+                        if len(out) >= limit:
+                            return out
+    return out
 
 
 def resolve_team_local(query: str, teams: list[dict]) -> TeamResolution:
@@ -238,7 +784,7 @@ def resolve_team_local(query: str, teams: list[dict]) -> TeamResolution:
         if chosen is not None:
             return TeamResolution("ok", team=chosen)
         return TeamResolution("ambiguous", candidates=ordered[:8])
-    return TeamResolution("none", candidates=_suggest(q, cands, lambda t: t.name))
+    return TeamResolution("none", candidates=_suggest_teams(q, cands))
 
 
 def resolve_player_local(query: str, players: list[dict]) -> PlayerResolution:
@@ -260,6 +806,18 @@ def resolve_player_local(query: str, players: list[dict]) -> PlayerResolution:
     def rank_of(candidate: hltv.SearchPlayer) -> Optional[int]:
         return rank_by_id.get(candidate.id) or rank_by_team.get(cf(candidate.team or ""))
 
+    # 外号/俗称先行:唯一命中直接返回
+    alias = _PLAYER_ALIASES.get(cf(q))
+    if alias:
+        hit = [p for p in cands if nick_matches(alias, p.nick)]
+        if len(hit) == 1:
+            return PlayerResolution("ok", player=hit[0])
+        if len(hit) > 1:
+            chosen, ordered = _choose_by_rank(hit, rank_of)
+            if chosen is not None:
+                return PlayerResolution("ok", player=chosen)
+            return PlayerResolution("ambiguous", candidates=ordered[:8])
+
     strong = [p for p in cands if nick_matches(q, p.nick)]
     if len(strong) > 1:
         strong = _tiebreak_exact(q, strong, lambda p: p.nick)
@@ -270,7 +828,7 @@ def resolve_player_local(query: str, players: list[dict]) -> PlayerResolution:
         if chosen is not None:
             return PlayerResolution("ok", player=chosen)
         return PlayerResolution("ambiguous", candidates=ordered[:8])
-    return PlayerResolution("none", candidates=_suggest(q, cands, lambda p: p.nick))
+    return PlayerResolution("none", candidates=_suggest_players(q, cands))
 
 
 async def resolve_player(
@@ -280,17 +838,36 @@ async def resolve_player(
     q = (query or "").strip()
     if not q:
         return PlayerResolution("none")
-    js = await fetcher.fetch_search(q)
+    alias = _PLAYER_ALIASES.get(cf(q))
+    # 若命中外号且原查询含有非 ASCII 字符(如中文),直接以规范昵称请求 HLTV;否则先搜 q
+    search_term = alias if (alias and not q.isascii()) else q
+    js = await fetcher.fetch_search(search_term)
     if js is None:
         return PlayerResolution("error")
     found_players, _ = hltv.parse_search(js)
     found_players = _dedup_players(found_players)
+    # 若原词为 ASCII 但搜空,且有 alias,尝试用 alias 二次检索
+    if not found_players and alias and search_term != alias:
+        js2 = await fetcher.fetch_search(alias)
+        if js2 is not None:
+            found_players, _ = hltv.parse_search(js2)
+            found_players = _dedup_players(found_players)
     if not found_players:
         return PlayerResolution("none")
     rank_by_id, rank_by_team = _player_rank_lookup(players)
 
     def rank_of(candidate: hltv.SearchPlayer) -> Optional[int]:
         return rank_by_id.get(candidate.id) or rank_by_team.get(cf(candidate.team or ""))
+
+    if alias:
+        alias_hits = [p for p in found_players if nick_matches(alias, p.nick)]
+        if len(alias_hits) == 1:
+            return PlayerResolution("ok", player=alias_hits[0])
+        if len(alias_hits) > 1:
+            chosen, ordered = _choose_by_rank(alias_hits, rank_of)
+            if chosen is not None:
+                return PlayerResolution("ok", player=chosen)
+            return PlayerResolution("ambiguous", candidates=ordered[:8])
 
     strong = [p for p in found_players if nick_matches(q, p.nick)]
     if len(strong) > 1:
@@ -311,11 +888,20 @@ async def resolve_team(fetcher, query: str, teams: Optional[list[dict]] = None) 
     q = (query or "").strip()
     if not q:
         return TeamResolution("none")
-    js = await fetcher.fetch_search(q)
+    alias = _TEAM_ALIASES.get(cf(q))
+    # 若命中俗称且原查询含有非 ASCII 字符(如中文),直接以规范队名请求 HLTV;否则先搜 q
+    search_term = alias if (alias and not q.isascii()) else q
+    js = await fetcher.fetch_search(search_term)
     if js is None:
         return TeamResolution("error")
     _, found_teams = hltv.parse_search(js)
     found_teams = _dedup_teams(found_teams)
+    # 若原词为 ASCII 但搜空,且有 alias,尝试用 alias 二次检索
+    if not found_teams and alias and search_term != alias:
+        js2 = await fetcher.fetch_search(alias)
+        if js2 is not None:
+            _, found_teams = hltv.parse_search(js2)
+            found_teams = _dedup_teams(found_teams)
     if not found_teams:
         return TeamResolution("none")
     rank_by_id, rank_by_key = _team_rank_lookup(teams)
@@ -323,7 +909,6 @@ async def resolve_team(fetcher, query: str, teams: Optional[list[dict]] = None) 
     def rank_of(candidate: hltv.SearchTeam) -> Optional[int]:
         return rank_by_id.get(candidate.id) or rank_by_key.get(team_key(candidate.name))
 
-    alias = _TEAM_ALIASES.get(cf(q))
     if alias:
         alias_hits = [t for t in found_teams if nick_matches(alias, t.name)]
         if len(alias_hits) == 1:

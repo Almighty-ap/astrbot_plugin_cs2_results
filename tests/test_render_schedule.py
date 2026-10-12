@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from astrbot_plugin_cs2_results import render
 from astrbot_plugin_cs2_results.hltv import (
     EventSchedule,

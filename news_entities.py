@@ -37,7 +37,9 @@ class NewsEntityMatcher:
                     if key:
                         matcher.team_index.setdefault(key, set()).add(target_key)
             elif kind == "player":
-                for variant in {display, names.deleet(display)}:
+                variants = {display, names.deleet(display)}
+                variants.update(names.player_alias_variants(display))
+                for variant in variants:
                     key = _tokens(variant)
                     if key:
                         matcher.player_index.setdefault(key, set()).add(target_key)
