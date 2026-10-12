@@ -156,7 +156,7 @@ def test_canonical_team_and_player_chinese_aliases() -> None:
 
     # 选手
     assert names.canonical_player("载物") == "ZywOo"
-    assert names.canonical_player("薯茄") == "ZywOo"
+    assert names.canonical_player("贼物") == "ZywOo"
     assert names.canonical_player("森破") == "s1mple"
     assert names.canonical_player("小孩") == "m0NESY"
     assert names.canonical_player("太子") == "m0NESY"
@@ -214,7 +214,7 @@ def test_local_player_chinese_alias_resolves() -> None:
 
     for query, expected_nick, expected_id in [
         ("载物", "ZywOo", "11893"),
-        ("薯茄", "ZywOo", "11893"),
+        ("贼物", "ZywOo", "11893"),
         ("森破", "s1mple", "7998"),
         ("小孩", "m0NESY", "19230"),
         ("太子", "m0NESY", "19230"),
@@ -263,7 +263,7 @@ def test_target_matches_aliases() -> None:
     assert not names.target_matches("小蜜蜂", "Spirit", "team")
 
     assert names.target_matches("载物", "ZywOo", "player")
-    assert names.target_matches("薯茄", "ZywOo", "player")
+    assert names.target_matches("贼物", "ZywOo", "player")
     assert names.target_matches("森破", "s1mple", "player")
     assert names.target_matches("simple", "s1mple", "player")
     assert names.target_matches("小孩", "m0NESY", "player")

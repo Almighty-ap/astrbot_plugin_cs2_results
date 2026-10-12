@@ -192,14 +192,13 @@ _TEAM_ALIASES: dict[str, str] = {
     "team spirit": "Spirit",
     # FaZe
     "银河战舰": "FaZe",
-    "大飞": "FaZe",
+    "法则": "FaZe",
     "faze": "FaZe",
     "faze clan": "FaZe",
     # Natus Vincere
     "navi": "Natus Vincere",
     "na'vi": "Natus Vincere",
     "黄黑军团": "Natus Vincere",
-    "纳维": "Natus Vincere",
     "natus vincere": "Natus Vincere",
     # MOUZ
     "老鼠": "MOUZ",
@@ -214,12 +213,10 @@ _TEAM_ALIASES: dict[str, str] = {
     "vp": "Virtus.pro",
     "virtus pro": "Virtus.pro",
     "virtus.pro": "Virtus.pro",
-    "北极熊": "Virtus.pro",
     # Astralis
     "a队": "Astralis",
     "ast": "Astralis",
     "astralis": "Astralis",
-    "星队": "Astralis",
     # Ninjas in Pyjamas
     "nip": "Ninjas in Pyjamas",
     "睡衣忍者": "Ninjas in Pyjamas",
@@ -241,16 +238,14 @@ _TEAM_ALIASES: dict[str, str] = {
     "tyloo": "TYLOO",
     # Lynn Vision
     "lvg": "Lynn Vision",
-    "飞龙": "Lynn Vision",
-    "领航": "Lynn Vision",
     "lynn vision": "Lynn Vision",
     # HEROIC
-    "小火龙": "HEROIC",
+    "x队": "HEROIC",
     "英雄": "HEROIC",
     "heroic": "HEROIC",
     # Complexity
     "col": "Complexity",
-    "complexity": "Complexity",
+    "蓝星": "Complexity",
     # Eternal Fire
     "ef": "Eternal Fire",
     "永恒之火": "Eternal Fire",
@@ -263,11 +258,9 @@ _TEAM_ALIASES: dict[str, str] = {
     "liquid": "Liquid",
     # Cloud9
     "c9": "Cloud9",
-    "云九": "Cloud9",
     "cloud9": "Cloud9",
     # Falcons
     "猎鹰": "Falcons",
-    "沙特猎鹰": "Falcons",
     "falcons": "Falcons",
     "team falcons": "Falcons",
     # 3DMAX
@@ -299,15 +292,19 @@ _TEAM_ALIASES: dict[str, str] = {
     # Aurora
     "极光": "Aurora",
     "aurora": "Aurora",
+    "欧若拉": "Aurora",
     # M80
     "m80": "M80",
     # FlyQuest
     "flyquest": "FlyQuest",
+    "绿叶": "FlyQuest",
+    "灰狗": "FlyQuest",
     # Wildcard
     "wildcard": "Wildcard",
     "外卡": "Wildcard",
     # PARIVISION
     "parivision": "PARIVISION",
+    "pv": "PARIVISION",    
     # BetBoom
     "bb": "BetBoom",
     "betboom": "BetBoom",
@@ -327,8 +324,8 @@ _TEAM_ALIASES: dict[str, str] = {
 _PLAYER_ALIASES: dict[str, str] = {
     # ZywOo
     "载物": "ZywOo",
-    "薯茄": "ZywOo",
-    "大番茄": "ZywOo",
+    "贼物": "ZywOo",
+    "大裂谷": "ZywOo",
     "番茄": "ZywOo",
     "zywoo": "ZywOo",
     # s1mple
@@ -340,92 +337,112 @@ _PLAYER_ALIASES: dict[str, str] = {
     # m0NESY
     "小孩": "m0NESY",
     "太子": "m0NESY",
-    "莫西": "m0NESY",
+    "孩神": "m0NESY",
+    "海参": "m0NESY",
     "monesy": "m0NESY",
     "m0nesy": "m0NESY",
     # karrigan
     "大表哥": "karrigan",
     "卡利甘": "karrigan",
-    "表哥": "karrigan",
     "karrigan": "karrigan",
+    "刀锋女王": "karrigan",
     # Twistzz
     "总监": "Twistzz",
     "发型总监": "Twistzz",
     "扭扭": "Twistzz",
     "twistzz": "Twistzz",
+    "监哥": "Twistzz",    
+    "弓箭手": "Twistzz",    
+    "贼贼": "Twistzz",
     # rain
     "雨神": "rain",
     "rain": "rain",
     # donk
-    "顿克": "donk",
+    "洞克": "donk",
     "东克": "donk",
     "绿龙大爹": "donk",
     "donk": "donk",
+    "狗洞": "donk",
+    "洞可": "donk",
     # sh1ro
-    "四哥": "sh1ro",
-    "白哥": "sh1ro",
+    "息肉": "sh1ro",
+    "若子": "sh1ro",
     "shiro": "sh1ro",
+    "细弱": "sh1ro",
     "sh1ro": "sh1ro",
     # broky
-    "牢布": "broky",
+    "箱子": "broky",
     "布罗基": "broky",
+    "小箱": "broky",
+    "箱神": "broky",
     "broky": "broky",
+    "切除": "broky",
     # ropz
-    "罗普兹": "ropz",
-    "罗普斯": "ropz",
-    "跑跑卡丁车": "ropz",
-    "罗子": "ropz",
+    "肉铺子": "ropz",
+    "车主": "ropz",
+    "罗宾": "ropz",
+    "罗斌": "ropz",
     "ropz": "ropz",
     # frozen
     "寒冰": "frozen",
-    "弗拉森": "frozen",
+    "冰雪奇缘": "frozen",
     "frozen": "frozen",
+    "寒王": "frozen",
     # b1t
     "大b哥": "b1t",
-    "比特": "b1t",
+    "大b": "b1t",
     "b1t": "b1t",
     "bit": "b1t",
     # jL
-    "大笑哥": "jL",
     "jl": "jL",
     # iM
-    "小m": "iM",
+    "阿努比斯跑打": "iM",
     "im": "iM",
     # Aleksib
     "小李子": "Aleksib",
-    "芬兰小李": "Aleksib",
+    "李神": "Aleksib",
+    "李子": "Aleksib",
+    "处理": "Aleksib",
     "aleksib": "Aleksib",
     # w0nderful
-    "旺德福": "w0nderful",
-    "奇迹哥": "w0nderful",
+    "玩的福": "w0nderful",
+    "王德发": "w0nderful",
     "wonderful": "w0nderful",
     "w0nderful": "w0nderful",
     # chopper
-    "直升机": "chopper",
-    "老倒霉蛋": "chopper",
+    "大超": "chopper",
+    "天道超": "chopper",
     "chopper": "chopper",
     # zont1x
-    "伞兵": "zont1x",
-    "冷血": "zont1x",
+    "宗主": "zont1x",
+    "宗宗": "zont1x",
     "zont1x": "zont1x",
+    "啊啊啊啊": "zont1x",
     # device
     "阿汤哥": "device",
     "阿汤": "device",
-    "德伟": "device",
+    "玩机爸": "device",
     "device": "device",
+    "流脓": "device",
+    "人类极限": "device",
     "dev1ce": "device",
     # NiKo
     "尼公子": "NiKo",
-    "波黑波霸": "NiKo",
+    "尼古拉科维奇": "NiKo",
+    "小科维奇": "NiKo",
     "niko": "NiKo",
+    "大虾": "NiKo",
+    "软脚虾": "NiKo",
+    "夜店王子": "NiKo",
+    "老尼": "NiKo",
+    "我尼": "NiKo",
     # huNter-
-    "堂哥": "huNter-",
+    "表哥": "huNter-",
     "猎人": "huNter-",
     "hunter": "huNter-",
     "hunter-": "huNter-",
     # Snax
-    "大菠萝": "Snax",
-    "苹果神": "Snax",
+    "白熊": "Snax",
     "snax": "Snax",
     # malbsMd
     "马尔布斯": "malbsMd",
@@ -433,181 +450,171 @@ _PLAYER_ALIASES: dict[str, str] = {
     "malbsmd": "malbsMd",
     "malbs": "malbsMd",
     # torzsi
-    "托西": "torzsi",
-    "小红帽": "torzsi",
+    "托子": "torzsi",
+    "托神": "torzsi",
+    "托出": "torzsi",
     "torzsi": "torzsi",
     # xertioN
-    "吉姆": "xertioN",
-    "吉姆哥": "xertioN",
+    "谢逊": "xertioN",
     "xertion": "xertioN",
     # siuhy
     "修嗨": "siuhy",
-    "水孩": "siuhy",
+    "小夫": "siuhy",
+    "索嗨": "siuhy",
+    "苏一": "siuhy",
+    "休一": "siuhy",
     "siuhy": "siuhy",
     # Brollan
     "宝蓝": "Brollan",
-    "brollan": "Brollan",
+    "brollan": "Brollan",    
     # Jame
     "上帝": "Jame",
-    "六阶上帝": "Jame",
+    "大詹": "Jame",
     "jame": "Jame",
     # FL1T
-    "飞利浦": "FL1T",
+    "大天使长": "FL1T",
     "fl1t": "FL1T",
     # fame
     "菲姆": "fame",
     "fame": "fame",
     # n0rb3r7
-    "诺波特": "n0rb3r7",
+    "诺伯特": "n0rb3r7",
     "诺博": "n0rb3r7",
     "norbert": "n0rb3r7",
     "n0rb3r7": "n0rb3r7",
     # 国内知名选手
     "小鬼": "somebody",
-    "鬼鬼": "somebody",
+    "孙宝迪": "somebody",
     "somebody": "somebody",
     "白菜": "Attacker",
     "attacker": "Attacker",
-    "蛋总": "Danking",
+    "蛋神": "Danking",
+    "蛋出": "Danking",
+    "中门载物杀手": "Danking",
     "danking": "Danking",
     "茄子": "qz",
     "qz": "qz",
     "老队长": "captainMo",
     "mo": "captainMo",
     "259": "advent",
-    "爱抚": "advent",
+    "小鸡": "advent",
     "advent": "advent",
-    "杨哥": "JamYoung",
-    "小杨": "JamYoung",
+    "果酱年轻": "JamYoung",
+    "杨易": "JamYoung",
     "jamyoung": "JamYoung",
     "西瓜": "westmelon",
     "westmelon": "westmelon",
-    "繁星": "Starry",
+    "大舅子": "Starry",
+    "国产niko": "Starry",
     "starry": "Starry",
-    "吉哥": "Jee",
+    "勾哥": "Jee",
     "jee": "Jee",
-    "莫西雅": "Moseyuh",
+    "勾ee": "Jee",
+    "莫西雨": "Moseyuh",
     "moseyuh": "Moseyuh",
-    "飞飞": "Flying",
-    "flying": "Flying",
-    "卡尔萨": "Karsa",
-    "karsa": "Karsa",
     # XANTARES
-    "大坑": "XANTARES",
-    "狠特": "XANTARES",
+    "狠人": "XANTARES",
+    "土耳其雨姐": "XANTARES",
     "xantares": "XANTARES",
     # woxic
-    "左手狙神": "woxic",
-    "沃西克": "woxic",
+    "左手": "woxic",
     "woxic": "woxic",
-    # Calyx
-    "菜丽克斯": "Calyx",
-    "calyx": "Calyx",
     # MAJ3R
-    "少校": "MAJ3R",
+    "major": "MAJ3R",
     "maj3r": "MAJ3R",
     # Wicadia
     "维卡迪亚": "Wicadia",
     "wicadia": "Wicadia",
+    "礼神": "Wicadia",
     # electroNic
     "电子哥": "electroNic",
     "电子": "electroNic",
     "electronic": "electroNic",
     # Perfecto
     "p元帅": "Perfecto",
-    "p神": "Perfecto",
     "perfecto": "Perfecto",
     # Boombl4
     "胖球": "Boombl4",
     "boombl4": "Boombl4",
     # EliGE
     "鸡哥": "EliGE",
-    "大光头": "EliGE",
     "elige": "EliGE",
     # NAF
-    "大头": "NAF",
     "树懒": "NAF",
     "naf": "NAF",
     # apEX
     "豆豆": "apEX",
     "憨豆": "apEX",
     "apex": "apEX",
+    "豆战胜佛": "apEX",
     # Spinx
-    "刺头": "Spinx",
+    "阿斌": "Spinx",
     "斯宾克斯": "Spinx",
     "spinx": "Spinx",
     # flameZ
-    "火男": "flameZ",
+    "火仔": "flameZ",
     "flamez": "flameZ",
     # mezii
-    "美滋滋": "mezii",
-    "梅子": "mezii",
+    "妹子": "mezii",
+    "奶爸": "mezii",
     "mezii": "mezii",
     # magixx
-    "魔法少女": "magixx",
-    "魔法哥": "magixx",
+    "马西西": "magixx",
     "magixx": "magixx",
     # stavn
-    "史塔温": "stavn",
+    "蛇": "stavn",
     "stavn": "stavn",
     # jabbi
-    "贾比": "jabbi",
-    "嘉比": "jabbi",
+    "鼠": "jabbi",
     "jabbi": "jabbi",
     # Staehr
-    "斯太尔": "Staehr",
+    "野榜": "Staehr",
     "staehr": "Staehr",
     # blameF
     "大壮": "blameF",
-    "脑弹": "blameF",
     "blamef": "blameF",
     # k0nfig
-    "狂哥": "k0nfig",
     "k0nfig": "k0nfig",
     # SunPayus
     "太阳神": "SunPayus",
     "sunpayus": "SunPayus",
     # Maden
-    "马灯": "Maden",
+    "马登": "Maden",
     "maden": "Maden",
     # TeSeS
-    "特色斯": "TeSeS",
+    "龙哥": "TeSeS",
+    "龙": "TeSeS",
+    "神龙": "TeSeS",
     "teses": "TeSeS",
     # sjuush
-    "刷子": "sjuush",
+    "术士": "sjuush",
     "sjuush": "sjuush",
     # degster
-    "迪格斯特": "degster",
-    "拍巴掌": "degster",
+    "拍拍": "degster",
+    "拍拍熊": "degster",
     "degster": "degster",
     # kyxsan
-    "凯克桑": "kyxsan",
+    "k3": "kyxsan",
     "kyxsan": "kyxsan",
     # NertZ
-    "内茨": "NertZ",
     "nertz": "NertZ",
     # Senzu
-    "仙豆": "Senzu",
+    "森祖": "Senzu",
     "senzu": "Senzu",
     # Techno
-    "技术哥": "Techno",
+    "4k": "Techno",
     "techno": "Techno",
     "techno4k": "Techno",
     # bLitz
-    "闪电": "bLitz",
+    "布里茨": "bLitz",
     "blitz": "bLitz",
     # Hallzerk
-    "浩克": "Hallzerk",
+    "护工": "Hallzerk",
     "大汉": "Hallzerk",
     "hallzerk": "Hallzerk",
-    # Grim
-    "格里姆": "Grim",
-    "grim": "Grim",
     # JT
     "jt": "JT",
-    # floppy
-    "拖鞋": "floppy",
-    "floppy": "floppy",
+    "南非常规大师": "JT",
 }
 
 # 确保所有 key 均经 cf 归一
