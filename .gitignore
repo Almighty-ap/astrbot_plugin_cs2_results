@@ -5,3 +5,15 @@ __pycache__/
 .ruff_cache/
 data/
 assets/fonts/local/
+
+# Project Management & Internal Docs
+AGENTS.md
+agent.md
+PROJECT_INDEX.md
+docs/context/
+NOW.md
+MAP.md
+RUNBOOK.md
+DECISIONS.md
+RISKS.md
+history/
