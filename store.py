@@ -20,10 +20,13 @@ import time
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Literal, Optional
 
 from astrbot.api import logger
+
+CN_TZ = timezone(timedelta(hours=8))
 
 try:
     from astrbot.core.utils.astrbot_path import get_astrbot_data_path
@@ -48,7 +51,7 @@ _NEWS_STATE = DATA_DIR / "news_state.json"
 _DB = DATA_DIR / "state.sqlite3"
 
 _JSON_LOCK = threading.RLock()
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 
 
 class PersistenceError(RuntimeError):
@@ -465,6 +468,27 @@ def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
+    """v8: 扩展群个性化订阅模式（mode、mute_enabled、mute_start、mute_end、morning_report）及晨报记录表。"""
+    conn.executescript(
+        """
+        BEGIN IMMEDIATE;
+        ALTER TABLE subscriptions ADD COLUMN mode TEXT NOT NULL DEFAULT 'full';
+        ALTER TABLE subscriptions ADD COLUMN mute_enabled INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE subscriptions ADD COLUMN mute_start TEXT DEFAULT '23:00';
+        ALTER TABLE subscriptions ADD COLUMN mute_end TEXT DEFAULT '08:00';
+        ALTER TABLE subscriptions ADD COLUMN morning_report INTEGER NOT NULL DEFAULT 1;
+        CREATE TABLE IF NOT EXISTS morning_reports (
+            report_date TEXT PRIMARY KEY,
+            pushed_at REAL NOT NULL,
+            groups_count INTEGER NOT NULL DEFAULT 0
+        );
+        UPDATE metadata SET value = '8' WHERE key = 'schema_version' AND value = '7';
+        COMMIT;
+        """
+    )
+
+
 def _initialize_database() -> None:
     conn = _connect()
     try:
@@ -482,6 +506,7 @@ def _initialize_database() -> None:
             _migrate_v4_to_v5(conn)
             _migrate_v5_to_v6(conn)
             _migrate_v6_to_v7(conn)
+            _migrate_v7_to_v8(conn)
         elif version == 1:
             _migrate_v1_to_v2(conn)
             _migrate_v2_to_v3(conn)
@@ -489,26 +514,34 @@ def _initialize_database() -> None:
             _migrate_v4_to_v5(conn)
             _migrate_v5_to_v6(conn)
             _migrate_v6_to_v7(conn)
+            _migrate_v7_to_v8(conn)
         elif version == 2:
             _migrate_v2_to_v3(conn)
             _migrate_v3_to_v4(conn)
             _migrate_v4_to_v5(conn)
             _migrate_v5_to_v6(conn)
             _migrate_v6_to_v7(conn)
+            _migrate_v7_to_v8(conn)
         elif version == 3:
             _migrate_v3_to_v4(conn)
             _migrate_v4_to_v5(conn)
             _migrate_v5_to_v6(conn)
             _migrate_v6_to_v7(conn)
+            _migrate_v7_to_v8(conn)
         elif version == 4:
             _migrate_v4_to_v5(conn)
             _migrate_v5_to_v6(conn)
             _migrate_v6_to_v7(conn)
+            _migrate_v7_to_v8(conn)
         elif version == 5:
             _migrate_v5_to_v6(conn)
             _migrate_v6_to_v7(conn)
+            _migrate_v7_to_v8(conn)
         elif version == 6:
             _migrate_v6_to_v7(conn)
+            _migrate_v7_to_v8(conn)
+        elif version == 7:
+            _migrate_v7_to_v8(conn)
         elif version != _SCHEMA_VERSION:
             raise PersistenceError(f"不支持的状态库版本: {version}")
         final_version = _database_version(conn)
@@ -776,6 +809,135 @@ def unsubscribe(group_id: int) -> bool:
         # 一并清掉,避免"我明明订阅了却不推"的困惑与孤儿数据。
         conn.execute("DELETE FROM subscription_targets WHERE group_id = ?", (group_id,))
         return cursor.rowcount == 1
+
+
+def get_group_subscription(group_id: int) -> Optional[dict]:
+    """获取指定群的个性化订阅配置。"""
+    group_id = _normalize_group_ids([group_id])[0]
+    with _transaction() as conn:
+        row = conn.execute(
+            """
+            SELECT group_id, mode, mute_enabled, mute_start, mute_end, morning_report, created_at, updated_at
+            FROM subscriptions WHERE group_id = ?
+            """,
+            (group_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "group_id": int(row["group_id"]),
+        "mode": str(row["mode"] or "full"),
+        "mute_enabled": bool(row["mute_enabled"]),
+        "mute_start": str(row["mute_start"] or "23:00"),
+        "mute_end": str(row["mute_end"] or "08:00"),
+        "morning_report": bool(row["morning_report"]),
+        "created_at": float(row["created_at"]),
+        "updated_at": float(row["updated_at"]),
+    }
+
+
+def set_group_subscription_mode(group_id: int, mode: str) -> bool:
+    """设置群订阅模式 ('full' 全量 / 'concise' 精简 / 'home' 主队)。"""
+    group_id = _normalize_group_ids([group_id])[0]
+    if mode not in ("full", "concise", "home"):
+        raise ValueError(f"无效的订阅模式: {mode}")
+    now = time.time()
+    with _transaction(write=True) as conn:
+        cursor = conn.execute(
+            "UPDATE subscriptions SET mode = ?, updated_at = ? WHERE group_id = ?",
+            (mode, now, group_id),
+        )
+        return cursor.rowcount > 0
+
+
+def set_group_mute(
+    group_id: int,
+    enabled: bool,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+) -> bool:
+    """设置群夜间/时段免打扰静音。"""
+    group_id = _normalize_group_ids([group_id])[0]
+    now = time.time()
+    with _transaction(write=True) as conn:
+        if start is not None and end is not None:
+            cursor = conn.execute(
+                """
+                UPDATE subscriptions
+                SET mute_enabled = ?, mute_start = ?, mute_end = ?, updated_at = ?
+                WHERE group_id = ?
+                """,
+                (1 if enabled else 0, start, end, now, group_id),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                UPDATE subscriptions
+                SET mute_enabled = ?, updated_at = ?
+                WHERE group_id = ?
+                """,
+                (1 if enabled else 0, now, group_id),
+            )
+        return cursor.rowcount > 0
+
+
+def set_group_morning_report(group_id: int, enabled: bool) -> bool:
+    """开启或关闭群每日晨报。"""
+    group_id = _normalize_group_ids([group_id])[0]
+    now = time.time()
+    with _transaction(write=True) as conn:
+        cursor = conn.execute(
+            "UPDATE subscriptions SET morning_report = ?, updated_at = ? WHERE group_id = ?",
+            (1 if enabled else 0, now, group_id),
+        )
+        return cursor.rowcount > 0
+
+
+def is_group_muted_now(group_id: int, now_ts: Optional[float] = None) -> bool:
+    """检查指定群当前时刻是否处于免打扰静音时段内（按北京时间）。"""
+    sub = get_group_subscription(group_id)
+    if not sub or not sub.get("mute_enabled"):
+        return False
+    start_str = sub.get("mute_start") or "23:00"
+    end_str = sub.get("mute_end") or "08:00"
+    ts = now_ts or time.time()
+    dt = datetime.fromtimestamp(ts, CN_TZ)
+    cur_str = f"{dt.hour:02d}:{dt.minute:02d}"
+    if start_str <= end_str:
+        return start_str <= cur_str <= end_str
+    return cur_str >= start_str or cur_str <= end_str
+
+
+def get_morning_report_groups() -> list[int]:
+    """获取所有开启了每日晨报的订阅群。"""
+    with _transaction() as conn:
+        rows = conn.execute(
+            "SELECT group_id FROM subscriptions WHERE morning_report = 1"
+        ).fetchall()
+    return [int(row["group_id"]) for row in rows]
+
+
+def has_morning_report_pushed(report_date: str) -> bool:
+    """检查指定日期（YYYY-MM-DD）的晨报是否已推送过。"""
+    with _transaction() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM morning_reports WHERE report_date = ?",
+            (report_date,),
+        ).fetchone()
+    return bool(row)
+
+
+def record_morning_report_pushed(report_date: str, groups_count: int = 0) -> None:
+    """记录指定日期的晨报已推送完成。"""
+    now = time.time()
+    with _transaction(write=True) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO morning_reports(report_date, pushed_at, groups_count)
+            VALUES (?, ?, ?)
+            """,
+            (report_date, now, groups_count),
+        )
 
 
 # —————————— 个人级战队/选手订阅 ——————————

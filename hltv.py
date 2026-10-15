@@ -12,7 +12,10 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Union
+
+CN_TZ = timezone(timedelta(hours=8))
 
 try:
     from selectolax.parser import HTMLParser, Node
@@ -226,6 +229,62 @@ class VrsForecast:
         return a, b
 
 
+MAP_NAMES_CN: dict[str, str] = {
+    "mirage": "荒漠迷城",
+    "inferno": "炼狱小镇",
+    "nuke": "核子危机",
+    "dust2": "炙热沙城 II",
+    "ancient": "远古遗迹",
+    "anubis": "阿努比斯",
+    "train": "列车停放站",
+    "vertigo": "殒命大厦",
+    "overpass": "死亡游乐园",
+    "cache": "死城之谜",
+    "cobblestone": "古堡激战",
+}
+
+
+@dataclass
+class VetoStep:
+    step: int
+    team: str
+    action: str  # "ban" / "pick" / "decider"
+    map_name: str
+    map_cn: str
+
+
+@dataclass
+class H2HMatch:
+    match_id: str
+    url: str
+    date_ms: int
+    event_name: str
+    team1: str
+    team2: str
+    score1: int
+    score2: int
+    winner: str  # "team1" / "team2"
+    is_cs2: bool
+    date_text: str = ""
+
+
+@dataclass
+class H2HSummary:
+    team1: str
+    team2: str
+    team1_id: str
+    team2_id: str
+    team1_logo: Optional[str] = None
+    team2_logo: Optional[str] = None
+    total_matches: int = 0
+    team1_wins: int = 0
+    team2_wins: int = 0
+    cs2_matches: int = 0
+    cs2_team1_wins: int = 0
+    cs2_team2_wins: int = 0
+    matches: list[H2HMatch] = field(default_factory=list)
+
+
 @dataclass
 class MatchDetail:
     match_id: str
@@ -242,6 +301,7 @@ class MatchDetail:
     event_logo: Optional[str]
     maps: list[MapResult]
     vrs: Optional[VrsForecast] = None
+    veto_steps: list[VetoStep] = field(default_factory=list)
 
     @property
     def series1(self) -> int:
@@ -565,6 +625,117 @@ def parse_results(results_html: Html) -> list[ScheduledMatch]:
     return out
 
 
+CS2_RELEASE_UNIX_MS = 1695772800000  # 2023-09-27 00:00:00 UTC
+
+
+def parse_h2h_results(
+    results_html: Html,
+    team1: str,
+    team2: str,
+    team1_id: str = "",
+    team2_id: str = "",
+) -> H2HSummary:
+    """解析两队交手历史页面 (https://www.hltv.org/results?team=id1&team=id2)。"""
+    t = tree(results_html)
+    t1_norm = _norm(team1).casefold()
+    t2_norm = _norm(team2).casefold()
+
+    def _matches_team1(name: str) -> bool:
+        n = _norm(name).casefold()
+        return n == t1_norm or (bool(n) and (n in t1_norm or t1_norm in n))
+
+    def _matches_team2(name: str) -> bool:
+        n = _norm(name).casefold()
+        return n == t2_norm or (bool(n) and (n in t2_norm or t2_norm in n))
+
+    by_id: dict[str, H2HMatch] = {}
+    team1_logo = None
+    team2_logo = None
+
+    for c in t.css(".result-con"):
+        unix = c.attributes.get("data-zonedgrouping-entry-unix")
+        if not (unix and unix.lstrip("-").isdigit()):
+            continue
+        a = c.css_first("a[href*='/matches/']")
+        href = (a.attributes.get("href", "") or "") if a else ""
+        mid = _match_id(href)
+        if not mid or mid in by_id:
+            continue
+        teams = [_txt(x) for x in c.css(".team")]
+        if len(teams) < 2:
+            continue
+
+        m = re.match(r"(\d+)\s*-\s*(\d+)", _txt(c.css_first(".result-score")))
+        s1, s2 = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        won = _txt(c.css_first(".team-won"))
+
+        row_t1, row_t2 = teams[0], teams[1]
+        ev_name = _txt(c.css_first(".event-name"))
+
+        if _matches_team1(row_t1):
+            sc1, sc2 = s1, s2
+            winner_side = "team1" if won == row_t1 else ("team2" if won == row_t2 else "team1")
+            if not team1_logo:
+                team1_logo = _pick_card_team_logo(c, row_t1, "img")
+            if not team2_logo:
+                team2_logo = _pick_card_team_logo(c, row_t2, "img")
+        elif _matches_team2(row_t1):
+            sc1, sc2 = s2, s1
+            winner_side = "team2" if won == row_t1 else ("team1" if won == row_t2 else "team2")
+            if not team2_logo:
+                team2_logo = _pick_card_team_logo(c, row_t1, "img")
+            if not team1_logo:
+                team1_logo = _pick_card_team_logo(c, row_t2, "img")
+        else:
+            sc1, sc2 = s1, s2
+            winner_side = "team1" if won == row_t1 else "team2"
+
+        date_ms = int(unix)
+        is_cs2 = date_ms >= CS2_RELEASE_UNIX_MS
+        dt = datetime.fromtimestamp(date_ms / 1000, CN_TZ)
+        date_text = f"{dt.year}-{dt.month:02d}-{dt.day:02d}"
+
+        by_id[mid] = H2HMatch(
+            match_id=mid,
+            url=BASE + href,
+            date_ms=date_ms,
+            event_name=ev_name,
+            team1=team1,
+            team2=team2,
+            score1=sc1,
+            score2=sc2,
+            winner=winner_side,
+            is_cs2=is_cs2,
+            date_text=date_text,
+        )
+
+    matches = list(by_id.values())
+    matches.sort(key=lambda m: m.date_ms, reverse=True)
+
+    total_matches = len(matches)
+    team1_wins = sum(1 for m in matches if m.winner == "team1")
+    team2_wins = sum(1 for m in matches if m.winner == "team2")
+    cs2_matches = sum(1 for m in matches if m.is_cs2)
+    cs2_team1_wins = sum(1 for m in matches if m.is_cs2 and m.winner == "team1")
+    cs2_team2_wins = sum(1 for m in matches if m.is_cs2 and m.winner == "team2")
+
+    return H2HSummary(
+        team1=team1,
+        team2=team2,
+        team1_id=team1_id,
+        team2_id=team2_id,
+        team1_logo=team1_logo,
+        team2_logo=team2_logo,
+        total_matches=total_matches,
+        team1_wins=team1_wins,
+        team2_wins=team2_wins,
+        cs2_matches=cs2_matches,
+        cs2_team1_wins=cs2_team1_wins,
+        cs2_team2_wins=cs2_team2_wins,
+        matches=matches,
+    )
+
+
 def _pick_logo(t: HTMLParser, kind: str, title: str, allow_fallback: bool = False) -> Optional[str]:
     """在所有 img 里挑 kind(teamlogo/eventlogo)且 title 匹配的 URL,优先 day-only 变体。
 
@@ -591,15 +762,59 @@ def _pick_logo(t: HTMLParser, kind: str, title: str, allow_fallback: bool = Fals
     return fallback if allow_fallback else None
 
 
+def parse_veto_steps(t: HTMLParser, team1: str, team2: str) -> list[VetoStep]:
+    """从 veto 序列解析完整 BP 选图流程。"""
+    steps: list[VetoStep] = []
+    step_num = 1
+    for vb in t.css(".veto-box"):
+        txt = _txt(vb)
+        if "picked" not in txt and "removed" not in txt and "left over" not in txt:
+            continue
+        raw_segs = re.split(r"(?:^|\s+)(?=\d+\.\s*)", txt)
+        for seg in raw_segs:
+            seg = seg.strip()
+            if not seg:
+                continue
+            m_num = re.match(r"^(\d+)\.\s*(.+)$", seg)
+            curr_step = int(m_num.group(1)) if m_num else step_num
+            content = m_num.group(2).strip() if m_num else seg
+
+            m_act = re.match(r"^(.+?)\s+(picked|removed)\s+([A-Za-z0-9_ ]+)$", content, re.IGNORECASE)
+            if m_act:
+                tname = m_act.group(1).strip()
+                action_raw = m_act.group(2).lower()
+                mname = m_act.group(3).strip()
+                action = "pick" if action_raw == "picked" else "ban"
+                steps.append(
+                    VetoStep(
+                        step=curr_step,
+                        team=tname,
+                        action=action,
+                        map_name=mname,
+                        map_cn=MAP_NAMES_CN.get(mname.lower(), mname),
+                    )
+                )
+                step_num = curr_step + 1
+                continue
+
+            m_dec = re.match(r"^([A-Za-z0-9_ ]+?)\s+was left over", content, re.IGNORECASE)
+            if m_dec:
+                mname = m_dec.group(1).strip()
+                steps.append(
+                    VetoStep(
+                        step=curr_step,
+                        team="决胜图",
+                        action="decider",
+                        map_name=mname,
+                        map_cn=MAP_NAMES_CN.get(mname.lower(), mname),
+                    )
+                )
+                step_num = curr_step + 1
+    return steps
+
+
 def _parse_veto_picks(t: HTMLParser, team1: str, team2: str) -> dict[str, str]:
-    """从 veto 序列解析每张图的归属 → {map_name_lower: "team1"/"team2"/"decider"}。
-
-    veto 步骤在**第二个** `.veto-box` 里(第一个是 "Best of X" 那行),是一串
-    `N. <队名> picked <Map>` / `N. <队名> removed <Map>` 的 <div>;末尾的 decider 为
-    `N. <Map> was left over`(无人主动选,记为 "decider")。BO1 无 veto 序列 → 返回空。
-    队名对回 team1/team2:大小写无关,精确匹配优先,再退子串包含(容忍队名细微差异)。
-    """
-
+    """从 veto 序列解析每张图的归属 → {map_name_lower: "team1"/"team2"/"decider"}。"""
     def side(name: str) -> Optional[str]:
         n = _norm(name).lower()
         t1, t2 = team1.lower(), team2.lower()
@@ -614,21 +829,14 @@ def _parse_veto_picks(t: HTMLParser, team1: str, team2: str) -> dict[str, str]:
         return None
 
     picks: dict[str, str] = {}
-    for vb in t.css(".veto-box"):
-        txt = _txt(vb)
-        if "picked" not in txt:  # 跳过 "Best of X" 那个框
-            continue
-        for seg in re.split(r"\d+\.\s*", txt):  # 按 "1. " "2. " … 拆成单步
-            seg = seg.strip()
-            m = re.match(r"(.+?)\s+picked\s+([A-Za-z0-9]+)", seg)
-            if m:
-                s = side(m.group(1))
-                if s:
-                    picks[m.group(2).lower()] = s
-                continue
-            d = re.match(r"([A-Za-z0-9]+)\s+was left over", seg)  # 决胜图(无人选)
-            if d:
-                picks[d.group(1).lower()] = "decider"
+    steps = parse_veto_steps(t, team1, team2)
+    for st in steps:
+        if st.action == "pick":
+            s = side(st.team)
+            if s:
+                picks[st.map_name.lower()] = s
+        elif st.action == "decider":
+            picks[st.map_name.lower()] = "decider"
     return picks
 
 
@@ -804,6 +1012,7 @@ def parse_match(match_html: Html, url: str) -> MatchDetail:
         event_logo=_pick_logo(t, "eventlogo", event_name, allow_fallback=True),
         maps=maps,
         vrs=parse_vrs(t),
+        veto_steps=parse_veto_steps(t, team1, team2),
     )
 
 

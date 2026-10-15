@@ -348,6 +348,7 @@ _PLAYER_ALIASES: dict[str, str] = {
     "karrigan": "karrigan",
     "刀锋女王": "karrigan",
     "千早爱烟": "karrigan",
+    "凯圣帝君": "karrigan",
     # Twistzz
     "总监": "Twistzz",
     "发型总监": "Twistzz",
@@ -588,6 +589,9 @@ _PLAYER_ALIASES: dict[str, str] = {
     # stavn
     "蛇": "stavn",
     "stavn": "stavn",
+    "狗蛇": "stavn",
+    "小天使": "stavn",
+    "小狗使": "stavn",
     # jabbi
     "鼠": "jabbi",
     "jabbi": "jabbi",

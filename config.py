@@ -158,6 +158,10 @@ class Config(BaseModel):
     cs2_vrs_min_gap_hours: float = Field(default=6.0, ge=0.5, le=24 * 7)  # 两次真抓的最小间隔
     cs2_vrs_fail_cooldown_min: int = Field(default=60, ge=1)  # 抓失败后的冷却分钟数
 
+    # —— 每日晨报 ——
+    cs2_morning_report_enabled: bool = True
+    cs2_morning_report_time: str = Field(default="08:30")
+
     # —— HLTV RSS 资讯推送 ——
     cs2_news_enabled: bool = True
     cs2_news_poll_interval: int = Field(default=15, ge=1, le=1440)

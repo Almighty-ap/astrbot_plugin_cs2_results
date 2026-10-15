@@ -32,6 +32,7 @@ from .hltv import (
     EventDetail,
     EventSchedule,
     GroupStanding,
+    H2HSummary,
     LineupTeam,
     MapResult,
     MatchDetail,
@@ -2793,12 +2794,18 @@ def build_help_html(admin: bool, when_text: str) -> str:
         + _cmd_row("/cs2 日程", "今日关注赛事的比赛 · 赛果 / 直播 / 待开始;无赛则看下个比赛日", False)
         + _cmd_row("/cs2 战况 <战队>", "查询指定战队近期比赛、当前比分与赛果", False)
         + _cmd_row("/cs2 排名 [vrs|hltv]", "查看战队世界排名 TOP 20 榜单 (Valve VRS / HLTV)", False)
+        + _cmd_row("/cs2 交手 <队A> <队B>", "两队历史交手战绩 (CS2 时代战绩与历史全战绩)", False)
+        + _cmd_row("/cs2 bp [战队/比赛]", "查询近期比赛的赛前选图与禁图结果 (Pick/Ban)", False)
         + _cmd_row("/cs2 查询 选手 <名字>", "查看选手近期 Rating / K/D、角色分和 Major 荣誉", False)
         + _cmd_row("/cs2 查询 战队 <名字>", "查看阵容、世界 / VRS 排名和近期战绩", False)
         + _cmd_row("/cs2 赛程", "正在进行 / 即将开赛赛事的完整对阵 · 小组赛 / 淘汰赛,可指定其一", True)
     )
     sub_rows = (
         _cmd_row("/cs2 订阅", "把本群加入自动战报推送", False, tag="群管理员")
+        + _cmd_row("/cs2 模式 [全量|精简|主队]", "切换群推送模式:逐图战报 / 仅完赛卡 / 仅主队", False, tag="群管理员")
+        + _cmd_row("/cs2 静音 [开启|关闭|时段]", "设置夜间免打扰静音时段 (默认 23:00~08:00)", False, tag="群管理员")
+        + _cmd_row("/cs2 晨报 [开启|关闭]", "每日 08:30 定时推送昨夜战报与今日赛程", False, tag="群管理员")
+        + _cmd_row("/cs2 设置", "查看本群订阅模式、免打扰及晨报设置概况", False)
         + _cmd_row("/cs2 订阅 战队 <名字>", "订阅某战队,开赛和赛果都会在群里 @ 你", False)
         + _cmd_row("/cs2 订阅 选手 <名字>", "订阅某选手(s1mple / m0nesy 这类写法都认)", False)
         + _cmd_row("/cs2 我的订阅", "查看你在本群订阅的战队 / 选手", False)
@@ -2818,7 +2825,7 @@ def build_help_html(admin: bool, when_text: str) -> str:
     if admin:
         admin_rows = (
             _cmd_row("/cs2 状态", "运行状态、白名单与订阅群信息", False, tag="仅调试群")
-            + _cmd_row("/cs2 测试", "立即渲染一张战报卡,可带比赛 ID / URL", False, tag="仅调试群")
+            + _cmd_row("/cs2 测试 [比赛ID|晨报]", "立即渲染一张战报卡或每日晨报", False, tag="仅调试群")
             + _cmd_row("/cs2 重试投递", "重新激活全部或指定比赛的死信", False, tag="仅调试群")
             + _cmd_row("/cs2 刷新名录", "强制刷新战队 / 选手名录(抓一次世界排行榜)", False, tag="仅调试群")
             + _cmd_row("/cs2 刷新VRS", "强制刷新 Valve 世界排名总榜(平时每天自动抓一次)", False, tag="仅调试群")
@@ -2851,3 +2858,338 @@ def build_help_html(admin: bool, when_text: str) -> str:
 
 async def render_help_card(admin: bool, when_text: str) -> bytes:
     return await _render_png(build_help_html(admin, when_text))
+
+
+# ———————————————————— 战队交手历史 (H2H) ————————————————————
+def build_h2h_html(summary: H2HSummary, when_text: str) -> str:
+    badge1 = _badge(summary.team1_logo, summary.team1, 72, DARK, CARD)
+    badge2 = _badge(summary.team2_logo, summary.team2, 72, DARK, CARD)
+
+    total = summary.total_matches
+    w1, w2 = summary.team1_wins, summary.team2_wins
+    pct1 = round(w1 / max(total, 1) * 100) if total else 50
+    pct2 = 100 - pct1 if total else 50
+
+    tstars1 = _stars(majors.team_titles(summary.team1), 14, "right")
+    tstars2 = _stars(majors.team_titles(summary.team2), 14, "left")
+
+    cs2_t1, cs2_t2 = summary.cs2_team1_wins, summary.cs2_team2_wins
+    cs2_total = summary.cs2_matches
+    csgo_total = max(0, total - cs2_total)
+    csgo_t1 = max(0, w1 - cs2_t1)
+    csgo_t2 = max(0, w2 - cs2_t2)
+
+    match_rows = ""
+    for idx, m in enumerate(summary.matches[:8]):
+        bb = "" if idx == min(len(summary.matches), 8) - 1 else f"border-bottom:1px solid {BORDER_R};"
+        tag_bg = ACCENT_BG if m.is_cs2 else PANEL
+        tag_col = ACCENT_D if m.is_cs2 else MUTE
+        tag_text = "CS2" if m.is_cs2 else "CS:GO"
+
+        s1_style = f"font-weight:700;color:{ACCENT_D};" if m.winner == "team1" else f"color:{INK};"
+        s2_style = f"font-weight:700;color:{ACCENT_D};" if m.winner == "team2" else f"color:{INK};"
+
+        match_rows += (
+            f'<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 6px;{bb}">'
+            f' <div style="display:flex;align-items:center;gap:10px;min-width:0;flex:1;">'
+            f'  <span style="font-size:12px;font-weight:700;background:{tag_bg};color:{tag_col};padding:2px 7px;border-radius:4px;">{tag_text}</span>'
+            f'  <span style="font-size:13px;color:{FAINT};white-space:nowrap;">{_esc(m.date_text)}</span>'
+            f'  <span style="font-size:15px;font-weight:600;color:{INK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(m.event_name)}</span>'
+            f' </div>'
+            f' <div style="font-size:16px;font-variant-numeric:tabular-nums;white-space:nowrap;padding-left:16px;">'
+            f'  <span style="{s1_style}">{m.score1}</span> <span style="color:{MUTE};">:</span> <span style="{s2_style}">{m.score2}</span>'
+            f' </div>'
+            f'</div>'
+        )
+
+    if not match_rows:
+        match_rows = f'<div style="padding:20px;text-align:center;color:{FAINT};font-size:15px;">暂无两队历史正赛记录</div>'
+
+    body = f"""
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:18px;">
+   <div>
+    <div style="font-size:27px;letter-spacing:-0.4px;color:{INK};"><span style="font-weight:700;">战队交手历史</span> <span style="font-weight:500;color:{SUB};">· HEAD TO HEAD</span></div>
+    <div style="font-size:15px;color:{FAINT};margin-top:6px;">数据来源 HLTV · {_esc(when_text)}</div>
+   </div>
+   <div style="background:{ACCENT_BG};color:{ACCENT_D};font-size:15px;font-weight:700;padding:8px 16px;border-radius:999px;">宿敌对决</div>
+  </div>
+
+  <div style="margin-top:24px;background:{PANEL};border:1px solid {BORDER};border-radius:18px;padding:26px 24px;">
+   <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+    <!-- 左队 -->
+    <div style="flex:1;display:flex;align-items:center;gap:16px;min-width:0;">
+     {badge1}
+     <div style="min-width:0;">
+      <div style="font-size:24px;font-weight:700;color:{INK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:6px;">{_esc(summary.team1)}{tstars1}</div>
+      <div style="font-size:14px;color:{MUTE};margin-top:4px;">胜率 <span style="color:{ACCENT_D};font-weight:600;">{pct1}%</span></div>
+     </div>
+    </div>
+
+    <!-- 比分 -->
+    <div style="text-align:center;flex:none;padding:0 12px;">
+     <div style="font-size:40px;font-weight:800;letter-spacing:1px;color:{INK};font-variant-numeric:tabular-nums;">
+      <span style="color:{ACCENT_D if w1 >= w2 else INK};">{w1}</span> <span style="color:{MUTE};font-size:28px;">:</span> <span style="color:{ACCENT_D if w2 >= w1 else INK};">{w2}</span>
+     </div>
+     <div style="font-size:13px;color:{FAINT};margin-top:2px;">总计 {total} 场</div>
+    </div>
+
+    <!-- 右队 -->
+    <div style="flex:1;display:flex;align-items:center;justify-content:flex-end;gap:16px;min-width:0;text-align:right;">
+     <div style="min-width:0;">
+      <div style="font-size:24px;font-weight:700;color:{INK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;justify-content:flex-end;gap:6px;">{tstars2}{_esc(summary.team2)}</div>
+      <div style="font-size:14px;color:{MUTE};margin-top:4px;">胜率 <span style="color:{ACCENT_D};font-weight:600;">{pct2}%</span></div>
+     </div>
+     {badge2}
+    </div>
+   </div>
+
+   <!-- 胜负进度条 -->
+   <div style="margin-top:20px;height:10px;background:rgba(31,28,23,0.08);border-radius:999px;overflow:hidden;display:flex;">
+    <div style="width:{pct1}%;background:{ACCENT};height:100%;"></div>
+    <div style="width:{pct2}%;background:#4A6984;height:100%;"></div>
+   </div>
+
+   <!-- 时代战绩切片 -->
+   <div style="margin-top:18px;display:flex;gap:12px;font-size:13.5px;">
+    <div style="flex:1;background:rgba(255,255,255,0.7);padding:10px 14px;border-radius:10px;border:1px solid {BORDER_S};">
+     <span style="font-weight:700;color:{ACCENT_D};">CS2 时代:</span> <span style="color:{INK};font-weight:600;">{cs2_t1}</span> 胜 <span style="color:{INK};font-weight:600;">{cs2_t2}</span> 负 (共 {cs2_total} 场)
+    </div>
+    <div style="flex:1;background:rgba(255,255,255,0.7);padding:10px 14px;border-radius:10px;border:1px solid {BORDER_S};">
+     <span style="font-weight:700;color:{MUTE};">CS:GO 时代:</span> <span style="color:{INK};font-weight:600;">{csgo_t1}</span> 胜 <span style="color:{INK};font-weight:600;">{csgo_t2}</span> 负 (共 {csgo_total} 场)
+    </div>
+   </div>
+  </div>
+
+  <div style="margin-top:26px;">
+   <div style="font-size:18px;font-weight:700;color:{INK};letter-spacing:-0.2px;margin-bottom:12px;">近期交锋记录 (最近 8 场)</div>
+   <div style="background:{PANEL};border:1px solid {BORDER};border-radius:14px;padding:8px 16px;">
+    {match_rows}
+   </div>
+  </div>
+
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-top:28px;padding-top:18px;border-top:1px solid {BORDER};">
+   <div style="font-size:14px;color:{FAINT};">{_esc(when_text)}</div>
+   <div style="font-size:14px;color:{MUTE};">HLTV · <span style="color:{ACCENT};font-weight:600;">hltv.org</span></div>
+  </div>"""
+    return _shell(body, "44px 48px 38px")
+
+
+async def render_h2h_card(summary: H2HSummary, when_text: str) -> bytes:
+    return await _render_png(build_h2h_html(summary, when_text))
+
+
+# ———————————————————— 赛前 BP (Pick & Ban) 选图 ————————————————————
+def build_bp_html(match: MatchDetail, when_text: str) -> str:
+    badge1 = _badge(match.team1_logo, match.team1, 56, DARK, CARD)
+    badge2 = _badge(match.team2_logo, match.team2, 56, DARK, CARD)
+    event_badge = _badge(match.event_logo, match.event_name, 56, DARK, CARD)
+
+    stage_part = f"{match.stage} · " if match.stage else ""
+    meta_info = f"{stage_part}BO{match.best_of} · {'LAN' if match.is_lan else '线上'}"
+
+    step_rows = ""
+    picked_maps: list[tuple[str, str, str]] = []
+    for st in match.veto_steps:
+        if st.action == "ban":
+            tag_html = f'<span style="background:{BAD_BG};color:{BAD};font-weight:700;padding:4px 10px;border-radius:6px;font-size:12.5px;letter-spacing:0.3px;">BAN 禁用</span>'
+            row_bg = "transparent"
+        elif st.action == "pick":
+            tag_html = f'<span style="background:{ACCENT_BG};color:{ACCENT_D};font-weight:700;padding:4px 10px;border-radius:6px;font-size:12.5px;letter-spacing:0.3px;">PICK 选图</span>'
+            row_bg = "rgba(196,112,78,0.06)"
+            picked_maps.append((st.map_name, st.map_cn, f"{st.team} 选图"))
+        else:
+            tag_html = f'<span style="background:{GOOD_BG};color:{GOOD};font-weight:700;padding:4px 10px;border-radius:6px;font-size:12.5px;letter-spacing:0.3px;">DECIDER 决胜</span>'
+            row_bg = "rgba(94,112,82,0.06)"
+            picked_maps.append((st.map_name, st.map_cn, "决胜图"))
+
+        step_rows += (
+            f'<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;'
+            f'background:{row_bg};border-radius:10px;margin-bottom:6px;border:1px solid {BORDER_S};">'
+            f' <div style="display:flex;align-items:center;gap:14px;">'
+            f'  <div style="width:26px;height:26px;border-radius:999px;background:{PANEL};border:1px solid {BORDER};'
+            f'       font-size:13px;font-weight:700;color:{MUTE};display:flex;align-items:center;justify-content:center;">{st.step}</div>'
+            f'  <div style="font-size:16px;font-weight:700;color:{INK};">{_esc(st.team)}</div>'
+            f' </div>'
+            f' <div style="display:flex;align-items:center;gap:16px;">'
+            f'  {tag_html}'
+            f'  <div style="min-width:130px;text-align:right;">'
+            f'   <span style="font-size:16px;font-weight:700;color:{INK};">{_esc(st.map_name)}</span>'
+            f'   <span style="font-size:13.5px;color:{MUTE};margin-left:4px;">({_esc(st.map_cn)})</span>'
+            f'  </div>'
+            f' </div>'
+            f'</div>'
+        )
+
+    if not step_rows:
+        step_rows = f'<div style="padding:20px;text-align:center;color:{FAINT};font-size:15px;">该场比赛尚未公布 BP 禁选数据</div>'
+
+    order_chips = ""
+    for idx, (m_en, m_cn, who) in enumerate(picked_maps):
+        order_chips += (
+            f'<div style="flex:1;background:white;padding:14px 16px;border-radius:12px;border:1px solid {BORDER};'
+            f'box-shadow:0 1px 3px rgba(0,0,0,0.03);">'
+            f' <div style="font-size:12px;font-weight:700;color:{ACCENT_D};letter-spacing:0.3px;">图 {idx + 1} · {_esc(who)}</div>'
+            f' <div style="font-size:18px;font-weight:700;color:{INK};margin-top:4px;">{_esc(m_en)}</div>'
+            f' <div style="font-size:13px;color:{MUTE};">{_esc(m_cn)}</div>'
+            f'</div>'
+        )
+    order_section = (
+        f'<div style="margin-top:24px;">'
+        f' <div style="font-size:17px;font-weight:700;color:{INK};letter-spacing:-0.2px;margin-bottom:12px;">比赛地图顺序</div>'
+        f' <div style="display:flex;gap:12px;">{order_chips}</div>'
+        f'</div>'
+        if order_chips
+        else ""
+    )
+
+    body = f"""
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:18px;">
+   <div style="display:flex;align-items:center;gap:16px;min-width:0;">
+    {event_badge}
+    <div style="min-width:0;">
+     <div style="font-size:26px;font-weight:700;color:{INK};letter-spacing:-0.3px;line-height:1.1;">{_esc(match.event_name) or "CS2 比赛"}</div>
+     <div style="font-size:15px;color:{SUB};font-weight:500;margin-top:4px;">{meta_info}</div>
+    </div>
+   </div>
+   <div style="background:{ACCENT_BG};color:{ACCENT_D};font-size:14px;font-weight:700;padding:8px 16px;border-radius:999px;">地图 BP</div>
+  </div>
+
+  <div style="margin-top:22px;background:{PANEL};border:1px solid {BORDER};border-radius:16px;padding:20px 24px;display:flex;align-items:center;justify-content:space-between;">
+   <div style="display:flex;align-items:center;gap:14px;flex:1;min-width:0;">
+    {badge1}
+    <div style="font-size:22px;font-weight:700;color:{INK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(match.team1)}</div>
+   </div>
+   <div style="font-size:24px;font-weight:800;color:{ACCENT};padding:0 20px;">VS</div>
+   <div style="display:flex;align-items:center;justify-content:flex-end;gap:14px;flex:1;min-width:0;text-align:right;">
+    <div style="font-size:22px;font-weight:700;color:{INK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(match.team2)}</div>
+    {badge2}
+   </div>
+  </div>
+
+  <div style="margin-top:26px;">
+   <div style="font-size:17px;font-weight:700;color:{INK};letter-spacing:-0.2px;margin-bottom:12px;">BP 禁选流程 (Map Veto)</div>
+   {step_rows}
+  </div>
+
+  {order_section}
+
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-top:28px;padding-top:18px;border-top:1px solid {BORDER};">
+   <div style="font-size:14px;color:{FAINT};">{_esc(when_text)}</div>
+   <div style="font-size:14px;color:{MUTE};">HLTV · <span style="color:{ACCENT};font-weight:600;">hltv.org</span></div>
+  </div>"""
+    return _shell(body, "42px 46px 36px")
+
+
+async def render_bp_card(match: MatchDetail, when_text: str) -> bytes:
+    return await _render_png(build_bp_html(match, when_text))
+
+
+# ———————————————————— 每日晨报 (Daily Morning Report) ————————————————————
+def build_morning_report_html(
+    date_str: str,
+    yesterday_matches: list[ScheduledMatch],
+    today_matches: list[ScheduledMatch],
+    when_text: str,
+) -> str:
+    recap_rows = ""
+    for idx, m in enumerate(yesterday_matches[:6]):
+        bb = "" if idx == min(len(yesterday_matches), 6) - 1 else f"border-bottom:1px solid {BORDER_R};"
+        w1 = m.winner == "team1"
+        w2 = m.winner == "team2"
+        s1_col = ACCENT_D if w1 else INK
+        s2_col = ACCENT_D if w2 else INK
+        b1 = _badge(m.team1_logo, m.team1, 32, DARK, CARD)
+        b2 = _badge(m.team2_logo, m.team2, 32, DARK, CARD)
+
+        recap_rows += (
+            f'<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 6px;{bb}">'
+            f' <div style="min-width:0;flex:1;">'
+            f'  <div style="font-size:13px;color:{FAINT};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(m.event_name)}</div>'
+            f'  <div style="display:flex;align-items:center;gap:8px;margin-top:3px;">'
+            f'   {b1}<span style="font-size:15px;font-weight:{700 if w1 else 500};color:{s1_col};">{_esc(m.team1)}</span>'
+            f'   <span style="font-size:13px;color:{MUTE};">vs</span>'
+            f'   {b2}<span style="font-size:15px;font-weight:{700 if w2 else 500};color:{s2_col};">{_esc(m.team2)}</span>'
+            f'  </div>'
+            f' </div>'
+            f' <div style="font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap;padding-left:16px;">'
+            f'  <span style="color:{s1_col};">{m.score1 if m.score1 is not None else "-"}</span>'
+            f'  <span style="color:{MUTE};">:</span>'
+            f'  <span style="color:{s2_col};">{m.score2 if m.score2 is not None else "-"}</span>'
+            f' </div>'
+            f'</div>'
+        )
+    if not recap_rows:
+        recap_rows = f'<div style="padding:16px;text-align:center;color:{FAINT};font-size:14px;">昨夜今晨暂无完赛的顶级赛事</div>'
+
+    schedule_rows = ""
+    for idx, m in enumerate(today_matches[:6]):
+        bb = "" if idx == min(len(today_matches), 6) - 1 else f"border-bottom:1px solid {BORDER_R};"
+        dt = datetime.fromtimestamp(m.start_unix / 1000, CN_TZ) if m.start_unix else None
+        time_text = f"{dt.hour:02d}:{dt.minute:02d}" if dt else "待定"
+        b1 = _badge(m.team1_logo, m.team1, 32, DARK, CARD)
+        b2 = _badge(m.team2_logo, m.team2, 32, DARK, CARD)
+        bo_text = m.best_of.upper() if m.best_of else "BO3"
+
+        schedule_rows += (
+            f'<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 6px;{bb}">'
+            f' <div style="display:flex;align-items:center;gap:12px;min-width:0;flex:1;">'
+            f'  <div style="font-size:14px;font-weight:700;color:{ACCENT_D};background:{ACCENT_BG};padding:3px 8px;border-radius:6px;white-space:nowrap;">{time_text}</div>'
+            f'  <div style="min-width:0;">'
+            f'   <div style="font-size:12.5px;color:{FAINT};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(m.event_name)}</div>'
+            f'   <div style="display:flex;align-items:center;gap:8px;margin-top:2px;">'
+            f'    {b1}<span style="font-size:15px;font-weight:600;color:{INK};">{_esc(m.team1)}</span>'
+            f'    <span style="font-size:13px;color:{MUTE};">vs</span>'
+            f'    {b2}<span style="font-size:15px;font-weight:600;color:{INK};">{_esc(m.team2)}</span>'
+            f'   </div>'
+            f'  </div>'
+            f' </div>'
+            f' <div style="font-size:13px;font-weight:600;color:{MUTE};background:rgba(31,28,23,0.06);padding:3px 8px;border-radius:6px;white-space:nowrap;">'
+            f'  {bo_text}'
+            f' </div>'
+            f'</div>'
+        )
+    if not schedule_rows:
+        schedule_rows = f'<div style="padding:16px;text-align:center;color:{FAINT};font-size:14px;">今日暂无已排期的焦点赛事</div>'
+
+    body = f"""
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:18px;">
+   <div>
+    <div style="font-size:28px;letter-spacing:-0.4px;color:{INK};"><span style="font-weight:700;">CS2 每日晨报</span> <span style="font-weight:500;color:{SUB};">· Daily Digest</span></div>
+    <div style="font-size:15px;color:{FAINT};margin-top:6px;">{_esc(date_str)} · 今日电竞赛况速递</div>
+   </div>
+   <div style="background:{ACCENT_BG};color:{ACCENT_D};font-size:14px;font-weight:700;padding:8px 16px;border-radius:999px;">08:30 晨报</div>
+  </div>
+
+  <div style="margin-top:24px;">
+   <div style="font-size:17px;font-weight:700;color:{INK};letter-spacing:-0.2px;margin-bottom:10px;display:flex;align-items:center;gap:6px;">
+    <span>昨夜今晨战报</span> <span style="font-size:13px;color:{MUTE};font-weight:500;">(Overnight Results)</span>
+   </div>
+   <div style="background:{PANEL};border:1px solid {BORDER};border-radius:14px;padding:6px 16px;">
+    {recap_rows}
+   </div>
+  </div>
+
+  <div style="margin-top:24px;">
+   <div style="font-size:17px;font-weight:700;color:{INK};letter-spacing:-0.2px;margin-bottom:10px;display:flex;align-items:center;gap:6px;">
+    <span>今日焦点赛程</span> <span style="font-size:13px;color:{MUTE};font-weight:500;">(Today's Matches)</span>
+   </div>
+   <div style="background:{PANEL};border:1px solid {BORDER};border-radius:14px;padding:6px 16px;">
+    {schedule_rows}
+   </div>
+  </div>
+
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-top:28px;padding-top:18px;border-top:1px solid {BORDER};">
+   <div style="font-size:14px;color:{FAINT};">{_esc(when_text)}</div>
+   <div style="font-size:14px;color:{MUTE};">HLTV · <span style="color:{ACCENT};font-weight:600;">hltv.org</span> · 祝您今日愉快</div>
+  </div>"""
+    return _shell(body, "42px 46px 36px")
+
+
+async def render_morning_report_card(
+    date_str: str,
+    yesterday_matches: list[ScheduledMatch],
+    today_matches: list[ScheduledMatch],
+    when_text: str,
+) -> bytes:
+    return await _render_png(build_morning_report_html(date_str, yesterday_matches, today_matches, when_text))
+

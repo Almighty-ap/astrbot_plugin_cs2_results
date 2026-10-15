@@ -940,9 +940,10 @@ def resolve_recipients(
 ) -> dict[int, set[int]]:
     """本场的 {收件群 → 要 @ 的 QQ 集}。
 
-    - 顶级赛事:所有火喇叭群都收(与旧行为一致),命中个人订阅的群附带 @;
-    - 非顶级:只有命中个人订阅的群才收(并 @)。
-    无任何订阅时,顶级赛事退化为「所有火喇叭群、空 @」——即旧的纯播报行为。
+    - 顶级赛事: 所有未静音的火喇叭群都收(全量/精简模式), 命中个人订阅附带 @;
+    - 主队模式群: 仅在命中本群成员订阅了相关战队/选手时才推送;
+    - 静音时段: 若群处于免打扰静音期, 不实时下发推送(由晨报聚合);
+    - 非顶级: 只有命中个人订阅的群才收(并 @)。
     """
     firehose = target_groups()
     if not firehose:
@@ -951,7 +952,15 @@ def resolve_recipients(
     top = _top_tier(event_id)
     out: dict[int, set[int]] = {}
     for g in firehose:
-        if top:
+        if store.is_group_muted_now(g):
+            continue
+        conf = store.get_group_subscription(g)
+        mode = conf.get("mode", "full") if conf else "full"
+
+        if mode == "home":
+            if g in subs:
+                out[g] = subs[g]
+        elif top:
             out[g] = subs.get(g, set())
         elif g in subs:
             out[g] = subs[g]
@@ -963,9 +972,25 @@ async def _push_map(
 ) -> bool:
     if not recipients:
         return True
+
+    # 精简模式 (concise) 过滤: 仅在系列赛终局（match.series_over 且当前图是已完结的图）时推送
+    is_series_final = match.series_over and (
+        i == len(match.maps) - 1 or all(mp.finished for mp in match.maps[: i + 1])
+    )
+    target_recipients: dict[int, set[int]] = {}
+    for g, mentions in recipients.items():
+        conf = store.get_group_subscription(g)
+        mode = conf.get("mode", "full") if conf else "full"
+        if mode == "concise" and not is_series_final:
+            continue
+        target_recipients[g] = mentions
+
+    if not target_recipients:
+        return True
+
     map_key = match.maps[i].key()
     store.prepare_deliveries(
-        match.match_id, map_key, list(recipients.keys()), mentions=recipients
+        match.match_id, map_key, list(target_recipients.keys()), mentions=target_recipients
     )
     if store.get_delivery_payload(match.match_id, map_key):
         return True
@@ -1176,6 +1201,83 @@ async def _job_featured() -> None:
 async def _job_vrs() -> None:
     if target_groups():
         await refresh_vrs_ranking()
+
+
+async def _render_morning_report_card_data() -> bytes | None:
+    """拉取数据并渲染晨报卡片，返回 PNG 字节或 None。"""
+    now_dt = datetime.now(CN)
+    results_html = await fetcher.get_html(
+        hltv.URL_RESULTS,
+        wait_selector=".results-all",
+        max_age=300,
+        priority="warm",
+    )
+    matches_html = await fetcher.get_html(
+        hltv.URL_MATCHES,
+        wait_selector=".upcomingMatchesSection",
+        max_age=300,
+        priority="warm",
+    )
+    if not results_html or not matches_html:
+        logger.warning("[cs2] 晨报数据拉取失败 (results/matches 为空)")
+        return None
+
+    all_results = hltv.parse_results(results_html)
+    all_upcoming = hltv.parse_upcoming_matches(matches_html)
+
+    now_ts = now_dt.timestamp() * 1000
+    cutoff_ts = now_ts - 20 * 3600 * 1000
+    yesterday_finished = [
+        m for m in all_results
+        if m.start_unix >= cutoff_ts and _top_tier(m.event_id)
+    ]
+    yesterday_finished.sort(key=lambda m: m.start_unix)
+
+    end_of_today_ts = now_dt.replace(hour=23, minute=59, second=59).timestamp() * 1000
+    today_matches = [
+        m for m in all_upcoming
+        if m.start_unix <= end_of_today_ts and _top_tier(m.event_id)
+    ]
+
+    date_display = f"{now_dt.year}年{now_dt.month}月{now_dt.day}日 {_WEEKDAYS_CN[now_dt.weekday()]}"
+    when_text = f"{now_dt.hour:02d}:{now_dt.minute:02d} 北京时间"
+
+    try:
+        return await card.render_morning_report_card(
+            date_display,
+            yesterday_finished,
+            today_matches,
+            when_text,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"[cs2] 晨报渲染失败: {e}")
+        return None
+
+
+async def _job_morning_report(force: bool = False) -> None:
+    """每日早晨晨报任务。"""
+    if not cfg.cs2_morning_report_enabled and not force:
+        return
+    report_groups = store.get_morning_report_groups()
+    active_groups = [g for g in report_groups if g in target_groups()]
+    if not active_groups and not force:
+        return
+
+    now_dt = datetime.now(CN)
+    today_str = f"{now_dt.year}-{now_dt.month:02d}-{now_dt.day:02d}"
+    if not force and store.has_morning_report_pushed(today_str):
+        return
+
+    png = await _render_morning_report_card_data()
+    if not png:
+        return
+
+    match_id = f"morning_{today_str}"
+    map_key = "daily"
+    store.prepare_deliveries(match_id, map_key, active_groups)
+    store.set_delivery_payload(match_id, map_key, png)
+    store.record_morning_report_pushed(today_str, len(active_groups))
+    logger.info(f"[cs2] 每日晨报已推入投递队列: {today_str} → {len(active_groups)} 个群")
 
 
 def _matches_scan_interval_seconds() -> float:
@@ -1426,6 +1528,22 @@ async def startup() -> None:
                 _job_vrs, hour=cfg.cs2_vrs_refresh_hour, minute=30, name="vrs-refresh"
             ),
             name="vrs-loop",
+        )
+    if cfg.cs2_morning_report_enabled:
+        hour, minute = 8, 30
+        try:
+            parts = cfg.cs2_morning_report_time.split(":")
+            hour, minute = int(parts[0]), int(parts[1])
+        except Exception:  # noqa: BLE001
+            pass
+        _spawn_background(
+            _run_daily(
+                _job_morning_report,
+                hour=hour,
+                minute=minute,
+                name="morning-report",
+            ),
+            name="morning-report-loop",
         )
     logger.info(f"[cs2] 插件已加载,目标群 {sorted(target_groups())}")
 
@@ -1851,6 +1969,236 @@ async def _handle_team_detail(name: str) -> None:
     await cs2.finish(png)
 
 
+async def _handle_h2h(t1_query: str, t2_query: str) -> None:
+    if not t1_query or not t2_query:
+        await cs2.finish("用法:/cs2 交手 <战队A> <战队B>，例如 /cs2 交手 Vitality Spirit")
+
+    teams = store.all_index_teams()
+    res1 = names.resolve_team_local(t1_query, teams)
+    if res1.status not in ("ok", "ambiguous"):
+        res1 = await names.resolve_team(fetcher, t1_query, teams)
+    if res1.status == "error":
+        await cs2.finish(f"查询战队「{t1_query}」失败，请稍后再试")
+    if res1.status == "none" or res1.team is None:
+        await cs2.finish(f"未找到战队「{t1_query}」")
+    team1 = res1.team
+
+    res2 = names.resolve_team_local(t2_query, teams)
+    if res2.status not in ("ok", "ambiguous"):
+        res2 = await names.resolve_team(fetcher, t2_query, teams)
+    if res2.status == "error":
+        await cs2.finish(f"查询战队「{t2_query}」失败，请稍后再试")
+    if res2.status == "none" or res2.team is None:
+        await cs2.finish(f"未找到战队「{t2_query}」")
+    team2 = res2.team
+
+    if team1.id == team2.id:
+        await cs2.finish("两支战队不能相同哦")
+
+    await cs2.send(f"正在查询 {team1.name} vs {team2.name} 的交手历史…")
+    url = f"{hltv.URL_RESULTS}?team={team1.id}&team={team2.id}"
+    try:
+        html = await fetcher.get_html(
+            url,
+            wait_selector=".results-all",
+            max_age=3600,
+            priority="user",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[cs2] H2H 历史抓取失败: %s", exc)
+        await cs2.finish("H2H 历史抓取失败，请稍后再试")
+
+    if not html:
+        await cs2.finish("未能获取到交手历史页面(可能被 Cloudflare 拦截)，请稍后再试")
+
+    summary = hltv.parse_h2h_results(
+        html, team1.name, team2.name, team1_id=team1.id, team2_id=team2.id
+    )
+
+    when = f"{_now()} 北京时间"
+    try:
+        png = await card.render_h2h_card(summary, when)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[cs2] H2H 卡片渲染失败: %s", exc)
+        await cs2.finish("H2H 卡片渲染失败，请稍后再试")
+    await cs2.finish(png)
+
+
+async def _handle_bp(arg: str | None) -> None:
+    mid = None
+    target_team = None
+    if arg:
+        arg_clean = arg.strip()
+        if arg_clean.isdigit():
+            mid = arg_clean
+        else:
+            teams = store.all_index_teams()
+            res = names.resolve_team_local(arg_clean, teams)
+            if res.status not in ("ok", "ambiguous"):
+                res = await names.resolve_team(fetcher, arg_clean, teams)
+            if res.status == "ok" and res.team:
+                target_team = res.team.name
+            else:
+                target_team = arg_clean
+
+    match_url = None
+    if mid:
+        match_url = f"{hltv.BASE}/matches/{mid}/x"
+    else:
+        matches_html = await fetcher.get_html(
+            hltv.URL_MATCHES,
+            wait_selector=".upcomingMatchesSection",
+            max_age=120,
+            priority="user",
+        )
+        if not matches_html:
+            await cs2.finish("未能获取到最近赛程列表，请稍后再试")
+        live_list = hltv.parse_live_matches(matches_html)
+        up_list = hltv.parse_upcoming_matches(matches_html)
+
+        all_cands = []
+        for lm in live_list:
+            all_cands.append((lm.match_id, lm.team1, lm.team2, lm.url))
+        for um in up_list:
+            all_cands.append((um.match_id, um.team1, um.team2, um.url))
+
+        if target_team:
+            t_norm = target_team.casefold()
+            for _m_id, t1, t2, u in all_cands:
+                if t_norm in t1.casefold() or t_norm in t2.casefold() or t1.casefold() in t_norm or t2.casefold() in t_norm:
+                    match_url = u
+                    break
+            if not match_url:
+                await cs2.finish(f"近期赛程中未找到与「{target_team}」相关的对决")
+        else:
+            for _m_id, t1, t2, u in all_cands:
+                if t1 and t2 and t1 != "TBD" and t2 != "TBD":
+                    match_url = u
+                    break
+            if not match_url:
+                await cs2.finish("近期暂无正在进行或即将开赛的焦点对决")
+
+    await cs2.send("正在获取地图 BP 选图数据…")
+    try:
+        match_html = await fetcher.get_html(
+            match_url,
+            wait_selector=".veto-box",
+            max_age=180,
+            priority="user",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[cs2] BP 比赛页抓取失败: %s", exc)
+        await cs2.finish("比赛页抓取失败，请稍后再试")
+
+    if not match_html:
+        await cs2.finish("无法获取比赛页面(可能被 Cloudflare 拦截)，请稍后再试")
+
+    match_detail = hltv.parse_match(match_html, match_url)
+    if not match_detail.veto_steps:
+        await cs2.finish(
+            f"{match_detail.team1} vs {match_detail.team2} 尚未公布 BP 选图数据（通常在赛前 15~30 分钟由赛事方提交）"
+        )
+
+    when = f"{_now()} 北京时间"
+    try:
+        png = await card.render_bp_card(match_detail, when)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[cs2] BP 卡片渲染失败: %s", exc)
+        await cs2.finish("BP 卡片渲染失败，请稍后再试")
+    await cs2.finish(png)
+
+
+async def _handle_group_mode(event: MessageEvent, mode_raw: str) -> None:
+    if not event.is_group:
+        await cs2.finish("请在群聊中使用该命令")
+    if not _can_manage_sub(event):
+        await cs2.finish("只有群主或群管理员能修改群订阅模式哦")
+
+    m = mode_raw.strip().lower()
+    if m in ("全量", "full", "全部"):
+        store.set_group_subscription_mode(event.group_id, "full")
+        await cs2.finish("本群订阅模式已设为【全量模式】（推送顶级赛事逐图战报、完赛大卡及开赛提醒）✅")
+    elif m in ("精简", "concise", "完赛"):
+        store.set_group_subscription_mode(event.group_id, "concise")
+        await cs2.finish("本群订阅模式已设为【精简模式】（仅在系列赛终局完赛时推送，不发单图小分卡）✅")
+    elif m in ("主队", "home", "聚焦"):
+        store.set_group_subscription_mode(event.group_id, "home")
+        await cs2.finish("本群订阅模式已设为【主队模式】（仅推送本群成员订阅了的主队/选手的比赛）✅")
+    else:
+        await cs2.finish("用法:/cs2 模式 [全量|精简|主队]\n• 全量: 每图战报+完赛卡\n• 精简: 仅整场系列赛完赛卡\n• 主队: 仅推本群成员订阅的比赛")
+
+
+async def _handle_group_mute(event: MessageEvent, mute_raw: str) -> None:
+    if not event.is_group:
+        await cs2.finish("请在群聊中使用该命令")
+    if not _can_manage_sub(event):
+        await cs2.finish("只有群主或群管理员能设置免打扰静音哦")
+
+    raw = mute_raw.strip()
+    if raw in ("开启", "开", "on", "enable"):
+        store.set_group_mute(event.group_id, True)
+        await cs2.finish("已开启夜间免打扰静音（默认 23:00 ~ 08:00），期间不再实时打扰群聊，次日早晨由晨报聚合 🌙")
+    elif raw in ("关闭", "关", "off", "disable"):
+        store.set_group_mute(event.group_id, False)
+        await cs2.finish("已关闭免打扰静音，全时段实时接收战报推送 🔔")
+    elif "-" in raw or "~" in raw:
+        sep = "-" if "-" in raw else "~"
+        parts = [p.strip() for p in raw.split(sep, 1)]
+        if len(parts) == 2 and re.match(r"^\d{1,2}:\d{2}$", parts[0]) and re.match(r"^\d{1,2}:\d{2}$", parts[1]):
+            s_h, s_m = parts[0].split(":")
+            e_h, e_m = parts[1].split(":")
+            start = f"{int(s_h):02d}:{int(s_m):02d}"
+            end = f"{int(e_h):02d}:{int(e_m):02d}"
+            store.set_group_mute(event.group_id, True, start, end)
+            await cs2.finish(f"已设置免打扰静音时段为 {start} ~ {end}，静音期间不再实时推送 🌙")
+        else:
+            await cs2.finish("时间格式错误，示例:/cs2 静音 23:00-08:00 或 /cs2 静音 开启")
+    else:
+        await cs2.finish("用法:/cs2 静音 [开启|关闭|23:00-08:00]")
+
+
+async def _handle_group_morning_report(event: MessageEvent, rep_raw: str) -> None:
+    if not event.is_group:
+        await cs2.finish("请在群聊中使用该命令")
+    if not _can_manage_sub(event):
+        await cs2.finish("只有群主或群管理员能设置每日晨报哦")
+
+    raw = rep_raw.strip().lower()
+    if raw in ("开启", "开", "on", "enable"):
+        store.set_group_morning_report(event.group_id, True)
+        await cs2.finish("本群已开启每日晨报（每天北京时间 08:30 汇总昨夜战报与今日焦点赛程）☀️")
+    elif raw in ("关闭", "关", "off", "disable"):
+        store.set_group_morning_report(event.group_id, False)
+        await cs2.finish("本群已关闭每日晨报 🔕")
+    else:
+        await cs2.finish("用法:/cs2 晨报 [开启|关闭]")
+
+
+async def _handle_group_settings(event: MessageEvent) -> None:
+    if not event.is_group:
+        await cs2.finish("请在群聊中使用该命令")
+    sub = store.get_group_subscription(event.group_id)
+    if not sub:
+        await cs2.finish("本群尚未订阅 CS2 战报推送，请群主/管理员发送 /cs2 订阅")
+
+    mode_names = {"full": "全量模式 (逐图+完赛)", "concise": "精简模式 (仅完赛卡)", "home": "主队模式 (仅推送已订阅主队)"}
+    cur_mode = mode_names.get(sub.get("mode", "full"), "全量模式")
+    mute_status = f"开启 ({sub.get('mute_start')} ~ {sub.get('mute_end')})" if sub.get("mute_enabled") else "已关闭"
+    morning_status = "已开启 (08:30)" if sub.get("morning_report") else "已关闭"
+    my_targets = store.list_targets(event.group_id)
+
+    lines = [
+        "⚙️ 本群 CS2 订阅设置概况",
+        f"• 订阅模式: {cur_mode}",
+        f"• 免打扰静音: {mute_status}",
+        f"• 每日晨报: {morning_status}",
+        f"• 本群个人订阅: 共 {len(my_targets)} 条 (战队/选手)",
+        "",
+        "💡 管理提示: 可用 /cs2 模式、/cs2 静音、/cs2 晨报 进行自定义修改。",
+    ]
+    await cs2.finish("\n".join(lines))
+
+
 async def handle_cs2(event: MessageEvent, raw: str) -> None:
     parts = raw.split()
     sub = parts[0] if parts else ""
@@ -1886,6 +2234,18 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
     if sub in ("我的订阅", "我的", "mysubs", "mine"):
         await _handle_my_subs(event)
 
+    if sub in ("模式", "mode", "推送模式"):
+        await _handle_group_mode(event, parts[1] if len(parts) > 1 else "")
+
+    if sub in ("静音", "mute", "免打扰"):
+        await _handle_group_mute(event, parts[1] if len(parts) > 1 else "")
+
+    if sub in ("晨报", "morning", "早报"):
+        await _handle_group_morning_report(event, parts[1] if len(parts) > 1 else "")
+
+    if sub in ("设置", "本群设置", "settings", "配置"):
+        await _handle_group_settings(event)
+
     # —— 查询(公开)——
     if sub in ("赛事", "events"):
         await _handle_events()
@@ -1895,6 +2255,20 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
 
     if sub in ("战况", "match", "赛况", "比分"):
         await _handle_schedule(" ".join(parts[1:]).strip() or None)
+
+    if sub in ("交手", "h2h", "H2H", "对阵历史"):
+        raw_args = " ".join(parts[1:]).strip()
+        t1, t2 = "", ""
+        if re.search(r"\s+vs\s+", raw_args, flags=re.IGNORECASE):
+            sub_parts = re.split(r"\s+vs\s+", raw_args, flags=re.IGNORECASE, maxsplit=1)
+            t1, t2 = sub_parts[0].strip(), sub_parts[1].strip()
+        elif len(parts) >= 3:
+            t1, t2 = parts[1].strip(), " ".join(parts[2:]).strip()
+        await _handle_h2h(t1, t2)
+
+    if sub in ("bp", "BP", "选图", "bp选图"):
+        arg = " ".join(parts[1:]).strip() or None
+        await _handle_bp(arg)
 
     if sub in ("查询", "query", "查"):
         kind = parts[1] if len(parts) > 1 else ""
@@ -1906,8 +2280,19 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
         if kind in ("排名", "rank", "ranking", "排行榜", "榜单"):
             source = name.lower() if name else "vrs"
             await _handle_ranking(source)
+        if kind in ("交手", "h2h", "H2H", "对阵历史"):
+            raw_args = name
+            t1, t2 = "", ""
+            if re.search(r"\s+vs\s+", raw_args, flags=re.IGNORECASE):
+                sub_parts = re.split(r"\s+vs\s+", raw_args, flags=re.IGNORECASE, maxsplit=1)
+                t1, t2 = sub_parts[0].strip(), sub_parts[1].strip()
+            elif len(parts) >= 4:
+                t1, t2 = parts[2].strip(), " ".join(parts[3:]).strip()
+            await _handle_h2h(t1, t2)
+        if kind in ("bp", "BP", "选图", "bp选图"):
+            await _handle_bp(name or None)
         await cs2.finish(
-            "用法:/cs2 查询 选手 <名字> 或 /cs2 查询 战队 <名字> 或 /cs2 排名 [vrs|hltv]"
+            "用法:/cs2 查询 选手 <名字> 或 /cs2 查询 战队 <名字> 或 /cs2 排名 [vrs|hltv] 或 /cs2 交手 <队A> <队B> 或 /cs2 bp [战队/比赛]"
         )
 
     # 兼容旧版直接以实体类型开头的查询写法。
@@ -2048,11 +2433,17 @@ async def _send_help(admin: bool) -> None:
             "/cs2 日程 —— 当前/下个比赛日的关注赛事比赛(含赛果与直播)",
             "/cs2 赛程 [赛事名] —— 正在进行赛事的完整赛程(小组赛/淘汰赛)",
             "/cs2 排名 [vrs|hltv] —— 查看战队世界排名 TOP 20 榜单 (默认 Valve VRS)",
+            "/cs2 交手 <战队A> <战队B> —— 查询两队历史交手战绩 (CS2 + 全时期)",
+            "/cs2 bp [战队/比赛] —— 查询赛前地图选图与禁图 (Pick/Ban)",
             "/cs2 查询 选手 <名字> —— 选手近期 Rating / K/D、角色分与 Major 荣誉",
             "/cs2 查询 战队 <名字> —— 战队阵容、世界 / VRS 排名与近期战绩",
             "/cs2 订阅 / 退订 —— 本群加入/退出推送(群管理员)",
             "/cs2 订阅 战队|选手 <名字> —— 开赛提醒和每张地图赛果都 @ 你",
             "/cs2 我的订阅 —— 查看你在本群订阅的战队/选手",
+            "/cs2 模式 [全量|精简|主队] —— 调整群推送模式(群管理员)",
+            "/cs2 静音 [开启|关闭|时段] —— 设置群免打扰静音时段(群管理员)",
+            "/cs2 晨报 [开启|关闭] —— 开关每日 08:30 晨报(群管理员)",
+            "/cs2 设置 —— 查看本群订阅与免打扰设置概况",
             "/cs2 资讯 —— 查看最新 HLTV 资讯卡片",
             "/cs2 资讯订阅 / 资讯退订 —— 管理 RSS 资讯推送",
             "/cs2 资讯状态 —— 查看资讯订阅和去重状态",
@@ -2060,7 +2451,7 @@ async def _send_help(admin: bool) -> None:
         if admin:
             lines += [
                 "/cs2 状态 —— 运行状态(仅调试群)",
-                "/cs2 测试 [比赛ID或URL] —— 立即渲染一张战报卡(仅调试群)",
+                "/cs2 测试 [比赛ID|晨报] —— 立即渲染一张战报卡或每日晨报(仅调试群)",
                 "/cs2 重试投递 [比赛ID] —— 重新激活死信(仅调试群)",
                 "/cs2 刷新名录 —— 强制刷新战队/选手名录(仅调试群)",
                 "/cs2 刷新VRS —— 强制刷新 Valve 世界排名总榜(仅调试群)",
@@ -2706,6 +3097,13 @@ async def _handle_bracket(arg: str | None) -> None:
 
 
 async def _handle_test(arg: str | None) -> None:
+    if arg and arg.strip() in ("晨报", "morning", "早报"):
+        await cs2.send("正在生成每日晨报测试卡片…")
+        png = await _render_morning_report_card_data()
+        if not png:
+            await cs2.finish("每日晨报渲染失败，请检查 HLTV 网络或日志")
+        await cs2.finish(png)
+
     # 确定要测试的比赛 URL
     url = hltv_match_url(arg) if arg else None
     if arg and not url:
@@ -3025,18 +3423,60 @@ class Cs2ResultsPlugin(Star):
             f"已发送 CS2 战队世界排名卡片（{source.upper()} 榜单）。",
         )
 
+    @filter.llm_tool(name="query_cs2_h2h")
+    async def query_cs2_h2h(
+        self,
+        event: AstrMessageEvent,
+        team1: str = "",
+        team2: str = "",
+    ) -> str:
+        """查询两支 CS2 战队的历史交手战绩 (Head-to-Head / H2H)。
+
+        Args:
+            team1(string): 战队A名称，例如 FaZe、Vitality。
+            team2(string): 战队B名称，例如 Spirit、NaVi。
+        """
+        team1 = team1.strip()
+        team2 = team2.strip()
+        if not team1 or not team2:
+            return "请提供两支对阵战队的名称。"
+        raw = f"交手 {team1} vs {team2}".strip()
+        return await self._run_llm_tool_command(
+            event,
+            raw,
+            f"已发送 {team1} vs {team2} 的历史交手卡片。",
+        )
+
+    @filter.llm_tool(name="query_cs2_bp")
+    async def query_cs2_bp(
+        self,
+        event: AstrMessageEvent,
+        match_or_team: str = "",
+    ) -> str:
+        """查询 CS2 比赛赛前的地图 BP 选图与禁图数据。
+
+        Args:
+            match_or_team(string): 战队名称或比赛 ID，例如 Vitality 或 2395449；可为空。
+        """
+        raw = f"bp {match_or_team}".strip()
+        return await self._run_llm_tool_command(
+            event,
+            raw,
+            f"已发送 CS2 地图 BP 选图卡片{f'：{match_or_team}' if match_or_team else ''}。",
+        )
+
     @filter.on_llm_request()
     async def add_cs2_llm_tool_hint(self, event: AstrMessageEvent, req: Any) -> None:
         if not cfg.cs2_llm_tools_enabled or not cfg.cs2_llm_tool_intent_hint:
             return
         text = (event.message_str or "").casefold()
         if not re.search(
-            r"cs2|hltv|比赛|赛程|战况|赛况|比分|赛果|战队|选手|资讯|排名|排行|rank",
+            r"cs2|hltv|比赛|赛程|战况|赛况|比分|赛果|战队|选手|资讯|排名|排行|rank|交手|h2h|bp|选图|禁图|晨报",
             text,
         ):
             return
         req.system_prompt = (getattr(req, "system_prompt", "") or "") + (
-            "\n用户在询问 CS2/HLTV 赛事、战况、赛程、排名或资讯。"
+            "\n用户在询问 CS2/HLTV 赛事、战况、赛程、排名、交手历史、BP 选图或资讯。"
             "请优先调用 query_cs2_* 工具获取实时数据，不要凭记忆回答。"
         )
 

@@ -68,7 +68,7 @@ def _create_future_database(data_dir: Path) -> None:
         conn.executescript(
             """
             CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            INSERT INTO metadata VALUES ('schema_version', '8');
+            INSERT INTO metadata VALUES ('schema_version', '9');
             """
         )
 
@@ -134,7 +134,7 @@ def test_legacy_subscription_migration_is_idempotent(
 ) -> None:
     store = store_factory([1001, 1002, 1002])
 
-    assert store.schema_version() == 7
+    assert store.schema_version() == 8
     assert store.get_subscriptions() == {1001, 1002}
     assert store.subscription_count() == 2
 
@@ -149,7 +149,7 @@ def test_schema_v1_migrates_to_v2_without_losing_state(
 ) -> None:
     store = store_factory([], _create_v1_database)
 
-    assert store.schema_version() == 7
+    assert store.schema_version() == 8
     assert store.get_subscriptions() == {4242}
     delivery = store.get_delivery("legacy-match", "legacy-map", 4242)
     assert delivery.status == "retry"
@@ -167,7 +167,7 @@ def test_schema_v1_migrates_to_v2_without_losing_state(
 def test_future_schema_is_rejected_without_downgrade(
     store_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
-    with pytest.raises(RuntimeError, match="8"):
+    with pytest.raises(RuntimeError, match="9"):
         store_factory([], _create_future_database)
 
     databases = list(tmp_path.glob("case-*/plugin/data/state.sqlite3"))
@@ -176,7 +176,7 @@ def test_future_schema_is_rejected_without_downgrade(
         version = conn.execute(
             "SELECT value FROM metadata WHERE key = 'schema_version'"
         ).fetchone()[0]
-    assert version == "8"
+    assert version == "9"
 
 
 def test_config_seed_once_does_not_resurrect_unsubscribed_group(
@@ -623,3 +623,39 @@ def test_get_ranking_overview_hltv_and_vrs(
     assert v_teams[0]["logo_url"] == "https://img-cdn.hltv.org/vitality.png"
     assert v_teams[0]["country"] == "France"
     assert "ZywOo" in v_teams[0]["players"]
+
+
+def test_subscription_mode_mute_and_morning_report(
+    store_factory: Callable[..., Any],
+) -> None:
+    store = store_factory([1001])
+
+    sub = store.get_group_subscription(1001)
+    assert sub is not None
+    assert sub["mode"] == "full"
+    assert sub["mute_enabled"] is False
+    assert sub["morning_report"] is True
+    assert sub["mute_start"] == "23:00"
+    assert sub["mute_end"] == "08:00"
+
+    # Mode switching
+    assert store.set_group_subscription_mode(1001, "concise")
+    assert store.get_group_subscription(1001)["mode"] == "concise"
+    assert store.set_group_subscription_mode(1001, "home")
+    assert store.get_group_subscription(1001)["mode"] == "home"
+
+    # Mute setting
+    assert store.set_group_mute(1001, True, "01:00", "07:00")
+    sub = store.get_group_subscription(1001)
+    assert sub["mute_enabled"] is True
+    assert sub["mute_start"] == "01:00"
+    assert sub["mute_end"] == "07:00"
+
+    # Morning report
+    assert store.get_morning_report_groups() == [1001]
+    assert store.set_group_morning_report(1001, False)
+    assert store.get_morning_report_groups() == []
+    assert not store.has_morning_report_pushed("2026-10-16")
+    store.record_morning_report_pushed("2026-10-16", groups_count=1)
+    assert store.has_morning_report_pushed("2026-10-16")
+
