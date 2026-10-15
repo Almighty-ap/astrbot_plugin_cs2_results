@@ -2017,6 +2017,13 @@ async def _handle_h2h(t1_query: str, t2_query: str) -> None:
     summary.team1_players = store.get_team_roster(team1.name, team1.id)
     summary.team2_players = store.get_team_roster(team2.name, team2.id)
 
+    local_logo1 = store.get_team_logo(team1.name, team1.id) or getattr(team1, "logo", None)
+    local_logo2 = store.get_team_logo(team2.name, team2.id) or getattr(team2, "logo", None)
+    if local_logo1:
+        summary.team1_logo = local_logo1
+    if local_logo2:
+        summary.team2_logo = local_logo2
+
     when = f"{_now()} 北京时间"
     try:
         png = await card.render_h2h_card(summary, when)

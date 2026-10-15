@@ -612,6 +612,63 @@ class HltvParserDegradedInputContractTests(unittest.TestCase):
         self.assertEqual(summary_empty.team2_wins, 0)
         self.assertEqual(len(summary_empty.matches), 0)
 
+    def test_parse_h2h_results_strict_matching(self) -> None:
+        """测试当 HLTV results 返回两队各自的比赛并集时，严格仅匹配两队之间真正的交手。
+
+        防止 Falcons 对阵 NIP 时，把 NIP 误当作 TYLOO 并把 NIP 队标赋给 TYLOO。
+        """
+        html = """
+        <div class="result-con" data-zonedgrouping-entry-unix="1791024625000">
+            <a href="/matches/2380001/falcons-vs-ninjas-in-pyjamas-esl-pro-league">
+                <span class="event-name">ESL Pro League Season 24</span>
+                <span class="team">Falcons</span>
+                <span class="team">Ninjas in Pyjamas</span>
+                <span class="result-score">2 - 0</span>
+                <span class="team-won">Falcons</span>
+                <img title="Falcons" src="https://img-cdn.hltv.org/teamlogo/falcons.png">
+                <img title="Ninjas in Pyjamas" src="https://img-cdn.hltv.org/teamlogo/nip.png">
+            </a>
+        </div>
+        <div class="result-con" data-zonedgrouping-entry-unix="1791024620000">
+            <a href="/matches/2380002/falcons-vs-tyloo-esl-pro-league">
+                <span class="event-name">ESL Pro League Season 24</span>
+                <span class="team">Falcons</span>
+                <span class="team">TYLOO</span>
+                <span class="result-score">2 - 0</span>
+                <span class="team-won">Falcons</span>
+                <img title="Falcons" src="https://img-cdn.hltv.org/teamlogo/falcons.png">
+                <img title="TYLOO" src="https://img-cdn.hltv.org/teamlogo/tyloo.png">
+            </a>
+        </div>
+        <div class="result-con" data-zonedgrouping-entry-unix="1791024610000">
+            <a href="/matches/2380003/tyloo-vs-depo-challengers">
+                <span class="event-name">Challengers</span>
+                <span class="team">TYLOO</span>
+                <span class="team">DEPO</span>
+                <span class="result-score">3 - 0</span>
+                <span class="team-won">TYLOO</span>
+                <img title="TYLOO" src="https://img-cdn.hltv.org/teamlogo/tyloo.png">
+                <img title="DEPO" src="https://img-cdn.hltv.org/teamlogo/depo.png">
+            </a>
+        </div>
+        """
+        summary = self.hltv.parse_h2h_results(
+            html, "TYLOO", "Falcons", team1_id="4863", team2_id="11283", now_ms=1791024630000
+        )
+        # 严格只保留 TYLOO vs Falcons 这一场，跳过 Falcons vs NIP 和 TYLOO vs DEPO
+        self.assertEqual(summary.total_matches, 1)
+        self.assertEqual(summary.team1_wins, 0)
+        self.assertEqual(summary.team2_wins, 1)
+        self.assertEqual(len(summary.matches), 1)
+        self.assertEqual(summary.matches[0].score1, 0)
+        self.assertEqual(summary.matches[0].score2, 2)
+        self.assertEqual(summary.matches[0].winner, "team2")
+        # 队标必须是 TYLOO 自己的队标，绝对不能是 NIP
+        self.assertIn("tyloo.png", summary.team1_logo or "")
+        self.assertIn("falcons.png", summary.team2_logo or "")
+        self.assertNotIn("nip.png", summary.team1_logo or "")
+
+
 
 if __name__ == "__main__":
     unittest.main()

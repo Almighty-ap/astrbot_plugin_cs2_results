@@ -681,23 +681,26 @@ def parse_h2h_results(
         row_t1, row_t2 = teams[0], teams[1]
         ev_name = _txt(c.css_first(".event-name"))
 
-        if _matches_team1(row_t1):
+        is_t1_t2 = _matches_team1(row_t1) and _matches_team2(row_t2)
+        is_t2_t1 = _matches_team2(row_t1) and _matches_team1(row_t2)
+
+        if not (is_t1_t2 or is_t2_t1):
+            continue
+
+        if is_t1_t2:
             sc1, sc2 = s1, s2
             winner_side = "team1" if won == row_t1 else ("team2" if won == row_t2 else "team1")
             if not team1_logo:
                 team1_logo = _pick_card_team_logo(c, row_t1, "img")
             if not team2_logo:
                 team2_logo = _pick_card_team_logo(c, row_t2, "img")
-        elif _matches_team2(row_t1):
+        else:  # is_t2_t1
             sc1, sc2 = s2, s1
             winner_side = "team2" if won == row_t1 else ("team1" if won == row_t2 else "team2")
             if not team2_logo:
                 team2_logo = _pick_card_team_logo(c, row_t1, "img")
             if not team1_logo:
                 team1_logo = _pick_card_team_logo(c, row_t2, "img")
-        else:
-            sc1, sc2 = s1, s2
-            winner_side = "team1" if won == row_t1 else "team2"
 
         date_ms = int(unix)
         is_cs2 = date_ms >= CS2_RELEASE_UNIX_MS

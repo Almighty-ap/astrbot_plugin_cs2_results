@@ -421,8 +421,15 @@ playwright install chromium
 
 ### 13.2 测试和静态检查
 
+> **⚠️ 测试约束（铁律）**：**禁止运行全量 pytest，明确指示只跑单个测试文件**。严禁盲目执行无参数的 `pytest` 或 `pytest tests/`，必须指定单个测试文件精准测试（可搭配 `-k` 进一步筛选）。
+> **⚠️ Git 提交约束（铁律）**：**未经用户的明确指示，绝不自行提交（git commit）和推送到 GitHub（git push）**。修改代码默认仅在工作区调试与测试，提交必须获得用户明确授权。
+
 ```bash
-python -m pytest
+# 推荐：针对改动的单个测试文件精准执行
+python -m pytest tests/test_render_stage2.py
+python -m pytest tests/test_hltv_parsers.py -k test_parse_h2h_results
+
+# 代码风格与静态检查
 ruff check .
 ```
 

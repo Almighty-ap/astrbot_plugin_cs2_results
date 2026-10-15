@@ -1468,6 +1468,41 @@ def get_team_roster(team_name: str, team_id: str | None = None) -> list[str]:
     return []
 
 
+def get_team_logo(team_name: str, team_id: str | None = None) -> Optional[str]:
+    """从本地 team_index / vrs_ranking 获取战队的官方队标 URL。"""
+    tk = (team_name or "").strip().casefold()
+    if not tk and not team_id:
+        return None
+    with _transaction() as conn:
+        if team_id:
+            row = conn.execute(
+                "SELECT logo_url FROM team_index WHERE team_id = ? AND logo_url IS NOT NULL",
+                (str(team_id),),
+            ).fetchone()
+            if row and row["logo_url"]:
+                return str(row["logo_url"])
+            row = conn.execute(
+                "SELECT logo_url FROM vrs_ranking WHERE team_id = ? AND logo_url IS NOT NULL",
+                (str(team_id),),
+            ).fetchone()
+            if row and row["logo_url"]:
+                return str(row["logo_url"])
+        if tk:
+            row = conn.execute(
+                "SELECT logo_url FROM team_index WHERE team_key = ? AND logo_url IS NOT NULL",
+                (tk,),
+            ).fetchone()
+            if row and row["logo_url"]:
+                return str(row["logo_url"])
+            row = conn.execute(
+                "SELECT logo_url FROM vrs_ranking WHERE team_key = ? AND logo_url IS NOT NULL",
+                (tk,),
+            ).fetchone()
+            if row and row["logo_url"]:
+                return str(row["logo_url"])
+    return None
+
+
 # —————————— Valve 世界排名(VRS) ——————————
 def _pick_vrs_entry(cands: list, rosters: dict[str, set[str]]) -> object:
     """同名多条(VRS 排的是阵容不是俱乐部)时挑出在役的那条。
