@@ -2873,27 +2873,79 @@ def build_h2h_html(summary: H2HSummary, when_text: str) -> str:
     tstars1 = _stars(majors.team_titles(summary.team1), 14, "right")
     tstars2 = _stars(majors.team_titles(summary.team2), 14, "left")
 
-    cs2_t1, cs2_t2 = summary.cs2_team1_wins, summary.cs2_team2_wins
-    cs2_total = summary.cs2_matches
-    csgo_total = max(0, total - cs2_total)
-    csgo_t1 = max(0, w1 - cs2_t1)
-    csgo_t2 = max(0, w2 - cs2_t2)
+    if summary.team1_players:
+        chips1 = "".join(
+            f'<span style="font-size:12px;font-weight:600;background:rgba(255,255,255,0.85);color:{ROW};padding:3px 8px;border-radius:6px;border:1px solid {BORDER_S};white-space:nowrap;">{_esc(p)}</span>'
+            for p in summary.team1_players
+        )
+        roster1_html = f'<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:10px;">{chips1}</div>'
+    else:
+        roster1_html = f'<div style="font-size:12px;color:{FAINT};margin-top:8px;">暂无阵容数据</div>'
+
+    if summary.team2_players:
+        chips2 = "".join(
+            f'<span style="font-size:12px;font-weight:600;background:rgba(255,255,255,0.85);color:{ROW};padding:3px 8px;border-radius:6px;border:1px solid {BORDER_S};white-space:nowrap;">{_esc(p)}</span>'
+            for p in summary.team2_players
+        )
+        roster2_html = f'<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:10px;justify-content:flex-end;">{chips2}</div>'
+    else:
+        roster2_html = f'<div style="font-size:12px;color:{FAINT};margin-top:8px;text-align:right;">暂无阵容数据</div>'
+
+    if summary.is_fallback:
+        mid_html = f"""
+    <div style="text-align:center;flex:none;padding:0 12px;max-width:240px;">
+     <div style="font-size:12px;font-weight:700;color:{ACCENT_D};background:{ACCENT_BG};padding:4px 12px;border-radius:999px;display:inline-block;white-space:nowrap;">
+      近 6 个月无交锋
+     </div>
+     <div style="font-size:14px;font-weight:700;color:{INK};margin-top:8px;">展示最近 1 场历史交锋</div>
+     <div style="font-size:12px;color:{FAINT};margin-top:3px;">{_esc(summary.fallback_date)}</div>
+    </div>
+    """
+    elif total > 0:
+        mid_html = f"""
+    <div style="text-align:center;flex:none;padding:0 12px;max-width:240px;">
+     <div style="font-size:12.5px;font-weight:700;color:{MUTE};letter-spacing:0.5px;">近 6 个月交手</div>
+     <div style="font-size:24px;font-weight:800;color:{INK};margin-top:4px;">
+      {total} <span style="font-size:13px;font-weight:600;color:{SUB};">场</span>
+     </div>
+     <div style="font-size:13px;font-weight:700;color:{ACCENT_D};margin-top:4px;white-space:nowrap;">
+      {_esc(summary.team1)} {w1} 胜 - {w2} 胜 {_esc(summary.team2)}
+     </div>
+    </div>
+    """
+    else:
+        mid_html = f"""
+    <div style="text-align:center;flex:none;padding:0 12px;max-width:240px;">
+     <div style="font-size:13.5px;font-weight:600;color:{FAINT};">近 6 个月无交手记录</div>
+    </div>
+    """
+
+    top_tag = "历史回退" if summary.is_fallback else "宿敌对决"
+
+    if summary.is_fallback:
+        section_title = f"两队最近 1 场历史交锋 ({_esc(summary.fallback_date)})"
+        fallback_notice = (
+            f'<div style="background:rgba(196,112,78,0.08);border:1px solid rgba(196,112,78,0.2);'
+            f'border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:13.5px;color:{ACCENT_D};'
+            f'display:flex;align-items:center;gap:8px;">'
+            f'<span>ℹ️</span> <span>近 6 个月两队无交锋记录，已自动回退展示最近 1 场历史交手（{_esc(summary.fallback_date)}）</span>'
+            f'</div>'
+        )
+    else:
+        n_m = len(summary.matches)
+        section_title = f"近 6 个月交锋记录 (共 {n_m} 场)" if n_m else "近 6 个月交锋记录"
+        fallback_notice = ""
 
     match_rows = ""
     for idx, m in enumerate(summary.matches[:8]):
         bb = "" if idx == min(len(summary.matches), 8) - 1 else f"border-bottom:1px solid {BORDER_R};"
-        tag_bg = ACCENT_BG if m.is_cs2 else PANEL
-        tag_col = ACCENT_D if m.is_cs2 else MUTE
-        tag_text = "CS2" if m.is_cs2 else "CS:GO"
-
         s1_style = f"font-weight:700;color:{ACCENT_D};" if m.winner == "team1" else f"color:{INK};"
         s2_style = f"font-weight:700;color:{ACCENT_D};" if m.winner == "team2" else f"color:{INK};"
 
         match_rows += (
             f'<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 6px;{bb}">'
-            f' <div style="display:flex;align-items:center;gap:10px;min-width:0;flex:1;">'
-            f'  <span style="font-size:12px;font-weight:700;background:{tag_bg};color:{tag_col};padding:2px 7px;border-radius:4px;">{tag_text}</span>'
-            f'  <span style="font-size:13px;color:{FAINT};white-space:nowrap;">{_esc(m.date_text)}</span>'
+            f' <div style="display:flex;align-items:center;gap:12px;min-width:0;flex:1;">'
+            f'  <span style="font-size:13px;font-weight:600;color:{FAINT};white-space:nowrap;">{_esc(m.date_text)}</span>'
             f'  <span style="font-size:15px;font-weight:600;color:{INK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(m.event_name)}</span>'
             f' </div>'
             f' <div style="font-size:16px;font-variant-numeric:tabular-nums;white-space:nowrap;padding-left:16px;">'
@@ -2903,65 +2955,57 @@ def build_h2h_html(summary: H2HSummary, when_text: str) -> str:
         )
 
     if not match_rows:
-        match_rows = f'<div style="padding:20px;text-align:center;color:{FAINT};font-size:15px;">暂无两队历史正赛记录</div>'
+        match_rows = f'<div style="padding:20px;text-align:center;color:{FAINT};font-size:15px;">近 6 个月及历史暂无两队正赛交锋记录</div>'
 
     body = f"""
   <div style="display:flex;align-items:center;justify-content:space-between;gap:18px;">
    <div>
-    <div style="font-size:27px;letter-spacing:-0.4px;color:{INK};"><span style="font-weight:700;">战队交手历史</span> <span style="font-weight:500;color:{SUB};">· HEAD TO HEAD</span></div>
+    <div style="font-size:27px;letter-spacing:-0.4px;color:{INK};"><span style="font-weight:700;">战队交手历史</span> <span style="font-weight:500;color:{SUB};">· HEAD TO HEAD (近 6 个月)</span></div>
     <div style="font-size:15px;color:{FAINT};margin-top:6px;">数据来源 HLTV · {_esc(when_text)}</div>
    </div>
-   <div style="background:{ACCENT_BG};color:{ACCENT_D};font-size:15px;font-weight:700;padding:8px 16px;border-radius:999px;">宿敌对决</div>
+   <div style="background:{ACCENT_BG};color:{ACCENT_D};font-size:15px;font-weight:700;padding:8px 16px;border-radius:999px;">{top_tag}</div>
   </div>
 
   <div style="margin-top:24px;background:{PANEL};border:1px solid {BORDER};border-radius:18px;padding:26px 24px;">
-   <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+   <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;">
     <!-- 左队 -->
-    <div style="flex:1;display:flex;align-items:center;gap:16px;min-width:0;">
-     {badge1}
-     <div style="min-width:0;">
-      <div style="font-size:24px;font-weight:700;color:{INK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:6px;">{_esc(summary.team1)}{tstars1}</div>
-      <div style="font-size:14px;color:{MUTE};margin-top:4px;">胜率 <span style="color:{ACCENT_D};font-weight:600;">{pct1}%</span></div>
+    <div style="flex:1;min-width:0;">
+     <div style="display:flex;align-items:center;gap:14px;">
+      {badge1}
+      <div style="min-width:0;">
+       <div style="font-size:23px;font-weight:700;color:{INK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:6px;">{_esc(summary.team1)}{tstars1}</div>
+       <div style="font-size:13.5px;color:{MUTE};margin-top:3px;">胜率 <span style="color:{ACCENT_D};font-weight:700;">{pct1}%</span></div>
+      </div>
      </div>
+     {roster1_html}
     </div>
 
-    <!-- 比分 -->
-    <div style="text-align:center;flex:none;padding:0 12px;">
-     <div style="font-size:40px;font-weight:800;letter-spacing:1px;color:{INK};font-variant-numeric:tabular-nums;">
-      <span style="color:{ACCENT_D if w1 >= w2 else INK};">{w1}</span> <span style="color:{MUTE};font-size:28px;">:</span> <span style="color:{ACCENT_D if w2 >= w1 else INK};">{w2}</span>
-     </div>
-     <div style="font-size:13px;color:{FAINT};margin-top:2px;">总计 {total} 场</div>
-    </div>
+    <!-- 中间小结 -->
+    {mid_html}
 
     <!-- 右队 -->
-    <div style="flex:1;display:flex;align-items:center;justify-content:flex-end;gap:16px;min-width:0;text-align:right;">
-     <div style="min-width:0;">
-      <div style="font-size:24px;font-weight:700;color:{INK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;justify-content:flex-end;gap:6px;">{tstars2}{_esc(summary.team2)}</div>
-      <div style="font-size:14px;color:{MUTE};margin-top:4px;">胜率 <span style="color:{ACCENT_D};font-weight:600;">{pct2}%</span></div>
+    <div style="flex:1;min-width:0;display:flex;flex-direction:column;align-items:flex-end;">
+     <div style="display:flex;align-items:center;justify-content:flex-end;gap:14px;width:100%;">
+      <div style="min-width:0;text-align:right;">
+       <div style="font-size:23px;font-weight:700;color:{INK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;justify-content:flex-end;gap:6px;">{tstars2}{_esc(summary.team2)}</div>
+       <div style="font-size:13.5px;color:{MUTE};margin-top:3px;">胜率 <span style="color:{ACCENT_D};font-weight:700;">{pct2}%</span></div>
+      </div>
+      {badge2}
      </div>
-     {badge2}
+     {roster2_html}
     </div>
    </div>
 
    <!-- 胜负进度条 -->
-   <div style="margin-top:20px;height:10px;background:rgba(31,28,23,0.08);border-radius:999px;overflow:hidden;display:flex;">
+   <div style="margin-top:22px;height:10px;background:rgba(31,28,23,0.08);border-radius:999px;overflow:hidden;display:flex;">
     <div style="width:{pct1}%;background:{ACCENT};height:100%;"></div>
     <div style="width:{pct2}%;background:#4A6984;height:100%;"></div>
-   </div>
-
-   <!-- 时代战绩切片 -->
-   <div style="margin-top:18px;display:flex;gap:12px;font-size:13.5px;">
-    <div style="flex:1;background:rgba(255,255,255,0.7);padding:10px 14px;border-radius:10px;border:1px solid {BORDER_S};">
-     <span style="font-weight:700;color:{ACCENT_D};">CS2 时代:</span> <span style="color:{INK};font-weight:600;">{cs2_t1}</span> 胜 <span style="color:{INK};font-weight:600;">{cs2_t2}</span> 负 (共 {cs2_total} 场)
-    </div>
-    <div style="flex:1;background:rgba(255,255,255,0.7);padding:10px 14px;border-radius:10px;border:1px solid {BORDER_S};">
-     <span style="font-weight:700;color:{MUTE};">CS:GO 时代:</span> <span style="color:{INK};font-weight:600;">{csgo_t1}</span> 胜 <span style="color:{INK};font-weight:600;">{csgo_t2}</span> 负 (共 {csgo_total} 场)
-    </div>
    </div>
   </div>
 
   <div style="margin-top:26px;">
-   <div style="font-size:18px;font-weight:700;color:{INK};letter-spacing:-0.2px;margin-bottom:12px;">近期交锋记录 (最近 8 场)</div>
+   <div style="font-size:18px;font-weight:700;color:{INK};letter-spacing:-0.2px;margin-bottom:12px;">{section_title}</div>
+   {fallback_notice}
    <div style="background:{PANEL};border:1px solid {BORDER};border-radius:14px;padding:8px 16px;">
     {match_rows}
    </div>

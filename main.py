@@ -2014,6 +2014,8 @@ async def _handle_h2h(t1_query: str, t2_query: str) -> None:
     summary = hltv.parse_h2h_results(
         html, team1.name, team2.name, team1_id=team1.id, team2_id=team2.id
     )
+    summary.team1_players = store.get_team_roster(team1.name, team1.id)
+    summary.team2_players = store.get_team_roster(team2.name, team2.id)
 
     when = f"{_now()} 北京时间"
     try:

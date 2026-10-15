@@ -22,9 +22,8 @@ class TestRenderStage2(unittest.TestCase):
             total_matches=5,
             team1_wins=3,
             team2_wins=2,
-            cs2_matches=3,
-            cs2_team1_wins=2,
-            cs2_team2_wins=1,
+            team1_players=["ZywOo", "apEX", "Spinx", "flameZ", "mezii"],
+            team2_players=["chopper", "sh1ro", "magixx", "donk", "zont1x"],
             matches=[
                 H2HMatch(
                     match_id="1",
@@ -45,8 +44,47 @@ class TestRenderStage2(unittest.TestCase):
         self.assertIn("战队交手历史", html)
         self.assertIn("Vitality", html)
         self.assertIn("Spirit", html)
-        self.assertIn("CS2 时代", html)
+        self.assertIn("ZywOo", html)
+        self.assertIn("donk", html)
+        self.assertIn("近 6 个月交手", html)
+        self.assertIn("Vitality 3 胜 - 2 胜 Spirit", html)
         self.assertIn("IEM Cologne 2024", html)
+        # 不再包含 CS2/CS:GO 时代切片与标签
+        self.assertNotIn("CS2 时代", html)
+        self.assertNotIn("CS:GO 时代", html)
+
+    def test_h2h_fallback_card_html(self) -> None:
+        summary = H2HSummary(
+            team1="Vitality",
+            team2="Spirit",
+            team1_id="9565",
+            team2_id="10276",
+            total_matches=1,
+            team1_wins=1,
+            team2_wins=0,
+            is_fallback=True,
+            fallback_date="2024-07-03",
+            matches=[
+                H2HMatch(
+                    match_id="1",
+                    url="https://example.com/1",
+                    date_ms=1720000000000,
+                    event_name="IEM Cologne 2024",
+                    team1="Vitality",
+                    team2="Spirit",
+                    score1=2,
+                    score2=1,
+                    winner="team1",
+                    is_cs2=True,
+                    date_text="2024-07-03",
+                )
+            ],
+        )
+        html = render.build_h2h_html(summary, "12:00 北京时间")
+        self.assertIn("近 6 个月无交锋", html)
+        self.assertIn("展示最近 1 场历史交锋", html)
+        self.assertIn("2024-07-03", html)
+        self.assertIn("历史回退", html)
 
     def test_bp_card_html(self) -> None:
         match = MatchDetail(

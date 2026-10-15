@@ -1403,6 +1403,71 @@ def roster_overview() -> dict:
     return {"teams": int(t), "players": int(p), "refreshed_at": float(ts) if ts else None}
 
 
+def get_team_roster(team_name: str, team_id: str | None = None) -> list[str]:
+    """从本地 player_team_cache 获取战队的活跃队员名单 (最多 5 人)。"""
+    tk = (team_name or "").strip().casefold()
+    if not tk and not team_id:
+        return []
+    with _transaction() as conn:
+        if tk:
+            rows = conn.execute(
+                """SELECT nick FROM player_team_cache
+                   WHERE team_key = ? OR LOWER(team) = ?
+                   ORDER BY updated_at DESC, player_id ASC
+                   LIMIT 10""",
+                (tk, tk),
+            ).fetchall()
+            if rows:
+                nicks: list[str] = []
+                for r in rows:
+                    n = str(r["nick"] or "").strip()
+                    if n and n not in nicks:
+                        nicks.append(n)
+                if nicks:
+                    return nicks[:5]
+
+        if team_id:
+            t_row = conn.execute(
+                "SELECT team_key FROM team_index WHERE team_id = ?",
+                (str(team_id),),
+            ).fetchone()
+            if t_row and t_row["team_key"]:
+                real_tk = t_row["team_key"]
+                rows = conn.execute(
+                    """SELECT nick FROM player_team_cache
+                       WHERE team_key = ?
+                       ORDER BY updated_at DESC, player_id ASC
+                       LIMIT 10""",
+                    (real_tk,),
+                ).fetchall()
+                if rows:
+                    nicks = []
+                    for r in rows:
+                        n = str(r["nick"] or "").strip()
+                        if n and n not in nicks:
+                            nicks.append(n)
+                    if nicks:
+                        return nicks[:5]
+
+        if tk:
+            rows = conn.execute(
+                """SELECT nick FROM player_team_cache
+                   WHERE team_key LIKE ? OR LOWER(team) LIKE ?
+                   ORDER BY updated_at DESC, player_id ASC
+                   LIMIT 10""",
+                (f"%{tk}%", f"%{tk}%"),
+            ).fetchall()
+            if rows:
+                nicks = []
+                for r in rows:
+                    n = str(r["nick"] or "").strip()
+                    if n and n not in nicks:
+                        nicks.append(n)
+                if nicks:
+                    return nicks[:5]
+    return []
+
+
 # —————————— Valve 世界排名(VRS) ——————————
 def _pick_vrs_entry(cands: list, rosters: dict[str, set[str]]) -> object:
     """同名多条(VRS 排的是阵容不是俱乐部)时挑出在役的那条。

@@ -576,20 +576,41 @@ class HltvParserDegradedInputContractTests(unittest.TestCase):
             </a>
         </div>
         """
+        # 场景 1: 给定参考时间，近 6 个月内有 1 场 (1720000000000)，过滤掉超过 6 个月的 1680000000000
+        ref_now = 1720000000000 + 30 * 86400 * 1000  # 比赛后 30 天
         summary = self.hltv.parse_h2h_results(
-            html, "Vitality", "Spirit", team1_id="9565", team2_id="10276"
+            html, "Vitality", "Spirit", team1_id="9565", team2_id="10276", now_ms=ref_now
         )
-        self.assertEqual(summary.total_matches, 2)
+        self.assertFalse(summary.is_fallback)
+        self.assertEqual(summary.total_matches, 1)
         self.assertEqual(summary.team1_wins, 1)
-        self.assertEqual(summary.team2_wins, 1)
-        self.assertEqual(summary.cs2_matches, 1)
-        self.assertEqual(summary.cs2_team1_wins, 1)
-        self.assertEqual(summary.cs2_team2_wins, 0)
-        self.assertEqual(len(summary.matches), 2)
-        self.assertTrue(summary.matches[0].is_cs2)
-        self.assertFalse(summary.matches[1].is_cs2)
+        self.assertEqual(summary.team2_wins, 0)
+        self.assertEqual(len(summary.matches), 1)
         self.assertEqual(summary.matches[0].score1, 2)
         self.assertEqual(summary.matches[0].score2, 1)
+
+        # 场景 2: 近 6 个月内无交手，自动回退展示最近 1 场历史比赛
+        far_future = 1720000000000 + 365 * 86400 * 1000  # 1 年后
+        summary_fallback = self.hltv.parse_h2h_results(
+            html, "Vitality", "Spirit", team1_id="9565", team2_id="10276", now_ms=far_future
+        )
+        self.assertTrue(summary_fallback.is_fallback)
+        self.assertEqual(summary_fallback.fallback_date, "2024-07-03")
+        self.assertEqual(summary_fallback.total_matches, 1)
+        self.assertEqual(summary_fallback.team1_wins, 1)
+        self.assertEqual(summary_fallback.team2_wins, 0)
+        self.assertEqual(len(summary_fallback.matches), 1)
+        self.assertEqual(summary_fallback.matches[0].match_id, "2370001")
+
+        # 场景 3: 完全没有历史比赛记录
+        summary_empty = self.hltv.parse_h2h_results(
+            "<div>无比赛</div>", "Vitality", "Spirit", team1_id="9565", team2_id="10276"
+        )
+        self.assertFalse(summary_empty.is_fallback)
+        self.assertEqual(summary_empty.total_matches, 0)
+        self.assertEqual(summary_empty.team1_wins, 0)
+        self.assertEqual(summary_empty.team2_wins, 0)
+        self.assertEqual(len(summary_empty.matches), 0)
 
 
 if __name__ == "__main__":

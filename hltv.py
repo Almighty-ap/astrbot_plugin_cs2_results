@@ -283,6 +283,10 @@ class H2HSummary:
     cs2_team1_wins: int = 0
     cs2_team2_wins: int = 0
     matches: list[H2HMatch] = field(default_factory=list)
+    team1_players: list[str] = field(default_factory=list)
+    team2_players: list[str] = field(default_factory=list)
+    is_fallback: bool = False
+    fallback_date: str = ""
 
 
 @dataclass
@@ -634,8 +638,13 @@ def parse_h2h_results(
     team2: str,
     team1_id: str = "",
     team2_id: str = "",
+    now_ms: Optional[int] = None,
 ) -> H2HSummary:
-    """解析两队交手历史页面 (https://www.hltv.org/results?team=id1&team=id2)。"""
+    """解析两队交手历史页面 (https://www.hltv.org/results?team=id1&team=id2)。
+
+    按近 6 个月(180天)过滤比赛，不区分 CS2/CS:GO。
+    若近 6 个月内无交手，则自动回退展示最近 1 场历史比赛 (is_fallback=True)。
+    """
     t = tree(results_html)
     t1_norm = _norm(team1).casefold()
     t2_norm = _norm(team2).casefold()
@@ -709,15 +718,39 @@ def parse_h2h_results(
             date_text=date_text,
         )
 
-    matches = list(by_id.values())
-    matches.sort(key=lambda m: m.date_ms, reverse=True)
+    all_matches = list(by_id.values())
+    all_matches.sort(key=lambda m: m.date_ms, reverse=True)
 
-    total_matches = len(matches)
-    team1_wins = sum(1 for m in matches if m.winner == "team1")
-    team2_wins = sum(1 for m in matches if m.winner == "team2")
-    cs2_matches = sum(1 for m in matches if m.is_cs2)
-    cs2_team1_wins = sum(1 for m in matches if m.is_cs2 and m.winner == "team1")
-    cs2_team2_wins = sum(1 for m in matches if m.is_cs2 and m.winner == "team2")
+    ref_now = now_ms if now_ms is not None else int(time.time() * 1000)
+    cutoff_ms = ref_now - (180 * 86400 * 1000)
+
+    recent_matches = [m for m in all_matches if m.date_ms >= cutoff_ms]
+
+    if recent_matches:
+        final_matches = recent_matches
+        is_fallback = False
+        fallback_date = ""
+        total_matches = len(final_matches)
+        team1_wins = sum(1 for m in final_matches if m.winner == "team1")
+        team2_wins = sum(1 for m in final_matches if m.winner == "team2")
+    elif all_matches:
+        final_matches = [all_matches[0]]
+        is_fallback = True
+        fallback_date = all_matches[0].date_text
+        total_matches = 1
+        team1_wins = 1 if all_matches[0].winner == "team1" else 0
+        team2_wins = 1 if all_matches[0].winner == "team2" else 0
+    else:
+        final_matches = []
+        is_fallback = False
+        fallback_date = ""
+        total_matches = 0
+        team1_wins = 0
+        team2_wins = 0
+
+    cs2_matches = sum(1 for m in final_matches if m.is_cs2)
+    cs2_team1_wins = sum(1 for m in final_matches if m.is_cs2 and m.winner == "team1")
+    cs2_team2_wins = sum(1 for m in final_matches if m.is_cs2 and m.winner == "team2")
 
     return H2HSummary(
         team1=team1,
@@ -732,7 +765,9 @@ def parse_h2h_results(
         cs2_matches=cs2_matches,
         cs2_team1_wins=cs2_team1_wins,
         cs2_team2_wins=cs2_team2_wins,
-        matches=matches,
+        matches=final_matches,
+        is_fallback=is_fallback,
+        fallback_date=fallback_date,
     )
 
 
