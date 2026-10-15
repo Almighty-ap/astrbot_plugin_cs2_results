@@ -187,18 +187,9 @@ data/plugin_data/cs2_results/
 
 包含订阅数据库、页面缓存、logo 缓存和投递载荷。升级或重装插件不会覆盖该目录。
 
-## 开发与文档体系
+## 开发与测试
 
-- **任务索引与路由**: 详见 [PROJECT_INDEX.md](PROJECT_INDEX.md)
-- **AI 协作与行为规则**: 详见 [AGENTS.md](AGENTS.md)
 - **架构设计与开发文档**: 详见 [DEVELOPMENT.md](DEVELOPMENT.md)
-- **专题上下文体系**:
-  - 当前进展看板: [docs/context/NOW.md](docs/context/NOW.md)
-  - 路径与环境拓扑: [docs/context/MAP.md](docs/context/MAP.md)
-  - 运维与发版手册: [docs/context/RUNBOOK.md](docs/context/RUNBOOK.md)
-  - 架构决策记录: [docs/context/DECISIONS.md](docs/context/DECISIONS.md)
-  - 风险清单与红线: [docs/context/RISKS.md](docs/context/RISKS.md)
-  - 历史技术纪实: [docs/context/history/README.md](docs/context/history/README.md)
 
 本地开发环境执行测试与静态检查：
 
