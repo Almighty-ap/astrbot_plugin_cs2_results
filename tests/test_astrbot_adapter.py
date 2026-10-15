@@ -489,3 +489,202 @@ def test_handle_ranking_executes_and_finishes(
         asyncio.run(main._handle_ranking("vrs"))
     assert "正在初始化同步中" in str(finished_messages[-1])
     assert "vrs-refresh" in spawned
+
+
+def test_handle_player_detail_prioritizes_local_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent_messages: list[str] = []
+    finished_messages: list[Any] = []
+
+    async def fake_send(msg: str) -> None:
+        sent_messages.append(msg)
+
+    async def fake_finish(msg: Any) -> None:
+        finished_messages.append(msg)
+        raise main._CommandFinished
+
+    live_resolve_called: list[str] = []
+
+    async def fake_live_resolve(fetcher, query, players=None):
+        live_resolve_called.append(query)
+        return main.names.PlayerResolution("none")
+
+    mock_fetcher = SimpleNamespace(
+        get_html=AsyncMock(return_value="<html><div class='playerNickname'>NiKo</div></html>"),
+        fetch_impersonated_bytes=AsyncMock(return_value=b"avatar-bytes"),
+    )
+
+    monkeypatch.setattr(main, "cfg", main.Config(), raising=False)
+    monkeypatch.setattr(main.cs2, "send", fake_send)
+    monkeypatch.setattr(main.cs2, "finish", fake_finish)
+    monkeypatch.setattr(main.names, "resolve_player", fake_live_resolve)
+    monkeypatch.setattr(main, "fetcher", mock_fetcher, raising=False)
+    monkeypatch.setattr(
+        main.store,
+        "all_index_players",
+        lambda: [{"player_id": "3741", "nick": "NiKo", "team": "G2", "team_key": "g2"}],
+    )
+    monkeypatch.setattr(
+        main.card,
+        "render_player_profile_card",
+        AsyncMock(return_value=b"fake-player-card"),
+    )
+
+    with pytest.raises(main._CommandFinished):
+        asyncio.run(main._handle_player_detail("小科维奇"))
+
+    # 验证走本地 SQLite 优先命中：
+    # 1. 0ms 命中本地名录，直接下发提示语
+    assert any("正在查询 NiKo 的近期数据" in m for m in sent_messages)
+    # 2. 阻断了在线 live 搜索
+    assert live_resolve_called == []
+    # 3. 正常完成出图
+    assert finished_messages[-1] == b"fake-player-card"
+
+
+def test_handle_player_detail_fallbacks_to_live_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent_messages: list[str] = []
+    finished_messages: list[Any] = []
+
+    async def fake_send(msg: str) -> None:
+        sent_messages.append(msg)
+
+    async def fake_finish(msg: Any) -> None:
+        finished_messages.append(msg)
+        raise main._CommandFinished
+
+    live_resolve_called: list[str] = []
+
+    async def fake_live_resolve(fetcher, query, players=None):
+        live_resolve_called.append(query)
+        return main.names.PlayerResolution(
+            "ok",
+            player=main.hltv.SearchPlayer("3741", "NiKo", "", "G2", None),
+        )
+
+    mock_fetcher = SimpleNamespace(
+        get_html=AsyncMock(return_value="<html><div class='playerNickname'>NiKo</div></html>"),
+        fetch_impersonated_bytes=AsyncMock(return_value=b"avatar-bytes"),
+    )
+
+    monkeypatch.setattr(main, "cfg", main.Config(), raising=False)
+    monkeypatch.setattr(main.cs2, "send", fake_send)
+    monkeypatch.setattr(main.cs2, "finish", fake_finish)
+    monkeypatch.setattr(main.names, "resolve_player", fake_live_resolve)
+    monkeypatch.setattr(main, "fetcher", mock_fetcher, raising=False)
+    monkeypatch.setattr(main.store, "all_index_players", lambda: [])
+    monkeypatch.setattr(
+        main.card,
+        "render_player_profile_card",
+        AsyncMock(return_value=b"fake-player-card"),
+    )
+
+    with pytest.raises(main._CommandFinished):
+        asyncio.run(main._handle_player_detail("NiKo"))
+
+    # 本地未命中时成功 fallback 在线搜索
+    assert live_resolve_called == ["NiKo"]
+    assert any("正在查询 NiKo 的近期数据" in m for m in sent_messages)
+    assert finished_messages[-1] == b"fake-player-card"
+
+
+def test_handle_team_detail_prioritizes_local_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent_messages: list[str] = []
+    finished_messages: list[Any] = []
+
+    async def fake_send(msg: str) -> None:
+        sent_messages.append(msg)
+
+    async def fake_finish(msg: Any) -> None:
+        finished_messages.append(msg)
+        raise main._CommandFinished
+
+    live_resolve_called: list[str] = []
+
+    async def fake_live_resolve(fetcher, query, teams=None):
+        live_resolve_called.append(query)
+        return main.names.TeamResolution("none")
+
+    mock_fetcher = SimpleNamespace(
+        get_html=AsyncMock(return_value="<html><div class='profile-team-name'>FaZe</div></html>"),
+    )
+
+    monkeypatch.setattr(main, "cfg", main.Config(), raising=False)
+    monkeypatch.setattr(main.cs2, "send", fake_send)
+    monkeypatch.setattr(main.cs2, "finish", fake_finish)
+    monkeypatch.setattr(main.names, "resolve_team", fake_live_resolve)
+    monkeypatch.setattr(main, "fetcher", mock_fetcher, raising=False)
+    monkeypatch.setattr(
+        main.store,
+        "all_index_teams",
+        lambda: [{"team_id": "6667", "name": "FaZe", "team_key": "faze", "rank": 6}],
+    )
+    monkeypatch.setattr(
+        main.card,
+        "render_team_profile_card",
+        AsyncMock(return_value=b"fake-team-card"),
+    )
+
+    with pytest.raises(main._CommandFinished):
+        asyncio.run(main._handle_team_detail("法则"))
+
+    # 验证走本地 SQLite 优先命中：
+    # 1. 0ms 命中本地名录，直接下发提示语
+    assert any("正在查询 FaZe 的阵容与排名" in m for m in sent_messages)
+    # 2. 阻断了在线 live 搜索
+    assert live_resolve_called == []
+    # 3. 正常完成出图
+    assert finished_messages[-1] == b"fake-team-card"
+
+
+def test_handle_team_detail_fallbacks_to_live_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent_messages: list[str] = []
+    finished_messages: list[Any] = []
+
+    async def fake_send(msg: str) -> None:
+        sent_messages.append(msg)
+
+    async def fake_finish(msg: Any) -> None:
+        finished_messages.append(msg)
+        raise main._CommandFinished
+
+    live_resolve_called: list[str] = []
+
+    async def fake_live_resolve(fetcher, query, teams=None):
+        live_resolve_called.append(query)
+        return main.names.TeamResolution(
+            "ok",
+            team=main.hltv.SearchTeam("6667", "FaZe"),
+        )
+
+    mock_fetcher = SimpleNamespace(
+        get_html=AsyncMock(return_value="<html><div class='profile-team-name'>FaZe</div></html>"),
+    )
+
+    monkeypatch.setattr(main, "cfg", main.Config(), raising=False)
+    monkeypatch.setattr(main.cs2, "send", fake_send)
+    monkeypatch.setattr(main.cs2, "finish", fake_finish)
+    monkeypatch.setattr(main.names, "resolve_team", fake_live_resolve)
+    monkeypatch.setattr(main, "fetcher", mock_fetcher, raising=False)
+    monkeypatch.setattr(main.store, "all_index_teams", lambda: [])
+    monkeypatch.setattr(
+        main.card,
+        "render_team_profile_card",
+        AsyncMock(return_value=b"fake-team-card"),
+    )
+
+    with pytest.raises(main._CommandFinished):
+        asyncio.run(main._handle_team_detail("FaZe"))
+
+    # 本地未命中时成功 fallback 在线搜索
+    assert live_resolve_called == ["FaZe"]
+    assert any("正在查询 FaZe 的阵容与排名" in m for m in sent_messages)
+    assert finished_messages[-1] == b"fake-team-card"
+

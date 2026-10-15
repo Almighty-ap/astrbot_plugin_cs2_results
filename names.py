@@ -336,6 +336,7 @@ _PLAYER_ALIASES: dict[str, str] = {
     "s1mple": "s1mple",
     # m0NESY
     "小孩": "m0NESY",
+    "孩贼王": "m0NESY",
     "太子": "m0NESY",
     "孩神": "m0NESY",
     "海参": "m0NESY",
@@ -346,6 +347,7 @@ _PLAYER_ALIASES: dict[str, str] = {
     "卡利甘": "karrigan",
     "karrigan": "karrigan",
     "刀锋女王": "karrigan",
+    "千早爱烟": "karrigan",
     # Twistzz
     "总监": "Twistzz",
     "发型总监": "Twistzz",
@@ -357,6 +359,11 @@ _PLAYER_ALIASES: dict[str, str] = {
     # rain
     "雨神": "rain",
     "rain": "rain",
+    # Ex3rcice
+    "ex3": "Ex3rcice",
+    "exercise": "Ex3rcice",
+    "练习哥": "Ex3rcice",
+    "练*哥": "Ex3rcice",
     # donk
     "洞克": "donk",
     "东克": "donk",
@@ -370,6 +377,11 @@ _PLAYER_ALIASES: dict[str, str] = {
     "shiro": "sh1ro",
     "细弱": "sh1ro",
     "sh1ro": "sh1ro",
+    # cadiaN
+    "cadian": "cadiaN",
+    "点子": "cadiaN",
+    "点圣": "cadiaN",
+    "出生点": "cadiaN",
     # broky
     "箱子": "broky",
     "布罗基": "broky",
@@ -383,6 +395,7 @@ _PLAYER_ALIASES: dict[str, str] = {
     "罗宾": "ropz",
     "罗斌": "ropz",
     "ropz": "ropz",
+    "911": "ropz",
     # frozen
     "寒冰": "frozen",
     "冰雪奇缘": "frozen",
@@ -393,22 +406,29 @@ _PLAYER_ALIASES: dict[str, str] = {
     "大b": "b1t",
     "b1t": "b1t",
     "bit": "b1t",
+    "bot": "b1t",
     # jL
     "jl": "jL",
     # iM
     "阿努比斯跑打": "iM",
     "im": "iM",
+    "pm": "iM",
+    "pm2.5": "iM",
     # Aleksib
     "小李子": "Aleksib",
     "李神": "Aleksib",
     "李子": "Aleksib",
     "处理": "Aleksib",
     "aleksib": "Aleksib",
+    # zweih
+    "紫薇": "zweih",
+    "哲伟": "zweih",
     # w0nderful
     "玩的福": "w0nderful",
     "王德发": "w0nderful",
     "wonderful": "w0nderful",
     "w0nderful": "w0nderful",
+    "pdf": "w0nderful",
     # chopper
     "大超": "chopper",
     "天道超": "chopper",
@@ -436,6 +456,7 @@ _PLAYER_ALIASES: dict[str, str] = {
     "夜店王子": "NiKo",
     "老尼": "NiKo",
     "我尼": "NiKo",
+    "虾哥": "NiKo",
     # huNter-
     "表哥": "huNter-",
     "猎人": "huNter-",
@@ -482,6 +503,8 @@ _PLAYER_ALIASES: dict[str, str] = {
     "诺博": "n0rb3r7",
     "norbert": "n0rb3r7",
     "n0rb3r7": "n0rb3r7",
+    # tabseN
+    "元首": "tabseN",
     # 国内知名选手
     "小鬼": "somebody",
     "孙宝迪": "somebody",
@@ -510,6 +533,7 @@ _PLAYER_ALIASES: dict[str, str] = {
     "勾哥": "Jee",
     "jee": "Jee",
     "勾ee": "Jee",
+    "pee": "Jee",
     "莫西雨": "Moseyuh",
     "moseyuh": "Moseyuh",
     # XANTARES

@@ -283,3 +283,71 @@ def test_team_matches_filter_aliases() -> None:
     assert names.team_matches_filter("黑豹", "FURIA")
     assert names.team_matches_filter("FaZe", "FaZe")
     assert not names.team_matches_filter("小蜜蜂", "Spirit")
+
+
+def test_v172_added_player_aliases_canonical_and_matches() -> None:
+    cases = [
+        ("孩贼王", "m0NESY"),
+        ("千早爱烟", "karrigan"),
+        ("练习哥", "Ex3rcice"),
+        ("练*哥", "Ex3rcice"),
+        ("ex3", "Ex3rcice"),
+        ("exercise", "Ex3rcice"),
+        ("点圣", "cadiaN"),
+        ("出生点", "cadiaN"),
+        ("点子", "cadiaN"),
+        ("cadian", "cadiaN"),
+        ("911", "ropz"),
+        ("bot", "b1t"),
+        ("pm", "iM"),
+        ("pm2.5", "iM"),
+        ("紫薇", "zweih"),
+        ("哲伟", "zweih"),
+        ("pdf", "w0nderful"),
+        ("虾哥", "NiKo"),
+        ("元首", "tabseN"),
+        ("pee", "Jee"),
+    ]
+    for alias, expected in cases:
+        assert names.canonical_player(alias) == expected
+        assert names.target_matches(alias, expected, "player")
+
+
+def test_v172_added_player_aliases_resolve_local() -> None:
+    index = [
+        {"player_id": "19230", "nick": "m0NESY", "team": "G2", "team_rank": 3},
+        {"player_id": "884", "nick": "karrigan", "team": "FaZe", "team_rank": 6},
+        {"player_id": "19714", "nick": "Ex3rcice", "team": "3DMAX", "team_rank": 21},
+        {"player_id": "7964", "nick": "cadiaN", "team": "Astralis", "team_rank": 14},
+        {"player_id": "11816", "nick": "ropz", "team": "FaZe", "team_rank": 6},
+        {"player_id": "18987", "nick": "b1t", "team": "Natus Vincere", "team_rank": 1},
+        {"player_id": "14759", "nick": "iM", "team": "Natus Vincere", "team_rank": 1},
+        {"player_id": "22068", "nick": "zweih", "team": "Spirit", "team_rank": 2},
+        {"player_id": "20127", "nick": "w0nderful", "team": "Natus Vincere", "team_rank": 1},
+        {"player_id": "3741", "nick": "NiKo", "team": "G2", "team_rank": 3},
+        {"player_id": "5794", "nick": "tabseN", "team": "BIG", "team_rank": 25},
+        {"player_id": "20790", "nick": "Jee", "team": "TYLOO", "team_rank": 30},
+    ]
+
+    for alias, expected_nick, expected_id in [
+        ("孩贼王", "m0NESY", "19230"),
+        ("千早爱烟", "karrigan", "884"),
+        ("练习哥", "Ex3rcice", "19714"),
+        ("练*哥", "Ex3rcice", "19714"),
+        ("点圣", "cadiaN", "7964"),
+        ("出生点", "cadiaN", "7964"),
+        ("911", "ropz", "11816"),
+        ("bot", "b1t", "18987"),
+        ("pm", "iM", "14759"),
+        ("pm2.5", "iM", "14759"),
+        ("紫薇", "zweih", "22068"),
+        ("pdf", "w0nderful", "20127"),
+        ("虾哥", "NiKo", "3741"),
+        ("元首", "tabseN", "5794"),
+        ("pee", "Jee", "20790"),
+    ]:
+        res = names.resolve_player_local(alias, index)
+        assert res.status == "ok"
+        assert res.player is not None
+        assert res.player.nick == expected_nick
+        assert res.player.id == expected_id

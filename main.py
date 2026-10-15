@@ -1714,7 +1714,12 @@ async def _handle_player_detail(name: str) -> None:
         await cs2.finish(
             "用法:/cs2 查询 选手 <名字>,例如 /cs2 查询 选手 s1mple"
         )
-    res = await names.resolve_player(fetcher, name, store.all_index_players())
+    # 本地 SQLite 优先解析: 毫秒级返回，彻底终结在线搜索排队与 Cloudflare 挑战
+    players = store.all_index_players()
+    res = names.resolve_player_local(name, players)
+    if res.status not in ("ok", "ambiguous"):
+        # 仅在本地未命中(或名录未就绪)时才降级 fallback 在线搜索 HLTV
+        res = await names.resolve_player(fetcher, name, players)
     if res.status == "error":
         await cs2.finish("HLTV 搜索暂时不可用,请稍后再试")
     if res.status == "ambiguous":
@@ -1734,6 +1739,23 @@ async def _handle_player_detail(name: str) -> None:
         f"{hltv.BASE}/stats/players/individual/{player.id}/x"
         f"?startDate={start_date.isoformat()}&endDate={end_date.isoformat()}"
     )
+
+    async def _fetch_optional_stats() -> str | None:
+        try:
+            # stats 统计页是可选增强数据，设置 15 秒预算，遇盾或超时秒级跳过，不阻塞基础详情出图
+            return await asyncio.wait_for(
+                fetcher.get_html(
+                    stats_url,
+                    wait_selector=".stats-rows",
+                    max_age=cfg.cs2_cache_event_page_ttl,
+                    stale_age=cfg.cs2_stale_event_page,
+                    priority="user",
+                ),
+                timeout=15.0,
+            )
+        except Exception:
+            return None
+
     try:
         profile_html, stats_html = await asyncio.gather(
             fetcher.get_html(
@@ -1743,13 +1765,7 @@ async def _handle_player_detail(name: str) -> None:
                 stale_age=cfg.cs2_stale_event_page,
                 priority="user",
             ),
-            fetcher.get_html(
-                stats_url,
-                wait_selector=".stats-rows",
-                max_age=cfg.cs2_cache_event_page_ttl,
-                stale_age=cfg.cs2_stale_event_page,
-                priority="user",
-            ),
+            _fetch_optional_stats(),
             return_exceptions=True,
         )
     except Exception as exc:  # noqa: BLE001
@@ -1792,7 +1808,12 @@ async def _handle_team_detail(name: str) -> None:
         await cs2.finish(
             "用法:/cs2 查询 战队 <名字>,例如 /cs2 查询 战队 NAVI"
         )
-    res = await names.resolve_team(fetcher, name, store.all_index_teams())
+    # 本地 SQLite 优先解析: 毫秒级返回，彻底终结在线搜索排队与 Cloudflare 挑战
+    teams = store.all_index_teams()
+    res = names.resolve_team_local(name, teams)
+    if res.status not in ("ok", "ambiguous"):
+        # 仅在本地未命中(或名录未就绪)时才降级 fallback 在线检索 HLTV
+        res = await names.resolve_team(fetcher, name, teams)
     if res.status == "error":
         await cs2.finish("HLTV 搜索暂时不可用,请稍后再试")
     if res.status == "ambiguous":
