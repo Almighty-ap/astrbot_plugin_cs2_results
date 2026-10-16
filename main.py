@@ -41,6 +41,7 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from datetime import datetime, timedelta
+from datetime import time as dt_time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -935,6 +936,39 @@ def _top_tier(event_id: str | None) -> bool:
     )
 
 
+def _is_top_tier_match(m: hltv.ScheduledMatch | hltv.LiveMatch) -> bool:
+    """判断比赛是否属于顶级白名单赛事（支持已有 event_id 或通过 slug / 赛事名匹配）。
+    若通过 slug 或赛事名匹配成功，会自动回填 m.event_id。
+    """
+    if m.event_id:
+        return _top_tier(m.event_id)
+
+    wl = store.whitelist_view()
+    if not wl:
+        return False
+
+    path = m.url.rstrip("/").lower() if m.url else ""
+    m_name = m.event_name.strip().lower() if m.event_name else ""
+
+    for eid, info in wl.items():
+        if not _top_tier(eid):
+            continue
+        slug = (info.get("slug") or "").strip().lower()
+        name = (info.get("name") or "").strip().lower()
+
+        matched = False
+        if slug and (path.endswith(slug) or f"/{slug}" in path or f"-{slug}" in path):
+            matched = True
+        elif name and (m_name == name or name in m_name or m_name in name):
+            matched = True
+
+        if matched:
+            m.event_id = eid
+            return True
+
+    return False
+
+
 def resolve_recipients(
     event_id: str | None, team1: str, team2: str, player_ids: set[str]
 ) -> dict[int, set[int]]:
@@ -1206,15 +1240,20 @@ async def _job_vrs() -> None:
 async def _render_morning_report_card_data() -> bytes | None:
     """拉取数据并渲染晨报卡片，返回 PNG 字节或 None。"""
     now_dt = datetime.now(CN)
+
+    # 确保顶级赛事白名单已载入内存
+    if not store.whitelist_event_ids():
+        await refresh_whitelist()
+
     results_html = await fetcher.get_html(
         hltv.URL_RESULTS,
-        wait_selector=".results-all",
+        wait_selector=".result-con",
         max_age=300,
         priority="warm",
     )
     matches_html = await fetcher.get_html(
         hltv.URL_MATCHES,
-        wait_selector=".upcomingMatchesSection",
+        wait_selector=".match",
         max_age=300,
         priority="warm",
     )
@@ -1226,18 +1265,65 @@ async def _render_morning_report_card_data() -> bytes | None:
     all_upcoming = hltv.parse_upcoming_matches(matches_html)
 
     now_ts = now_dt.timestamp() * 1000
-    cutoff_ts = now_ts - 20 * 3600 * 1000
+    # 昨夜今晨战报：过去 24 小时已完赛的顶级赛事（覆盖昨日此时至今日此时全部战报）
+    cutoff_ts = now_ts - 24 * 3600 * 1000
     yesterday_finished = [
         m for m in all_results
-        if m.start_unix >= cutoff_ts and _top_tier(m.event_id)
+        if m.start_unix >= cutoff_ts and m.start_unix <= now_ts and _is_top_tier_match(m)
     ]
     yesterday_finished.sort(key=lambda m: m.start_unix)
+    if len(yesterday_finished) > 8:
+        # 若完赛较多，优先保留昨夜与今晨最新完赛的焦点赛事，避免被昨日白天早场挤占
+        yesterday_finished = yesterday_finished[-8:]
 
-    end_of_today_ts = now_dt.replace(hour=23, minute=59, second=59).timestamp() * 1000
-    today_matches = [
+    # 今日焦点赛程：覆盖今日未开赛以及次日凌晨与上午（至次日中午 12:00），确保完整包含今晚跨午夜与第二天凌晨的焦点对决
+    next_day = now_dt.date() + timedelta(days=1)
+    end_of_focus_ts = datetime.combine(next_day, dt_time(12, 0, 0), tzinfo=CN).timestamp() * 1000
+
+    # 包含当前正在进行的赛事（live）与排期待打赛事
+    live_matches = hltv.parse_live_matches(matches_html)
+    live_converted: list[hltv.ScheduledMatch] = []
+    for lm in live_matches:
+        if _is_top_tier_match(lm):
+            live_converted.append(
+                hltv.ScheduledMatch(
+                    lm.match_id,
+                    lm.event_id,
+                    lm.event_name,
+                    lm.event_logo,
+                    lm.team1,
+                    lm.team2,
+                    0,
+                    "",
+                    lm.team1_logo,
+                    lm.team2_logo,
+                    status="live",
+                    url=lm.url,
+                )
+            )
+
+    upcoming_top = [
         m for m in all_upcoming
-        if m.start_unix <= end_of_today_ts and _top_tier(m.event_id)
+        if m.start_unix <= end_of_focus_ts and _is_top_tier_match(m)
     ]
+    upcoming_top.sort(key=lambda m: m.start_unix)
+
+    today_matches = live_converted + upcoming_top
+    if len(today_matches) > 8:
+        today_matches = today_matches[:8]
+
+    # 预加载所有涉及的队伍与赛事 logo，确保图片卡片渲染正常
+    need, seen = [], set()
+    for m in yesterday_finished + today_matches:
+        for u in (m.event_logo, m.team1_logo, m.team2_logo):
+            if u and u not in seen and not store.has_logo(u):
+                need.append(u)
+                seen.add(u)
+    if need:
+        try:
+            await fetcher.get_logos(hltv.URL_MATCHES, need, priority="warm")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[cs2] 晨报队标抓取异常: {e}")
 
     date_display = f"{now_dt.year}年{now_dt.month}月{now_dt.day}日 {_WEEKDAYS_CN[now_dt.weekday()]}"
     when_text = f"{now_dt.hour:02d}:{now_dt.minute:02d} 北京时间"

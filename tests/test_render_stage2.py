@@ -158,6 +158,42 @@ class TestRenderStage2(unittest.TestCase):
         self.assertIn("Vitality", html)
         self.assertIn("FaZe", html)
 
+    def test_morning_report_card_next_day_and_live(self) -> None:
+        live_match = ScheduledMatch(
+            match_id="103",
+            event_id="1",
+            event_name="Thunderpick 2026",
+            event_logo=None,
+            team1="Spirit",
+            team2="G2",
+            start_unix=0,
+            best_of="bo3",
+            status="live",
+        )
+        # 2026-10-17 01:30:00 Beijing time (UTC+8) -> timestamp: 1792171800000
+        next_day_match = ScheduledMatch(
+            match_id="104",
+            event_id="1",
+            event_name="Thunderpick 2026",
+            event_logo=None,
+            team1="Aurora",
+            team2="9z",
+            start_unix=1792171800000,
+            best_of="bo3",
+            status="upcoming",
+        )
+        html = render.build_morning_report_html(
+            "2026年10月16日 周五",
+            [],
+            [live_match, next_day_match],
+            "08:30 北京时间",
+        )
+        self.assertIn("进行中", html)
+        self.assertIn("次日 01:30", html)
+        self.assertIn("昨夜今晨暂无完赛的顶级赛事", html)
+        self.assertIn("Aurora", html)
+        self.assertIn("9z", html)
+
 
 if __name__ == "__main__":
     unittest.main()

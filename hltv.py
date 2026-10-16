@@ -607,9 +607,15 @@ def parse_results(results_html: Html) -> list[ScheduledMatch]:
             if "eventlogo/" in u:
                 elogo = u
                 break
+        evd = c.css_first("[data-event-id]")
+        eid = evd.attributes.get("data-event-id") if evd else None
+        if not eid:
+            eva = c.css_first("a[href*='/events/']")
+            if eva:
+                eid = _event_id(eva.attributes.get("href", "") or "")
         by_id[mid] = ScheduledMatch(
             mid,
-            None,
+            eid,
             _txt(c.css_first(".event-name")),
             elogo,
             teams[0],

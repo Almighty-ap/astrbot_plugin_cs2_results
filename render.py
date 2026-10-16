@@ -19,7 +19,7 @@ import re
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import datetime
+from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
@@ -3135,9 +3135,19 @@ def build_morning_report_html(
     today_matches: list[ScheduledMatch],
     when_text: str,
 ) -> str:
+    base_date = None
+    m_date = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日", date_str)
+    if m_date:
+        try:
+            base_date = date(int(m_date.group(1)), int(m_date.group(2)), int(m_date.group(3)))
+        except ValueError:
+            pass
+    if base_date is None:
+        base_date = datetime.now(CN_TZ).date()
+
     recap_rows = ""
-    for idx, m in enumerate(yesterday_matches[:6]):
-        bb = "" if idx == min(len(yesterday_matches), 6) - 1 else f"border-bottom:1px solid {BORDER_R};"
+    for idx, m in enumerate(yesterday_matches[:8]):
+        bb = "" if idx == min(len(yesterday_matches), 8) - 1 else f"border-bottom:1px solid {BORDER_R};"
         w1 = m.winner == "team1"
         w2 = m.winner == "team2"
         s1_col = ACCENT_D if w1 else INK
@@ -3166,10 +3176,23 @@ def build_morning_report_html(
         recap_rows = f'<div style="padding:16px;text-align:center;color:{FAINT};font-size:14px;">昨夜今晨暂无完赛的顶级赛事</div>'
 
     schedule_rows = ""
-    for idx, m in enumerate(today_matches[:6]):
-        bb = "" if idx == min(len(today_matches), 6) - 1 else f"border-bottom:1px solid {BORDER_R};"
+    for idx, m in enumerate(today_matches[:8]):
+        bb = "" if idx == min(len(today_matches), 8) - 1 else f"border-bottom:1px solid {BORDER_R};"
         dt = datetime.fromtimestamp(m.start_unix / 1000, CN_TZ) if m.start_unix else None
-        time_text = f"{dt.hour:02d}:{dt.minute:02d}" if dt else "待定"
+
+        is_live = getattr(m, "status", "") == "live" or not m.start_unix
+        if is_live:
+            time_text = "进行中"
+            time_badge_style = "font-size:13px;font-weight:700;color:#b91c1c;background:#fee2e2;padding:3px 8px;border-radius:6px;white-space:nowrap;"
+        elif dt:
+            is_next_day = dt.date() > base_date
+            prefix = "次日 " if is_next_day else ""
+            time_text = f"{prefix}{dt.hour:02d}:{dt.minute:02d}"
+            time_badge_style = f"font-size:13.5px;font-weight:700;color:{ACCENT_D};background:{ACCENT_BG};padding:3px 8px;border-radius:6px;white-space:nowrap;"
+        else:
+            time_text = "待定"
+            time_badge_style = f"font-size:13px;font-weight:600;color:{FAINT};background:rgba(31,28,23,0.06);padding:3px 8px;border-radius:6px;white-space:nowrap;"
+
         b1 = _badge(m.team1_logo, m.team1, 32, DARK, CARD)
         b2 = _badge(m.team2_logo, m.team2, 32, DARK, CARD)
         bo_text = m.best_of.upper() if m.best_of else "BO3"
@@ -3177,7 +3200,7 @@ def build_morning_report_html(
         schedule_rows += (
             f'<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 6px;{bb}">'
             f' <div style="display:flex;align-items:center;gap:12px;min-width:0;flex:1;">'
-            f'  <div style="font-size:14px;font-weight:700;color:{ACCENT_D};background:{ACCENT_BG};padding:3px 8px;border-radius:6px;white-space:nowrap;">{time_text}</div>'
+            f'  <div style="{time_badge_style}">{time_text}</div>'
             f'  <div style="min-width:0;">'
             f'   <div style="font-size:12.5px;color:{FAINT};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(m.event_name)}</div>'
             f'   <div style="display:flex;align-items:center;gap:8px;margin-top:2px;">'

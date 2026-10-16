@@ -316,3 +316,204 @@ def test_handle_test_morning_report(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(sent_msgs) == 1
     assert "正在生成每日晨报测试卡片" in sent_msgs[0]
     assert finished_cards == [b"fake_morning_png"]
+
+
+def test_is_top_tier_match_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = main.Config()
+    cfg.cs2_force_exclude_events = ["9003"]
+    monkeypatch.setattr(main, "cfg", cfg, raising=False)
+    monkeypatch.setattr(store, "whitelist_event_ids", lambda: {"9002", "9003"})
+    monkeypatch.setattr(
+        store,
+        "whitelist_view",
+        lambda: {
+            "9002": {"name": "Thunderpick World Championship 2026", "slug": "thunderpick-world-championship-2026"},
+            "9003": {"name": "Major 2026", "slug": "major-2026"},
+        },
+    )
+
+    # 1. Direct event_id in whitelist
+    m1 = main.hltv.ScheduledMatch("1", "9002", "Some Event", None, "A", "B", 1000, "bo3")
+    assert main._is_top_tier_match(m1) is True
+
+    # 2. Direct event_id excluded
+    m2 = main.hltv.ScheduledMatch("2", "9003", "Major 2026", None, "A", "B", 1000, "bo3")
+    assert main._is_top_tier_match(m2) is False
+
+    # 3. No event_id, match by slug in url
+    m3 = main.hltv.ScheduledMatch(
+        "3",
+        None,
+        "Thunderpick WC",
+        None,
+        "A",
+        "B",
+        1000,
+        "bo3",
+        url="https://www.hltv.org/matches/123/a-vs-b-thunderpick-world-championship-2026",
+    )
+    assert main._is_top_tier_match(m3) is True
+    assert m3.event_id == "9002"
+
+    # 4. No event_id, match by event_name
+    m4 = main.hltv.ScheduledMatch(
+        "4",
+        None,
+        "Thunderpick World Championship 2026",
+        None,
+        "A",
+        "B",
+        1000,
+        "bo3",
+        url="https://www.hltv.org/matches/124/a-vs-b",
+    )
+    assert main._is_top_tier_match(m4) is True
+    assert m4.event_id == "9002"
+
+    # 5. Unknown event
+    m5 = main.hltv.ScheduledMatch(
+        "5",
+        None,
+        "Local Cup",
+        None,
+        "A",
+        "B",
+        1000,
+        "bo3",
+        url="https://www.hltv.org/matches/125/a-vs-b-local-cup",
+    )
+    assert main._is_top_tier_match(m5) is False
+
+
+def test_render_morning_report_card_data_overnight_and_next_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    now_dt = main.datetime(2026, 10, 16, 8, 30, tzinfo=main.CN)
+
+    class MockDateTime(main.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now_dt
+
+    monkeypatch.setattr(main, "datetime", MockDateTime)
+    monkeypatch.setattr(main, "cfg", main.Config(), raising=False)
+    monkeypatch.setattr(store, "whitelist_event_ids", lambda: {"9002"})
+    monkeypatch.setattr(
+        store,
+        "whitelist_view",
+        lambda: {
+            "9002": {"name": "Thunderpick World Championship 2026", "slug": "thunderpick-world-championship-2026"},
+        },
+    )
+    mock_fetcher = SimpleNamespace(
+        get_html=AsyncMock(return_value="<html>mock</html>"),
+        get_logos=AsyncMock(),
+    )
+    monkeypatch.setattr(main, "fetcher", mock_fetcher, raising=False)
+
+    now_ts = now_dt.timestamp() * 1000
+
+    # Finished match yesterday night (22:00 Oct 15) and this early morning (02:00 Oct 16)
+    m_night = main.hltv.ScheduledMatch(
+        "1",
+        None,
+        "Thunderpick World Championship 2026",
+        None,
+        "MOUZ",
+        "NAVI",
+        int(now_ts - 10 * 3600 * 1000),  # 10h ago: 22:30 Oct 15
+        "bo3",
+        status="finished",
+        score1=2,
+        score2=1,
+        winner="team1",
+        url="https://www.hltv.org/matches/1/mouz-vs-navi-thunderpick-world-championship-2026",
+    )
+    m_morning = main.hltv.ScheduledMatch(
+        "2",
+        None,
+        "Thunderpick World Championship 2026",
+        None,
+        "FaZe",
+        "Vitality",
+        int(now_ts - 6 * 3600 * 1000),  # 6h ago: 02:30 Oct 16
+        "bo3",
+        status="finished",
+        score1=1,
+        score2=2,
+        winner="team2",
+        url="https://www.hltv.org/matches/2/faze-vs-vitality-thunderpick-world-championship-2026",
+    )
+    # Old finished match (30 hours ago, should be excluded)
+    m_old = main.hltv.ScheduledMatch(
+        "3",
+        None,
+        "Thunderpick World Championship 2026",
+        None,
+        "Astralis",
+        "Heroic",
+        int(now_ts - 30 * 3600 * 1000),
+        "bo3",
+        status="finished",
+        url="https://www.hltv.org/matches/3/astralis-vs-heroic-thunderpick-world-championship-2026",
+    )
+
+    # Upcoming match tonight (22:00 Oct 16)
+    m_today = main.hltv.ScheduledMatch(
+        "4",
+        "9002",
+        "Thunderpick World Championship 2026",
+        None,
+        "Aurora",
+        "9z",
+        int(now_ts + 13.5 * 3600 * 1000),  # 22:00 Oct 16
+        "bo3",
+        status="upcoming",
+    )
+    # Upcoming match tomorrow early morning (01:30 Oct 17 - 第二天凌晨)
+    m_next_early = main.hltv.ScheduledMatch(
+        "5",
+        "9002",
+        "Thunderpick World Championship 2026",
+        None,
+        "G2",
+        "Liquid",
+        int(now_ts + 17 * 3600 * 1000),  # 01:30 Oct 17
+        "bo3",
+        status="upcoming",
+    )
+    # Upcoming match tomorrow afternoon (15:00 Oct 17, should be excluded from today's focus)
+    m_next_afternoon = main.hltv.ScheduledMatch(
+        "6",
+        "9002",
+        "Thunderpick World Championship 2026",
+        None,
+        "Spirit",
+        "Virtus.pro",
+        int(now_ts + 30.5 * 3600 * 1000),  # 15:00 Oct 17
+        "bo3",
+        status="upcoming",
+    )
+
+    monkeypatch.setattr(main.hltv, "parse_results", lambda _html: [m_old, m_night, m_morning])
+    monkeypatch.setattr(main.hltv, "parse_upcoming_matches", lambda _html: [m_today, m_next_early, m_next_afternoon])
+    monkeypatch.setattr(main.hltv, "parse_live_matches", lambda _html: [])
+
+    rendered_args: dict[str, Any] = {}
+
+    async def fake_render(date_disp: str, y_matches: list[Any], t_matches: list[Any], when: str) -> bytes:
+        rendered_args["date_disp"] = date_disp
+        rendered_args["y_matches"] = y_matches
+        rendered_args["t_matches"] = t_matches
+        rendered_args["when"] = when
+        return b"fake_png_report"
+
+    monkeypatch.setattr(main.card, "render_morning_report_card", fake_render)
+
+    res = asyncio.run(main._render_morning_report_card_data())
+    assert res == b"fake_png_report"
+
+    # Verify overnight results include yesterday night and this morning (m_old excluded)
+    assert rendered_args["y_matches"] == [m_night, m_morning]
+
+    # Verify today's matches include tonight AND next-day early morning (m_next_afternoon excluded)
+    assert rendered_args["t_matches"] == [m_today, m_next_early]
+
