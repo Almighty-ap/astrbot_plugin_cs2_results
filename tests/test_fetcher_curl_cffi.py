@@ -738,3 +738,38 @@ def test_concurrent_logos_do_not_delay_subsequent_page_fetch(
 
     asyncio.run(run())
     asyncio.run(fetcher.shutdown())
+
+
+def test_priority_user_preempts_live_and_scan() -> None:
+    """验证 _FairPriorityGate 中 PRIORITY_USER (Rank 0) 优于 PRIORITY_LIVE (Rank 1) 与 SCAN。"""
+    assert fetcher_module._PRIORITY_RANK[fetcher_module.PRIORITY_USER] == 0
+    assert fetcher_module._PRIORITY_RANK[fetcher_module.PRIORITY_LIVE] == 1
+    assert fetcher_module._PRIORITY_RANK[fetcher_module.PRIORITY_SCAN] == 2
+    assert fetcher_module._PRIORITY_RANK[fetcher_module.PRIORITY_WARM] == 3
+
+    gate = fetcher_module._FairPriorityGate(min_gap=0.01)
+
+    async def run() -> None:
+        order: list[str] = []
+
+        # 先占用 gate
+        async with gate.slot(fetcher_module.PRIORITY_SCAN):
+            # 在 gate 被占用期间，排入 live 与 user 任务
+            async def worker(pri: str) -> None:
+                async with gate.slot(pri):
+                    order.append(pri)
+
+            t_scan = asyncio.create_task(worker(fetcher_module.PRIORITY_SCAN))
+            t_live = asyncio.create_task(worker(fetcher_module.PRIORITY_LIVE))
+            # 确保 scan 和 live 已经在 _waiters 队列中
+            await asyncio.sleep(0.001)
+            t_user = asyncio.create_task(worker(fetcher_module.PRIORITY_USER))
+            await asyncio.sleep(0.001)
+
+        # 释放后，user 应该第一个被放行，其次 live，最后 scan
+        await asyncio.gather(t_scan, t_live, t_user)
+        assert order == [fetcher_module.PRIORITY_USER, fetcher_module.PRIORITY_LIVE, fetcher_module.PRIORITY_SCAN]
+        await gate.close()
+
+    asyncio.run(run())
+

@@ -2954,12 +2954,9 @@ async def _active_whitelist_events(*, priority: FetchPriority = "user") -> list[
     wl = store.whitelist_event_ids()
     excl = set(cfg.cs2_force_exclude_events)
     cnt: Counter = Counter()
-    mhtml = await fetcher.get_html(
-        hltv.URL_MATCHES,
-        wait_selector=".match",
-        max_age=cfg.cs2_cache_matches_ttl,
-        stale_age=cfg.cs2_stale_matches,
-        priority=priority,
+    # 仅复用本地已缓存的 /matches 与 /results,绝不阻塞在线网络
+    mhtml = store.cache_get(hltv.URL_MATCHES, cfg.cs2_stale_matches) or store.cache_get(
+        hltv.URL_MATCHES, 86400 * 7
     )
     if mhtml:
         day_end = datetime.now(CN).replace(hour=23, minute=59, second=59, microsecond=0)
@@ -2971,12 +2968,8 @@ async def _active_whitelist_events(*, priority: FetchPriority = "user") -> list[
         for lm in hltv.parse_live_matches(mt):
             if lm.event_id in wl and lm.event_id not in excl:
                 cnt[lm.event_id] += 2  # 直播权重高些,优先展示
-    rhtml = await fetcher.get_html(
-        hltv.URL_RESULTS,
-        wait_selector=".result-con",
-        max_age=cfg.cs2_cache_results_ttl,
-        stale_age=cfg.cs2_stale_results,
-        priority=priority,
+    rhtml = store.cache_get(hltv.URL_RESULTS, cfg.cs2_stale_results) or store.cache_get(
+        hltv.URL_RESULTS, 86400 * 7
     )
     if rhtml:
         start_ms = (
@@ -3088,6 +3081,9 @@ def _iter_matchups(sched: hltv.EventSchedule):
             yield from rnd.matchups
 
 
+_INFLIGHT_SCHEDULES: dict[str, asyncio.Future[bytes]] = {}
+
+
 async def _handle_bracket(arg: str | None) -> None:
     wl = store.whitelist_view()
     ongoing = await _ongoing_event_ids()  # 只在"正在进行(#FEATURED)"的赛事里选/匹配
@@ -3126,13 +3122,29 @@ async def _handle_bracket(arg: str | None) -> None:
     else:
         if not ongoing:
             await cs2.finish("当前没有正在进行的顶级赛事 🌙\n想看未来赛程可用 /cs2 赛事。")
-        # 多届同时进行时,按今日活跃度(直播/今日比赛多)排序取最活跃的一届;
-        # 今日轮空的进行中赛事排在后面但仍可选
-        active = [eid for eid in await _active_whitelist_events() if eid in ongoing]
-        rest = sorted(eid for eid in ongoing if eid not in active)
-        eid = (active + rest)[0]
+        if len(ongoing) == 1:
+            eid = next(iter(ongoing))
+        else:
+            # 多届同时进行时,按今日活跃度(直播/今日比赛多)排序取最活跃的一届;
+            # 今日轮空的进行中赛事排在后面但仍可选
+            active = [eid for eid in await _active_whitelist_events() if eid in ongoing]
+            rest = sorted(eid for eid in ongoing if eid not in active)
+            eid = (active + rest)[0]
         v = wl.get(eid, {})
         slug, name = v.get("slug", ""), v.get("name", "")
+
+    # 并发请求合并 (Single-Flight): 若该赛事当前正由前序任务抓取/渲染中，复用结果避免排队雪崩
+    fut = _INFLIGHT_SCHEDULES.get(eid)
+    if fut is not None and not fut.done():
+        try:
+            png = await asyncio.shield(fut)
+            await cs2.finish(png)
+        except Exception:
+            pass
+
+    loop = asyncio.get_running_loop()
+    inflight_fut: asyncio.Future[bytes] = loop.create_future()
+    _INFLIGHT_SCHEDULES[eid] = inflight_fut
 
     # 2) 抓赛事总览页 + 直播 id
     url = f"{hltv.BASE}/events/{eid}/{slug or 'x'}"
@@ -3144,6 +3156,7 @@ async def _handle_bracket(arg: str | None) -> None:
         priority="user",
     )
     if not html:
+        _INFLIGHT_SCHEDULES.pop(eid, None)
         await cs2.finish("抓取赛事页失败(可能被 Cloudflare 挡),稍后再试")
     live_ids: set[str] = set()
     mhtml = await fetcher.get_html(
@@ -3166,12 +3179,14 @@ async def _handle_bracket(arg: str | None) -> None:
     try:
         sched = hltv.parse_event_schedule(html, eid, live_ids, matches_html=mtree)
     except Exception as e:  # noqa: BLE001
+        _INFLIGHT_SCHEDULES.pop(eid, None)
         logger.exception(f"[cs2] 赛程解析失败: {e}")
         await cs2.finish("解析赛事页失败(HLTV 页面结构可能有变),稍后再试")
     _fill_live_series_scores(sched, live_urls)
     if not sched.name:
         sched.name = name
     if not sched.has_structure():
+        _INFLIGHT_SCHEDULES.pop(eid, None)
         await _bracket_fallback(eid, sched.name or name)
 
     # 4) 补齐 logo(赛事 logo + 各队队标,多数已缓存):缺的后台补,当次用首字母兜底,不阻塞出图
@@ -3182,9 +3197,15 @@ async def _handle_bracket(arg: str | None) -> None:
     # 5) 渲染
     try:
         png = await card.render_event_schedule_card(sched, _now(), vrs=vrs_ranks_for_card())
+        if not inflight_fut.done():
+            inflight_fut.set_result(png)
     except Exception as e:  # noqa: BLE001
+        if not inflight_fut.done():
+            inflight_fut.set_exception(e)
         logger.exception(f"[cs2] 赛程卡渲染失败: {e}")
         await cs2.finish("渲染失败，请稍后再试")
+    finally:
+        _INFLIGHT_SCHEDULES.pop(eid, None)
     await cs2.finish(png)
 
 

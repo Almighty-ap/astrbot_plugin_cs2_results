@@ -667,7 +667,94 @@ class HltvParserDegradedInputContractTests(unittest.TestCase):
         self.assertIn("tyloo.png", summary.team1_logo or "")
         self.assertIn("falcons.png", summary.team2_logo or "")
         self.assertNotIn("nip.png", summary.team1_logo or "")
+    def test_bracket_from_json_modern_flat_slots_single_elimination(self) -> None:
+        """测试现代 HLTV 单败淘汰赛 JSON（slot1, slot2 平铺格式与 roundName 字典）解析。"""
+        raw_json = {
+            "type": "org.hltv.bracket.model.Bracket.SingleElimination",
+            "bracketId": {"id": 5359},
+            "name": "Playoffs",
+            "rounds": [
+                {
+                    "type": "org.hltv.bracket.model.Bracket.Round.Round2",
+                    "roundName": {"name": "Semi-finals", "shortName": "Semis"},
+                    "slot1": {
+                        "slotId": {"id": "Semifinals1"},
+                        "matchup": {
+                            "match": {
+                                "matchId": 2399415,
+                                "status": "Normal",
+                                "startTime": 1792256400000,
+                                "numberOfMaps": 3,
+                            },
+                            "team1": {"name": "Falcons", "logo": {"dayLogoURL": "falcons.png"}},
+                            "team2": {"name": "BetBoom", "logo": {"dayLogoURL": "betboom.png"}},
+                        },
+                    },
+                    "slot2": {
+                        "slotId": {"id": "Semifinals2"},
+                        "matchup": {
+                            "match": {
+                                "matchId": 2399416,
+                                "status": "Normal",
+                                "startTime": 1792256400000,
+                                "numberOfMaps": 3,
+                            },
+                            "team1": {"name": "FURIA", "logo": {"dayLogoURL": "furia.png"}},
+                            "team2": {"name": "The MongolZ", "logo": {"dayLogoURL": "mongolz.png"}},
+                        },
+                    },
+                }
+            ],
+        }
+        bracket = self.hltv._bracket_from_json(raw_json, set())
+        self.assertIsNotNone(bracket)
+        self.assertEqual(bracket.kind, "single")
+        self.assertEqual(len(bracket.upper), 1)
+        semis = bracket.upper[0]
+        self.assertEqual(semis.name, "半决赛")
+        self.assertEqual(len(semis.matchups), 2)
+        self.assertEqual(semis.matchups[0].team1.name, "Falcons")
+        self.assertEqual(semis.matchups[0].team2.name, "BetBoom")
+        self.assertEqual(semis.matchups[1].team1.name, "FURIA")
+        self.assertEqual(semis.matchups[1].team2.name, "The MongolZ")
 
+    def test_bracket_from_json_modern_double_elimination(self) -> None:
+        """测试现代 HLTV 双败淘汰赛 JSON（slot1, slot2 平铺格式及字符串 roundName）解析。"""
+        raw_json = {
+            "type": "org.hltv.bracket.model.Bracket.DoubleElimination4",
+            "bracketId": {"id": 5360},
+            "name": "Group A",
+            "upperRound1": {
+                "roundName": "Upper Round 1",
+                "slot1": {
+                    "matchup": {
+                        "match": {"matchId": 2399420, "numberOfMaps": 3},
+                        "team1": {"name": "Vitality"},
+                        "team2": {"name": "G2"},
+                    }
+                },
+            },
+            "grandFinal": {
+                "roundName": "Grand Final",
+                "slot1": {
+                    "matchup": {
+                        "match": {"matchId": 2399421, "numberOfMaps": 5},
+                        "team1": {"name": "Vitality"},
+                        "team2": {"name": "Spirit"},
+                    }
+                },
+            },
+        }
+        bracket = self.hltv._bracket_from_json(raw_json, set())
+        self.assertIsNotNone(bracket)
+        self.assertEqual(bracket.kind, "double")
+        self.assertEqual(bracket.name, "Group A")
+        self.assertEqual(len(bracket.upper), 1)
+        self.assertEqual(bracket.upper[0].name, "胜者组首轮")
+        self.assertEqual(len(bracket.upper[0].matchups), 1)
+        self.assertEqual(bracket.upper[0].matchups[0].team1.name, "Vitality")
+        self.assertEqual(len(bracket.finals), 1)
+        self.assertEqual(bracket.finals[0].name, "总决赛")
 
 
 if __name__ == "__main__":

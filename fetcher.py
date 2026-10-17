@@ -49,8 +49,8 @@ PRIORITY_WARM: FetchPriority = "warm"
 IMPERSONATE_CANDIDATES = ("firefox", "edge", "chrome_android", "chrome", "safari")
 
 _PRIORITY_RANK: dict[str, int] = {
-    PRIORITY_LIVE: 0,
-    PRIORITY_USER: 1,
+    PRIORITY_USER: 0,
+    PRIORITY_LIVE: 1,
     PRIORITY_SCAN: 2,
     PRIORITY_WARM: 3,
 }
@@ -1175,58 +1175,59 @@ class Fetcher:
             self._manual_verify_requested = True
             display: str | None = None
             try:
-                async with self._browser_operation_lock:
-                    # A browser started for normal scraping may use the offscreen
-                    # window position, so recycle it before opening the VNC view.
-                    async with self._lifecycle_lock:
-                        if self._browser is not None:
-                            await self._close_playwright_stack(stop_xvfb=False)
+                async with self._navigation_slot(PRIORITY_USER):
+                    async with self._browser_operation_lock:
+                        # A browser started for normal scraping may use the offscreen
+                        # window position, so recycle it before opening the VNC view.
+                        async with self._lifecycle_lock:
+                            if self._browser is not None:
+                                await self._close_playwright_stack(stop_xvfb=False)
 
-                    await self.start()
-                    self._browser_uses += 1
-                    display = self._display or os.environ.get("DISPLAY")
-                    if os.name != "nt":
-                        if not display:
-                            return ManualVerifyResult(
-                                False, "没有可用的 Xvfb DISPLAY,无法启动 VNC"
+                        await self.start()
+                        self._browser_uses += 1
+                        display = self._display or os.environ.get("DISPLAY")
+                        if os.name != "nt":
+                            if not display:
+                                return ManualVerifyResult(
+                                    False, "没有可用的 Xvfb DISPLAY,无法启动 VNC"
+                                )
+                            await asyncio.to_thread(self._start_x11vnc, display)
+                            await asyncio.to_thread(self._start_novnc)
+
+                        context = await self._new_context()
+                        page = None
+                        try:
+                            page = await context.new_page()
+                            await self._guard_top_level_navigation(page, _PAGE_HOSTS)
+                            html = await self._navigate_html(
+                                page,
+                                hltv.URL_MATCHES,
+                                ".match",
+                                PRIORITY_USER,
                             )
-                        await asyncio.to_thread(self._start_x11vnc, display)
-                        await asyncio.to_thread(self._start_novnc)
-
-                    context = await self._new_context()
-                    page = None
-                    try:
-                        page = await context.new_page()
-                        await self._guard_top_level_navigation(page, _PAGE_HOSTS)
-                        html = await self._navigate_html(
-                            page,
-                            hltv.URL_MATCHES,
-                            ".match",
-                            PRIORITY_USER,
-                        )
-                        if html is None:
+                            if html is None:
+                                return ManualVerifyResult(
+                                    False,
+                                    "等待人工验证超时,HLTV 仍未放行",
+                                    display=display,
+                                    tunnel_target=await self._vnc_tunnel_target(),
+                                )
+                            has_clearance = await self._has_cf_clearance()
+                            await self._save_storage_state()
+                            target = await self._vnc_tunnel_target()
                             return ManualVerifyResult(
-                                False,
-                                "等待人工验证超时,HLTV 仍未放行",
+                                True,
+                                (
+                                    "Cloudflare 验证成功,已保存 cf_clearance 登录状态"
+                                    if has_clearance
+                                    else "HLTV 已成功进入 /matches,已保存浏览器登录状态"
+                                ),
                                 display=display,
-                                tunnel_target=await self._vnc_tunnel_target(),
+                                tunnel_target=target,
                             )
-                        has_clearance = await self._has_cf_clearance()
-                        await self._save_storage_state()
-                        target = await self._vnc_tunnel_target()
-                        return ManualVerifyResult(
-                            True,
-                            (
-                                "Cloudflare 验证成功,已保存 cf_clearance 登录状态"
-                                if has_clearance
-                                else "HLTV 已成功进入 /matches,已保存浏览器登录状态"
-                            ),
-                            display=display,
-                            tunnel_target=target,
-                        )
-                    finally:
-                        if page is not None:
-                            await self._close_page(page)
+                        finally:
+                            if page is not None:
+                                await self._close_page(page)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -1434,93 +1435,92 @@ class Fetcher:
         budget = self.cfg.cs2_fetch_budget_seconds
         manual_verify = self._manual_verify_enabled()
         manual_timeout_ms = self.cfg.cs2_manual_verify_timeout * 1000
-        async with self._navigation_slot(priority):
-            started = time.monotonic()
-            for attempt in range(attempts):
-                try:
-                    response = await (
-                        page.goto(
-                            url,
-                            wait_until="domcontentloaded",
-                            timeout=self.cfg.cs2_nav_timeout,
-                        )
-                        if attempt == 0
-                        else page.reload(
-                            wait_until="domcontentloaded",
-                            timeout=self.cfg.cs2_nav_timeout,
-                        )
+        started = time.monotonic()
+        for attempt in range(attempts):
+            try:
+                response = await (
+                    page.goto(
+                        url,
+                        wait_until="domcontentloaded",
+                        timeout=self.cfg.cs2_nav_timeout,
                     )
-                    initial_title = await page.title()
-                    was_challenge = self._is_challenge(initial_title)
-                    selector_found = True
-                    try:
-                        await page.wait_for_selector(
-                            wait_selector,
-                            state="attached",
-                            timeout=(
-                                manual_timeout_ms
-                                if (manual_verify and was_challenge)
-                                else (
-                                    self.cfg.cs2_challenge_grace_ms
-                                    if was_challenge
-                                    else 25000
-                                )
-                            ),
-                        )
-                    except Exception:  # timeout is validated below, never cached
-                        selector_found = False
-
-                    # 还在挑战页(宽限窗口内没自行放行)→ 不必再取 title/content,
-                    # 直接进下一轮 reload。
-                    if was_challenge and not selector_found:
-                        if manual_verify:
-                            logger.warning(
-                                f"[cs2] 手动验证等待超时({self.cfg.cs2_manual_verify_timeout}s): {url}"
+                    if attempt == 0
+                    else page.reload(
+                        wait_until="domcontentloaded",
+                        timeout=self.cfg.cs2_nav_timeout,
+                    )
+                )
+                initial_title = await page.title()
+                was_challenge = self._is_challenge(initial_title)
+                selector_found = True
+                try:
+                    await page.wait_for_selector(
+                        wait_selector,
+                        state="attached",
+                        timeout=(
+                            manual_timeout_ms
+                            if (manual_verify and was_challenge)
+                            else (
+                                self.cfg.cs2_challenge_grace_ms
+                                if was_challenge
+                                else 25000
                             )
-                            return None
-                        if attempt + 1 < attempts and time.monotonic() - started < budget:
-                            continue
-                        self._record_challenge(arm_backoff=True)
-                        logger.warning(f"[cs2] Cloudflare 挑战未通过: {url}")
-                        return None
+                        ),
+                    )
+                except Exception:  # timeout is validated below, never cached
+                    selector_found = False
 
-                    final_url = page.url
-                    if not self._allowed_url(final_url, _PAGE_HOSTS):
-                        logger.warning(f"[cs2] 页面重定向到非白名单地址: {final_url}")
+                # 还在挑战页(宽限窗口内没自行放行)→ 不必再取 title/content,
+                # 直接进下一轮 reload。
+                if was_challenge and not selector_found:
+                    if manual_verify:
+                        logger.warning(
+                            f"[cs2] 手动验证等待超时({self.cfg.cs2_manual_verify_timeout}s): {url}"
+                        )
                         return None
-                    title = await page.title()
-                    html = await page.content()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.warning(f"[cs2] 导航失败 {url}: {exc}")
-                    return None
-
-                if self._is_challenge(title):
                     if attempt + 1 < attempts and time.monotonic() - started < budget:
                         continue
                     self._record_challenge(arm_backoff=True)
                     logger.warning(f"[cs2] Cloudflare 挑战未通过: {url}")
                     return None
 
-                # A challenge response may replace itself with a successful document;
-                # in that case its initial 403 is no longer the current page status.
-                if not was_challenge and (response is None or not response.ok):
-                    status = response.status if response else "no response"
-                    logger.warning(f"[cs2] HLTV 返回异常状态 {status}: {url}")
+                final_url = page.url
+                if not self._allowed_url(final_url, _PAGE_HOSTS):
+                    logger.warning(f"[cs2] 页面重定向到非白名单地址: {final_url}")
                     return None
-                if not selector_found:
-                    logger.warning(f"[cs2] 页面缺少预期选择器 {wait_selector!r}: {url}")
-                    return None
-                if self._is_error_page(title, html):
-                    logger.warning(f"[cs2] 拒绝缓存错误页 {title!r}: {url}")
-                    return None
-                if (manual_verify and was_challenge) or (
-                    was_challenge and await self._has_cf_clearance()
-                ):
-                    await self._save_storage_state()
-                self._record_fetch_success()
-                return html
+                title = await page.title()
+                html = await page.content()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"[cs2] 导航失败 {url}: {exc}")
+                return None
+
+            if self._is_challenge(title):
+                if attempt + 1 < attempts and time.monotonic() - started < budget:
+                    continue
+                self._record_challenge(arm_backoff=True)
+                logger.warning(f"[cs2] Cloudflare 挑战未通过: {url}")
+                return None
+
+            # A challenge response may replace itself with a successful document;
+            # in that case its initial 403 is no longer the current page status.
+            if not was_challenge and (response is None or not response.ok):
+                status = response.status if response else "no response"
+                logger.warning(f"[cs2] HLTV 返回异常状态 {status}: {url}")
+                return None
+            if not selector_found:
+                logger.warning(f"[cs2] 页面缺少预期选择器 {wait_selector!r}: {url}")
+                return None
+            if self._is_error_page(title, html):
+                logger.warning(f"[cs2] 拒绝缓存错误页 {title!r}: {url}")
+                return None
+            if (manual_verify and was_challenge) or (
+                was_challenge and await self._has_cf_clearance()
+            ):
+                await self._save_storage_state()
+            self._record_fetch_success()
+            return html
         return None
 
     async def get_html(
@@ -1593,24 +1593,28 @@ class Fetcher:
                 return html
             logger.info(f"[cs2] curl_cffi 通道失败,回退 Playwright: {url}")
 
-        async with self._browser_operation_lock:
-            await self.start()
-            self._browser_uses += 1
-            page = None
-            try:
-                ctx = await self._new_context()
-                page = await ctx.new_page()
-                await self._guard_top_level_navigation(page, _PAGE_HOSTS)
-                html = await self._navigate_html(page, url, wait_selector, priority)
-                if html is not None:
-                    await self._cache_html(url, html)
-                else:
-                    self._metrics["errors"] += 1
-                return html
-            finally:
-                if page is not None:
-                    await self._close_page(page)
-                await self._recycle_browser_if_needed()
+        async with self._navigation_slot(priority):
+            cached = store.cache_get(url, 0)
+            if cached:
+                return cached
+            async with self._browser_operation_lock:
+                await self.start()
+                self._browser_uses += 1
+                page = None
+                try:
+                    ctx = await self._new_context()
+                    page = await ctx.new_page()
+                    await self._guard_top_level_navigation(page, _PAGE_HOSTS)
+                    html = await self._navigate_html(page, url, wait_selector, priority)
+                    if html is not None:
+                        await self._cache_html(url, html)
+                    else:
+                        self._metrics["errors"] += 1
+                    return html
+                finally:
+                    if page is not None:
+                        await self._close_page(page)
+                    await self._recycle_browser_if_needed()
 
     @staticmethod
     async def _cache_html(url: str, html: str) -> None:
@@ -1653,36 +1657,36 @@ class Fetcher:
                 return result
             logger.info("[cs2] curl_cffi 搜索通道失败,回退 Playwright")
 
-        async with self._browser_operation_lock:
-            await self.start()
-            self._browser_uses += 1
-            page = None
-            try:
-                ctx = await self._new_context()
-                page = await ctx.new_page()
-                await self._guard_top_level_navigation(page, _PAGE_HOSTS)
-                landed = await self._navigate_html(
-                    page, hltv.URL_MATCHES, ".match", normalized_priority
-                )
-                if landed is None:
-                    return None
-                async with self._navigation_slot(normalized_priority):
-                    result = await page.evaluate(self._SEARCH_JS, term)
-                if not isinstance(result, dict) or result.get("status") != 200:
-                    logger.warning(
-                        f"[cs2] 搜索失败 term={term!r} status={result.get('status') if isinstance(result, dict) else result}"
+        async with self._navigation_slot(normalized_priority):
+            async with self._browser_operation_lock:
+                await self.start()
+                self._browser_uses += 1
+                page = None
+                try:
+                    ctx = await self._new_context()
+                    page = await ctx.new_page()
+                    await self._guard_top_level_navigation(page, _PAGE_HOSTS)
+                    landed = await self._navigate_html(
+                        page, hltv.URL_MATCHES, ".match", normalized_priority
                     )
+                    if landed is None:
+                        return None
+                    result = await page.evaluate(self._SEARCH_JS, term)
+                    if not isinstance(result, dict) or result.get("status") != 200:
+                        logger.warning(
+                            f"[cs2] 搜索失败 term={term!r} status={result.get('status') if isinstance(result, dict) else result}"
+                        )
+                        return None
+                    return result.get("txt")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[cs2] 搜索异常 term={term!r}: {exc}")
                     return None
-                return result.get("txt")
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[cs2] 搜索异常 term={term!r}: {exc}")
-                return None
-            finally:
-                if page is not None:
-                    await self._close_page(page)
-                await self._recycle_browser_if_needed()
+                finally:
+                    if page is not None:
+                        await self._close_page(page)
+                    await self._recycle_browser_if_needed()
 
     def spawn_logos(
         self,
@@ -1824,15 +1828,16 @@ class Fetcher:
             )
             unique_urls = failed_urls
 
-        async with self._browser_operation_lock:
-            await self.start()
-            self._browser_uses += 1
-            try:
-                return await self._get_logos_via_browser(
-                    warm_url, unique_urls, normalized_priority, out
-                )
-            finally:
-                await self._recycle_browser_if_needed()
+        async with self._navigation_slot(normalized_priority):
+            async with self._browser_operation_lock:
+                await self.start()
+                self._browser_uses += 1
+                try:
+                    return await self._get_logos_via_browser(
+                        warm_url, unique_urls, normalized_priority, out
+                    )
+                finally:
+                    await self._recycle_browser_if_needed()
 
     async def _get_logos_via_browser(
         self,

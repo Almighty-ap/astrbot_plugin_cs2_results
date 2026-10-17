@@ -1236,13 +1236,16 @@ class EventSchedule:
 def _slot_team(ts: Optional[dict]) -> SlotTeam:
     ts = ts if isinstance(ts, dict) else {}
     ty = (ts.get("type") or "").split(".")[-1]
-    if ty == "FixedTeam":
-        tm = ts.get("team")
-        tm = tm if isinstance(tm, dict) else {}
-        tl = tm.get("teamLogo")
-        tl = tl if isinstance(tl, dict) else {}
-        logo = tl.get("dayLogoURL") or tl.get("nightLogoURL")  # dayLogo=浅底版,正合米色卡
-        return SlotTeam(_norm(tm.get("name", "")), logo, tm.get("ranking"))
+    if ty in ("FixedTeam", "Known") or "name" in ts or "team" in ts:
+        tm = ts.get("team") if isinstance(ts.get("team"), dict) else ts
+        name = tm.get("name", "")
+        tl = (
+            tm.get("teamLogo")
+            if isinstance(tm.get("teamLogo"), dict)
+            else (tm.get("logo") if isinstance(tm.get("logo"), dict) else {})
+        )
+        logo = tl.get("dayLogoURL") or tl.get("nightLogoURL") or (tl if isinstance(tl, str) else None)
+        return SlotTeam(_norm(name), logo, tm.get("ranking"))
     if ty == "OneOf":
         # 决赛槽的两名候选(上一轮未打完):HLTV 展示两候选,取其名做占位("A / B")
         cands = ts.get("candidates")
@@ -1487,6 +1490,41 @@ def _bo_int(s: str) -> int:
     return int(m.group()) if m else 0
 
 
+def _extract_slots(rnd: dict) -> list[dict]:
+    """提取轮次中的 slot 列表，兼容历史 slots 列表与新版平铺 slot1, slot2..."""
+    if not isinstance(rnd, dict):
+        return []
+    raw_slots = rnd.get("slots")
+    if isinstance(raw_slots, list):
+        return [s for s in raw_slots if isinstance(s, dict)]
+    slot_keys = [k for k in rnd if re.match(r"^slot\d+$", k, re.IGNORECASE)]
+    if slot_keys:
+
+        def _slot_sort_key(k: str) -> int:
+            m = re.search(r"\d+", k)
+            return int(m.group()) if m else 0
+
+        slot_keys.sort(key=_slot_sort_key)
+        return [rnd[k] for k in slot_keys if isinstance(rnd[k], dict)]
+    slots = []
+    for v in rnd.values():
+        if isinstance(v, dict) and ("matchup" in v or "slotId" in v):
+            slots.append(v)
+    return slots
+
+
+def _extract_round_name(rnd: dict) -> str:
+    """提取轮次名称，兼容 roundName 为 dict ({"name": ...}) 或 str。"""
+    if not isinstance(rnd, dict):
+        return ""
+    rn = rnd.get("roundName")
+    if isinstance(rn, dict):
+        return str(rn.get("name") or rn.get("shortName") or "")
+    if isinstance(rn, str):
+        return rn
+    return ""
+
+
 def _round_from_slots(slots: list[dict], name_hint: str, live_ids: set[str]) -> BracketRound:
     matchups = []
     for s in slots or []:
@@ -1551,8 +1589,11 @@ def _bracket_from_json(j: dict, live_ids: set[str]) -> Optional[Bracket]:
     if "SingleElimination" in kind_type:
         upper = []
         for rnd in j.get("rounds") or []:
-            rn = rnd.get("roundName") if isinstance(rnd.get("roundName"), dict) else {}
-            br = _round_from_slots(rnd.get("slots") or [], rn.get("name") or "", live_ids)
+            if not isinstance(rnd, dict):
+                continue
+            slots = _extract_slots(rnd)
+            hint = _extract_round_name(rnd)
+            br = _round_from_slots(slots, hint, live_ids)
             if br.matchups:
                 upper.append(br)
         return Bracket("single", name or "Playoffs", upper=upper) if upper else None
@@ -1565,18 +1606,21 @@ def _bracket_from_json(j: dict, live_ids: set[str]) -> Optional[Bracket]:
         if not isinstance(rnd, dict):
             continue
         used.add(key)
-        br = _round_from_slots(rnd.get("slots") or [], "", live_ids)
+        slots = _extract_slots(rnd)
+        hint = _extract_round_name(rnd)
+        br = _round_from_slots(slots, hint, live_ids)
         br.name = cn
         if not br.matchups:
             continue
         (up if grp == "u" else lo if grp == "l" else fi).append(br)
     for key, val in j.items():
-        if key in used or not isinstance(val, dict) or "slots" not in val:
+        if key in used or not isinstance(val, dict):
             continue
-        rn = val.get("roundName")
-        rn = rn if isinstance(rn, dict) else {}
-        hint = rn.get("name") or key
-        br = _round_from_slots(val.get("slots") or [], hint, live_ids)
+        slots = _extract_slots(val)
+        if not slots:
+            continue
+        hint = _extract_round_name(val) or key
+        br = _round_from_slots(slots, hint, live_ids)
         if not br.matchups:
             continue
         grp = "u" if key.startswith("upper") else "l" if key.startswith("lower") else "f"
