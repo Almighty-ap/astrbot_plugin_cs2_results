@@ -342,8 +342,54 @@ def test_start_x11vnc_launches_temporary_server(
     assert calls
     assert calls[0][0] == "/usr/bin/x11vnc"
     assert calls[0][1:3] == ["-display", ":99"]
+    assert "-localhost" in calls[0]
     assert "-forever" in calls[0]
     assert "-shared" in calls[0]
+
+
+def test_get_container_ip_and_vnc_tunnel_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetcher_module._CACHED_CONTAINER_IP = None
+    dns_calls = []
+
+    def fake_gethostbyname(hostname: str) -> str:
+        dns_calls.append(hostname)
+        return "172.18.0.5"
+
+    monkeypatch.setattr(fetcher_module.socket, "gethostbyname", fake_gethostbyname)
+    monkeypatch.setattr(fetcher_module.socket, "gethostname", lambda: "astrbot-container")
+
+    async def run() -> None:
+        ip1 = await fetcher_module.get_container_ip()
+        assert ip1 == "172.18.0.5"
+        assert len(dns_calls) == 1
+
+        # Second call should hit memory cache without querying DNS
+        ip2 = await fetcher_module.get_container_ip()
+        assert ip2 == "172.18.0.5"
+        assert len(dns_calls) == 1
+
+        fetcher = Fetcher(Config(cs2_request_min_gap=0))
+        target = await fetcher._vnc_tunnel_target()
+        assert target == "172.18.0.5:5900"
+
+    asyncio.run(run())
+
+
+def test_manual_verify_missing_browser_error_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetcher = Fetcher(Config(cs2_request_min_gap=0))
+
+    async def fake_start() -> None:
+        raise RuntimeError("Executable doesn't exist at /root/.cache/ms-playwright/chromium")
+
+    monkeypatch.setattr(fetcher, "start", fake_start)
+    res = asyncio.run(fetcher.manual_verify())
+    assert not res.ok
+    assert "未安装 Chromium 浏览器内核" in res.message
+    assert "playwright install chromium" in res.message
 
 
 def test_start_novnc_launches_websockify_bridge(

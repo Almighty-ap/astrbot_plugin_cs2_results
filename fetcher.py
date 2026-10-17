@@ -63,6 +63,20 @@ _ASSET_HOSTS = frozenset({"hltv.org", "www.hltv.org", "img-cdn.hltv.org"})
 _STORAGE_STATE_FILENAME = "playwright_storage_state.json"
 _VNC_PORT = 5900
 _NOVNC_PORT = 6080
+_CACHED_CONTAINER_IP: str | None = None
+
+
+async def get_container_ip() -> str | None:
+    """Return the cached IP address of the local container/host asynchronously."""
+    global _CACHED_CONTAINER_IP
+    if _CACHED_CONTAINER_IP is not None:
+        return _CACHED_CONTAINER_IP
+    try:
+        hostname = socket.gethostname()
+        _CACHED_CONTAINER_IP = await asyncio.to_thread(socket.gethostbyname, hostname)
+    except OSError:
+        _CACHED_CONTAINER_IP = None
+    return _CACHED_CONTAINER_IP
 
 
 @dataclass(frozen=True, slots=True)
@@ -816,8 +830,13 @@ class Fetcher:
             except asyncio.CancelledError:
                 await pw.stop()
                 raise
-            except Exception:
+            except Exception as exc:
                 await pw.stop()
+                if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc):
+                    logger.error(
+                        "[cs2] Chromium 抓取内核未安装或路径不存在。"
+                        "请在服务器/容器终端执行: playwright install chromium"
+                    )
                 raise
 
             try:
@@ -979,6 +998,7 @@ class Fetcher:
                 binary,
                 "-display",
                 display,
+                "-localhost",
                 "-forever",
                 "-shared",
                 "-rfbport",
@@ -1142,11 +1162,8 @@ class Fetcher:
             return False
         return any(cookie.get("name") == "cf_clearance" for cookie in cookies)
 
-    def _vnc_tunnel_target(self) -> str | None:
-        try:
-            host = socket.gethostbyname(socket.gethostname())
-        except OSError:
-            return None
+    async def _vnc_tunnel_target(self) -> str | None:
+        host = await get_container_ip()
         return f"{host}:{_VNC_PORT}" if host else None
 
     async def manual_verify(self) -> ManualVerifyResult:
@@ -1192,11 +1209,11 @@ class Fetcher:
                                 False,
                                 "等待人工验证超时,HLTV 仍未放行",
                                 display=display,
-                                tunnel_target=self._vnc_tunnel_target(),
+                                tunnel_target=await self._vnc_tunnel_target(),
                             )
                         has_clearance = await self._has_cf_clearance()
                         await self._save_storage_state()
-                        target = self._vnc_tunnel_target()
+                        target = await self._vnc_tunnel_target()
                         return ManualVerifyResult(
                             True,
                             (
@@ -1214,11 +1231,18 @@ class Fetcher:
                 raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[cs2] 人工验证失败: {exc}")
+                if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc):
+                    msg = (
+                        "未安装 Chromium 浏览器内核,无法打开验证窗口。"
+                        "请在服务器/容器终端执行: playwright install chromium"
+                    )
+                else:
+                    msg = f"人工验证启动失败:{exc}"
                 return ManualVerifyResult(
                     False,
-                    f"人工验证启动失败:{exc}",
+                    msg,
                     display=display,
-                    tunnel_target=self._vnc_tunnel_target(),
+                    tunnel_target=await self._vnc_tunnel_target(),
                 )
             finally:
                 self._manual_verify_requested = False

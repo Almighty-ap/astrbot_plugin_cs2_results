@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-import socket
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
@@ -2492,10 +2491,8 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
 
 
 async def _handle_manual_verify() -> None:
-    try:
-        container_ip = socket.gethostbyname(socket.gethostname())
-    except OSError:
-        container_ip = "<AstrBot容器IP>"
+    host = await fetcher.get_container_ip()
+    container_ip = host or "<AstrBot容器IP>"
     vnc_target = f"{container_ip}:5900"
     novnc_target = f"{container_ip}:6080"
     ssh_host = cfg.cs2_vnc_ssh_host.strip() or "<VPS_IP>"
