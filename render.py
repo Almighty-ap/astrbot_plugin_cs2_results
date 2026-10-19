@@ -1477,7 +1477,7 @@ def _round_day_columns(rnd: BracketRound) -> Optional[str]:
     for head, base, ms in groups:
         cells = "".join(_bracket_cell(m, compact=True, base_ms=base) for m in ms)
         cols += (
-            f'<div style="flex:1;min-width:0;display:flex;flex-direction:column;">'
+            f'<div style="flex:1;min-width:176px;display:flex;flex-direction:column;">'
             f'<div style="font-size:12.5px;font-weight:600;color:{SUB};text-align:center;'
             f'padding-bottom:10px;border-bottom:1px solid {BORDER_S};margin-bottom:12px;'
             f'white-space:nowrap;">{_esc(head)}</div>'
@@ -1499,7 +1499,7 @@ def _round_grid(rnd: BracketRound) -> str:
         f'<div style="flex:1;display:flex;flex-direction:column;">'
         f'<div style="font-size:13px;font-weight:700;color:{MUTE};letter-spacing:0.3px;'
         f'text-align:center;padding-bottom:12px;">{_esc(rnd.name)}</div>'
-        f'<div style="display:grid;grid-template-columns:repeat({cols},1fr);gap:12px 16px;">'
+        f'<div style="display:grid;grid-template-columns:repeat({cols},minmax(186px,1fr));gap:12px 16px;">'
         f"{cells}</div></div>"
     )
 
@@ -1536,7 +1536,7 @@ def _bracket_row(
         if tier
         else ""
     )
-    return f'{tier_html}<div style="display:flex;gap:16px;align-items:stretch;">{cols}</div>'
+    return f'{tier_html}<div style="flex:1;display:flex;gap:16px;align-items:stretch;">{cols}</div>'
 
 
 def _bracket_summary(rounds: list[BracketRound], lead: str) -> str:
@@ -1622,6 +1622,66 @@ def _is_group_bracket(b: Bracket) -> bool:
     return bool(re.match(r"group\b", name, re.I)) or "小组" in name
 
 
+def _known_rounds(
+    rounds: list[BracketRound], group_like: bool = False
+) -> list[BracketRound]:
+    rs = [r for r in rounds if not r.is_pending()]
+    if group_like:
+        rs = [
+            r
+            for r in rs
+            if any(
+                mu.finished or mu.live or (mu.team1.known and mu.team2.known)
+                for mu in r.matchups
+            )
+        ]
+    return rs
+
+
+def _bracket_row_cols(
+    rounds: list[BracketRound], third: Optional[BracketRound] = None
+) -> int:
+    if not rounds:
+        return 0
+    if len(rounds) == 1 and len(rounds[0].matchups) >= _ROUND_GRID_MIN:
+        days = cluster_match_days(rounds[0].matchups)
+        rest = [m for m in rounds[0].matchups if not m.start_unix]
+        n = len(days) + (1 if rest else 0)
+        cols = n if 2 <= n <= 5 else (3 if len(rounds[0].matchups) >= 9 else 2)
+        return cols + (1 if third else 0)
+    return len(rounds)
+
+
+def _can_pair_lower_finals(
+    lo: list[BracketRound], fi: list[BracketRound]
+) -> bool:
+    return (
+        len(lo) == 1
+        and len(fi) == 1
+        and len(lo[0].matchups) < _ROUND_GRID_MIN
+        and len(fi[0].matchups) < _ROUND_GRID_MIN
+    )
+
+
+def _bracket_max_cols(
+    b: Bracket, third: Optional[BracketRound] = None, group_like: bool = False
+) -> int:
+    if b.is_pending():
+        return 1
+    if b.kind == "single":
+        return _bracket_row_cols(_known_rounds(b.upper, group_like), third)
+    up = _known_rounds(b.upper, group_like)
+    lo = _known_rounds(b.lower, group_like)
+    fi = _known_rounds(b.finals, group_like)
+    if _can_pair_lower_finals(lo, fi):
+        return max(_bracket_row_cols(up), 2)
+    return max(
+        _bracket_row_cols(up),
+        _bracket_row_cols(lo),
+        _bracket_row_cols(fi, third),
+    )
+
+
 def _bracket_tree(
     b: Bracket, third_live: Optional[BracketRound] = None, group_like: bool = False
 ) -> str:
@@ -1631,27 +1691,34 @@ def _bracket_tree(
     **实际不会打**的收尾轮次(胜者组决赛/季军赛/总决赛等,小组只打到出线为止),
     这些轮次要么全待定、要么被 /matches 排期回填错挂上主赛段的时间,展示纯属冗余。
     """
-
-    def known(rounds: list[BracketRound]) -> list[BracketRound]:
-        rs = [r for r in rounds if not r.is_pending()]
-        if group_like:
-            rs = [
-                r
-                for r in rs
-                if any(
-                    mu.finished or mu.live or (mu.team1.known and mu.team2.known)
-                    for mu in r.matchups
-                )
-            ]
-        return rs
-
     if b.kind == "single":
-        return _bracket_row(known(b.upper), third=third_live)
+        return _bracket_row(_known_rounds(b.upper, group_like), third=third_live)
+    up = _known_rounds(b.upper, group_like)
+    lo = _known_rounds(b.lower, group_like)
+    fi = _known_rounds(b.finals, group_like)
+    # 4 队 GSL 双败小组常见形态:胜者组 2 轮,而败者组与决赛阶段各只有 1 轮。
+    # 将败者组与决赛阶段左右并排在同一行,与上方胜者组两列严格对齐,大幅缩短面板高度。
+    if _can_pair_lower_finals(lo, fi):
+        parts = []
+        if up:
+            parts.append(_bracket_row(up, "胜者组 Upper Bracket"))
+        left_col = (
+            f'<div style="flex:1;min-width:186px;display:flex;flex-direction:column;">'
+            f'{_bracket_row(lo, "败者组 Lower Bracket")}</div>'
+        )
+        right_col = (
+            f'<div style="flex:1;min-width:186px;display:flex;flex-direction:column;">'
+            f'{_bracket_row(fi, "决赛阶段 Finals", third=third_live)}</div>'
+        )
+        parts.append(
+            f'<div style="display:flex;gap:16px;align-items:stretch;">{left_col}{right_col}</div>'
+        )
+        return '<div style="display:flex;flex-direction:column;gap:26px;">' + "".join(parts) + "</div>"
     # 季军赛挂到最后一个非空分组(通常是决赛阶段)的末列下
     tiers = [
-        (known(b.upper), "胜者组 Upper Bracket"),
-        (known(b.lower), "败者组 Lower Bracket"),
-        (known(b.finals), "决赛阶段 Finals"),
+        (up, "胜者组 Upper Bracket"),
+        (lo, "败者组 Lower Bracket"),
+        (fi, "决赛阶段 Finals"),
     ]
     last_idx = max((i for i, (rs, _) in enumerate(tiers) if rs), default=-1)
     parts = []
@@ -1715,19 +1782,21 @@ def _group_panel(b: Bracket) -> str:
 
 
 def _group_stage_section(groups: list[Bracket]) -> str:
-    """小组赛总节:2 组左右并列、3-4 组 2×2 网格(更多组继续两列往下排),
-    每组一个独立面板,组间界限一目了然;只有 1 组时面板独占整行。"""
+    """小组赛总节:组内 ≤2 列时 2 组左右并列(或 2×2 网格);组内 ≥3 列(如 8 队大组)
+    或只有 1 组时单列纵向排布,防止多列对阵树撑破半宽面板。"""
     kinds = {g.kind for g in groups}
     kind_cn = (
         "双败淘汰" if kinds == {"double"} else "单败淘汰" if kinds == {"single"} else ""
     )
     caption = " · ".join(x for x in (f"{len(groups)} 个小组", kind_cn) if x)
     panels = "".join(_group_panel(g) for g in groups)
-    if len(groups) == 1:
-        grid = panels
+    max_cols = max((_bracket_max_cols(g, group_like=True) for g in groups), default=1)
+    if len(groups) == 1 or max_cols >= 3:
+        grid = f'<div style="display:flex;flex-direction:column;gap:20px;">{panels}</div>'
     else:
+        panel_min = 434 if max_cols >= 2 else 260
         grid = (
-            f'<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));'
+            f'<div style="display:grid;grid-template-columns:repeat(2,minmax({panel_min}px,1fr));'
             f'gap:20px;align-items:start;">{panels}</div>'
         )
     return _section("小组赛", caption) + f'<div style="margin-top:20px;">{grid}</div>'
@@ -1940,7 +2009,7 @@ def _swiss_section(sw: SwissStage) -> str:
         else:
             head_col, head_txt = FAINT2, f"第 {i + 1} 轮"
         cols += (
-            f'<div style="flex:1;min-width:0;display:flex;flex-direction:column;">'
+            f'<div style="flex:1;min-width:176px;display:flex;flex-direction:column;">'
             f'<div style="font-size:12.5px;font-weight:700;color:{head_col};text-align:center;'
             f'letter-spacing:0.3px;padding-bottom:16px;">{head_txt}</div>'
             f"{middle}</div>"
@@ -1952,6 +2021,58 @@ def _swiss_section(sw: SwissStage) -> str:
         _section("小组赛", "瑞士轮 Swiss Stage")
         + f'<div style="margin-top:18px;display:flex;gap:14px;align-items:stretch;">{cols}</div>'
     )
+
+
+def _swiss_active_cols(sw: Optional[SwissStage]) -> int:
+    if not sw:
+        return 0
+    n = 0
+    for col in sw.columns:
+        if not any(_cell_has_known(c) for c in col.cells):
+            continue
+        has_adv = any(c.kind == "advanced" and c.teams for c in col.cells)
+        has_elim = any(c.kind == "eliminated" and c.teams for c in col.cells)
+        has_pool = any(c.kind == "normal" and (c.matchups or c.teams) for c in col.cells)
+        if has_adv or has_elim or has_pool:
+            n += 1
+    return n
+
+
+def _schedule_card_min_width(
+    sched: EventSchedule,
+    live_br: list[Bracket],
+    thirds: dict[int, BracketRound],
+    group_br: list[Bracket],
+) -> str:
+    """根据赛程中最大并列列数动态计算卡片 min_width,防止多列对阵在默认窄视口下溢出。"""
+    req_content = 0
+    for b in live_br:
+        t_round = thirds.get(id(b))
+        t_live = t_round if t_round is not None and not t_round.is_pending() else None
+        cols = _bracket_max_cols(b, t_live, group_like=False)
+        if cols >= 3:
+            req_content = max(req_content, cols * 204 + (cols - 1) * 16)
+    if group_br:
+        g_cols = max((_bracket_max_cols(g, group_like=True) for g in group_br), default=1)
+        if len(group_br) >= 2 and g_cols == 2:
+            req_content = max(req_content, 984)  # 1080px 宽屏卡,容纳 2×2 列小组并排
+        elif len(group_br) >= 2 and g_cols == 1:
+            req_content = max(req_content, 584)
+        elif g_cols >= 3:
+            req_content = max(req_content, g_cols * 204 + (g_cols - 1) * 16 + 46)
+    s_cols = _swiss_active_cols(sched.swiss)
+    if s_cols >= 5:
+        req_content = max(req_content, 984)
+    elif s_cols == 4:
+        req_content = max(req_content, 784)
+    elif s_cols == 3:
+        req_content = max(req_content, 584)
+    if sched.groups and len(sched.groups) >= 2:
+        req_content = max(req_content, 640)
+    if req_content <= 0:
+        return ""
+    card_w = min(1200, max(680, req_content + 96))
+    return f"{card_w}px"
 
 
 # ———————————————————— 循环赛积分表(兜底)————————————————————
@@ -2076,7 +2197,8 @@ def _build_event_schedule_html(sched: EventSchedule, when_text: str) -> str:
    <div style="font-size:14px;color:{FAINT};">{_esc(when_text)}</div>
    <div style="font-size:14px;color:{MUTE};">HLTV · <span style="color:{ACCENT};font-weight:600;">hltv.org</span></div>
   </div>"""
-    return _shell(body, "44px 48px 40px")
+    min_w = _schedule_card_min_width(sched, live_br, thirds, group_br)
+    return _shell(body, "44px 48px 40px", min_width=min_w)
 
 
 async def render_event_schedule_card(

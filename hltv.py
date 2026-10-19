@@ -1256,12 +1256,29 @@ def _slot_team(ts: Optional[dict]) -> SlotTeam:
     return SlotTeam(desc=_norm(ts.get("description") or ""))  # TextDescription/未定 → 占位
 
 
+def _extract_matchup_score(
+    mu: dict, live: bool
+) -> tuple[Optional[int], Optional[int], Optional[str], bool]:
+    result = mu.get("result")
+    result = result if isinstance(result, dict) else None
+    ms = (result.get("matchScore") if result else None) or mu.get("score")
+    ms = ms if isinstance(ms, dict) else None
+    if ms and (ms.get("team1Score") is not None or ms.get("team2Score") is not None):
+        s1, s2 = ms.get("team1Score"), ms.get("team2Score")
+        if "team1Winner" in ms and ms.get("team1Winner") is not None:
+            winner = "team1" if ms.get("team1Winner") else "team2"
+        elif s1 is not None and s2 is not None and s1 != s2:
+            winner = "team1" if s1 > s2 else "team2"
+        else:
+            winner = None
+        return s1, s2, winner, not live
+    return None, None, None, False
+
+
 def _matchup(mu: Optional[dict], live_ids: set[str]) -> Matchup:
     mu = mu if isinstance(mu, dict) else {}
     match = mu.get("match")
     match = match if isinstance(match, dict) else {}
-    result = mu.get("result")
-    result = result if isinstance(result, dict) else None
     t1 = _slot_team(mu.get("team1"))
     t2 = _slot_team(mu.get("team2"))
     mid = match.get("matchId")
@@ -1278,16 +1295,8 @@ def _matchup(mu: Optional[dict], live_ids: set[str]) -> Matchup:
         bo = int(match.get("numberOfMaps") or 0)
     except (TypeError, ValueError):
         bo = 0
-    s1 = s2 = None
-    winner = None
-    finished = False
     live = bool(mid and mid in live_ids)
-    ms = result.get("matchScore") if result else None
-    ms = ms if isinstance(ms, dict) else None
-    if ms:
-        s1, s2 = ms.get("team1Score"), ms.get("team2Score")
-        winner = "team1" if ms.get("team1Winner") else "team2"
-        finished = not live  # 结果已入库即完赛;若同时在直播列表里则以直播为准
+    s1, s2, winner, finished = _extract_matchup_score(mu, live)
     return Matchup(mid, url, start, bo, t1, t2, s1, s2, winner, finished, live)
 
 
@@ -1363,6 +1372,8 @@ def parse_swiss(t: HTMLParser, live_ids: set[str]) -> Optional[SwissStage]:
                             if purl.startswith("/")
                             else (purl or (f"{BASE}/matches/{mid}/x" if mid else ""))
                         )
+                        live = bool(mid and mid in live_ids)
+                        s1, s2, winner, finished = _extract_matchup_score(data, live)
                         matchup = Matchup(
                             mid,
                             url,
@@ -1370,7 +1381,11 @@ def parse_swiss(t: HTMLParser, live_ids: set[str]) -> Optional[SwissStage]:
                             bo,
                             teams[0],
                             teams[1],
-                            live=bool(mid and mid in live_ids),
+                            s1,
+                            s2,
+                            winner,
+                            finished,
+                            live=live,
                         )
                     cell.matchups.append(matchup)
                 else:

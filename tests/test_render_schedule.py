@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from astrbot_plugin_cs2_results import render
 from astrbot_plugin_cs2_results.hltv import (
+    Bracket,
+    BracketRound,
     EventSchedule,
     Matchup,
     PlayerProfile,
@@ -206,3 +208,89 @@ def test_build_ranking_html_renders_hltv_and_vrs(monkeypatch: pytest.MonkeyPatch
 
     html_empty = render.build_ranking_html([], {"source": "hltv", "total_teams": 0}, "2026-10-12 12:00")
     assert "暂无本地排名数据" in html_empty
+
+
+def _sample_mu(m_id: str, t1: str, t2: str) -> Matchup:
+    return Matchup(m_id, "", 1_792_000_000_000, 3, SlotTeam(t1), SlotTeam(t2))
+
+
+def test_gsl_group_brackets_widen_card_and_pair_lower_finals() -> None:
+    def make_gsl_group(name: str) -> Bracket:
+        return Bracket(
+            kind="double",
+            name=name,
+            upper=[
+                BracketRound("胜者组首轮", [_sample_mu("1", "Falcons", "NIP"), _sample_mu("2", "9z", "Aurora")]),
+                BracketRound("胜者组决赛", [_sample_mu("3", "Falcons", "9z")]),
+            ],
+            lower=[
+                BracketRound("败者组第一轮", [_sample_mu("4", "NIP", "Aurora")]),
+            ],
+            finals=[
+                BracketRound("季军赛", [_sample_mu("5", "9z", "Aurora")]),
+            ],
+        )
+
+    playoffs = Bracket(
+        kind="single",
+        name="Single Elimination Bracket",
+        upper=[
+            BracketRound("半决赛", [_sample_mu("6", "Falcons", "BETBOOM"), _sample_mu("7", "FURIA", "Aurora")]),
+            BracketRound("总决赛", [_sample_mu("8", "BETBOOM", "FURIA")]),
+        ],
+    )
+    schedule = EventSchedule(
+        event_id="9100",
+        name="Thunderpick World Championship 2026",
+        logo=None,
+        date_text="Oct 14th - Oct 18th 2026",
+        prize="$1,000,000",
+        location="Malta",
+        status="Finished",
+        brackets=[playoffs, make_gsl_group("Group A"), make_gsl_group("Group B")],
+    )
+
+    html = render.build_event_schedule_html(schedule, "2026-10-19 09:26")
+
+    assert "width:1080px;min-width:1080px;" in html
+    assert "repeat(2,minmax(434px,1fr))" in html
+    assert "repeat(2,minmax(0,1fr))" not in html
+    assert "败者组 Lower Bracket" in html
+    assert "决赛阶段 Finals" in html
+
+
+def test_deep_group_brackets_stack_vertically() -> None:
+    def make_deep_group(name: str) -> Bracket:
+        return Bracket(
+            kind="double",
+            name=name,
+            upper=[
+                BracketRound("胜者组八强", [_sample_mu("1", "Vitality", "Astralis")]),
+                BracketRound("胜者组半决赛", [_sample_mu("2", "Vitality", "MOUZ")]),
+                BracketRound("胜者组决赛", [_sample_mu("3", "Vitality", "Spirit")]),
+            ],
+            lower=[
+                BracketRound("败者组第一轮", [_sample_mu("4", "Astralis", "FaZe")]),
+                BracketRound("败者组半决赛", [_sample_mu("5", "MOUZ", "FaZe")]),
+            ],
+            finals=[
+                BracketRound("败者组决赛", [_sample_mu("6", "Spirit", "FaZe")]),
+            ],
+        )
+
+    schedule = EventSchedule(
+        event_id="9101",
+        name="IEM Katowice",
+        logo=None,
+        date_text="Feb 1st - Feb 9th",
+        prize="$1,000,000",
+        location="Poland",
+        status="Ongoing",
+        brackets=[make_deep_group("Group A"), make_deep_group("Group B")],
+    )
+
+    html = render.build_event_schedule_html(schedule, "DEBUG")
+
+    assert "repeat(2,minmax(" not in html
+    assert "width:786px;min-width:786px;" in html
+

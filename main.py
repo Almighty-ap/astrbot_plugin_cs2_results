@@ -3084,27 +3084,62 @@ def _iter_matchups(sched: hltv.EventSchedule):
 _INFLIGHT_SCHEDULES: dict[str, asyncio.Future[bytes]] = {}
 
 
+async def _recent_finished_event_id(*, priority: FetchPriority = "user") -> str | None:
+    """无正在进行的顶级赛事时,从 /results 找最近刚结束(最新产生赛果)的一届白名单赛事 id。"""
+    wl = store.whitelist_view()
+    if not wl:
+        return None
+    excl = set(cfg.cs2_force_exclude_events)
+    rhtml = (
+        store.cache_get(hltv.URL_RESULTS, cfg.cs2_stale_results)
+        or store.cache_get(hltv.URL_RESULTS, 86400 * 7)
+    )
+    if not rhtml:
+        rhtml = await fetcher.get_html(
+            hltv.URL_RESULTS,
+            wait_selector=".result-con",
+            max_age=cfg.cs2_cache_results_ttl,
+            stale_age=cfg.cs2_stale_results,
+            priority=priority,
+        )
+    if rhtml:
+        for rm in hltv.parse_results(rhtml):
+            eid = _wl_id_for_result(rm)
+            if eid and eid in wl and eid not in excl:
+                return eid
+    return None
+
+
 async def _handle_bracket(arg: str | None) -> None:
     wl = store.whitelist_view()
-    ongoing = await _ongoing_event_ids()  # 只在"正在进行(#FEATURED)"的赛事里选/匹配
+    ongoing = await _ongoing_event_ids()  # 优先在"正在进行(#FEATURED)"的赛事里选/匹配
+    excl = set(cfg.cs2_force_exclude_events)
     # 1) 确定目标赛事
     if arg:
         al = arg.lower().strip()
-        pool = {eid: v for eid, v in wl.items() if eid in ongoing}
-        # 精确匹配(id / slug / 名称)优先;否则按子串,但要求 ≥2 字符,避免单字乱撞
-        matches = [
-            (eid, v)
-            for eid, v in pool.items()
-            if al == eid
-            or al == (v.get("slug") or "").lower()
-            or al == (v.get("name") or "").lower()
-        ]
-        if not matches and len(al) >= 2:
-            matches = [
+        ongoing_pool = {eid: v for eid, v in wl.items() if eid in ongoing}
+        all_pool = {eid: v for eid, v in wl.items() if eid not in excl}
+
+        def _match_pool(pool: dict[str, dict]) -> list[tuple[str, dict]]:
+            # 精确匹配(id / slug / 名称)优先;否则按子串,但要求 ≥2 字符,避免单字乱撞
+            exact = [
                 (eid, v)
                 for eid, v in pool.items()
-                if al in (v.get("slug") or "").lower() or al in (v.get("name") or "").lower()
+                if al == eid
+                or al == (v.get("slug") or "").lower()
+                or al == (v.get("name") or "").lower()
             ]
+            if exact:
+                return exact
+            if len(al) >= 2:
+                return [
+                    (eid, v)
+                    for eid, v in pool.items()
+                    if al in (v.get("slug") or "").lower() or al in (v.get("name") or "").lower()
+                ]
+            return []
+
+        matches = _match_pool(ongoing_pool) or _match_pool(all_pool)
         if not matches:
             if ongoing:
                 names = "、".join((wl.get(e, {}).get("name") or e) for e in ongoing)
@@ -3116,13 +3151,16 @@ async def _handle_bracket(arg: str | None) -> None:
         if len(matches) > 1:
             # 都在进行中,子串仍撞多个 → 让用户写具体些
             names = "、".join(v.get("name", "") for _, v in matches[:6])
-            await cs2.finish(f"「{arg}」匹配到多个正在进行的赛事:{names}。请写得更具体。")
+            await cs2.finish(f"「{arg}」匹配到多个赛事:{names}。请写得更具体。")
         eid, v = matches[0]
         slug, name = v.get("slug", ""), v.get("name", "")
     else:
         if not ongoing:
-            await cs2.finish("当前没有正在进行的顶级赛事 🌙\n想看未来赛程可用 /cs2 赛事。")
-        if len(ongoing) == 1:
+            recent_eid = await _recent_finished_event_id()
+            if not recent_eid:
+                await cs2.finish("当前没有正在进行的顶级赛事 🌙\n想看未来赛程可用 /cs2 赛事。")
+            eid = recent_eid
+        elif len(ongoing) == 1:
             eid = next(iter(ongoing))
         else:
             # 多届同时进行时,按今日活跃度(直播/今日比赛多)排序取最活跃的一届;

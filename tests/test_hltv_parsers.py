@@ -729,6 +729,12 @@ class HltvParserDegradedInputContractTests(unittest.TestCase):
                 "slot1": {
                     "matchup": {
                         "match": {"matchId": 2399420, "numberOfMaps": 3},
+                        "resultId": {"resultId": 132134},
+                        "score": {
+                            "team1Score": 1,
+                            "team2Score": 2,
+                            "team1Winner": False,
+                        },
                         "team1": {"name": "Vitality"},
                         "team2": {"name": "G2"},
                     }
@@ -752,7 +758,11 @@ class HltvParserDegradedInputContractTests(unittest.TestCase):
         self.assertEqual(len(bracket.upper), 1)
         self.assertEqual(bracket.upper[0].name, "胜者组首轮")
         self.assertEqual(len(bracket.upper[0].matchups), 1)
-        self.assertEqual(bracket.upper[0].matchups[0].team1.name, "Vitality")
+        mu0 = bracket.upper[0].matchups[0]
+        self.assertEqual(mu0.team1.name, "Vitality")
+        self.assertEqual((mu0.score1, mu0.score2), (1, 2))
+        self.assertEqual(mu0.winner, "team2")
+        self.assertTrue(mu0.finished)
         self.assertEqual(len(bracket.finals), 1)
         self.assertEqual(bracket.finals[0].name, "总决赛")
 

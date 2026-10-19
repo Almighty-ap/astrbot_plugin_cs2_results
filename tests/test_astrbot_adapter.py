@@ -688,3 +688,51 @@ def test_handle_team_detail_fallbacks_to_live_search(
     assert any("正在查询 FaZe 的阵容与排名" in m for m in sent_messages)
     assert finished_messages[-1] == b"fake-team-card"
 
+
+def test_recent_finished_event_id_picks_latest_whitelist_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main, "cfg", main.Config(), raising=False)
+    monkeypatch.setattr(
+        main.store,
+        "whitelist_view",
+        lambda: {
+            "8932": {
+                "name": "Thunderpick World Championship 2026",
+                "slug": "thunderpick-world-championship-2026",
+            }
+        },
+    )
+    monkeypatch.setattr(main.store, "cache_get", lambda _url, _age: "<html>results</html>")
+    monkeypatch.setattr(
+        main.hltv,
+        "parse_results",
+        lambda _html: [
+            main.hltv.ScheduledMatch(
+                "1",
+                None,
+                "CCT Europe",
+                None,
+                "A",
+                "B",
+                1000,
+                "bo3",
+                url="https://www.hltv.org/matches/1/a-vs-b-cct",
+            ),
+            main.hltv.ScheduledMatch(
+                "2",
+                None,
+                "Thunderpick World Championship 2026",
+                None,
+                "FURIA",
+                "BETBOOM",
+                900,
+                "bo5",
+                url="https://www.hltv.org/matches/2/furia-vs-betboom-thunderpick-world-championship-2026",
+            ),
+        ],
+    )
+
+    assert asyncio.run(main._recent_finished_event_id()) == "8932"
+
+
