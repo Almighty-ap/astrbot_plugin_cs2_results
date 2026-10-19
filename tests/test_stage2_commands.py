@@ -17,7 +17,6 @@ def test_stage2_command_routing(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     h2h_calls: list[tuple[str, str]] = []
-    bp_calls: list[str | None] = []
     mode_calls: list[str] = []
     mute_calls: list[str] = []
     morning_calls: list[str] = []
@@ -25,10 +24,6 @@ def test_stage2_command_routing(monkeypatch: pytest.MonkeyPatch) -> None:
 
     async def fake_h2h(t1: str, t2: str) -> None:
         h2h_calls.append((t1, t2))
-        raise main._CommandFinished
-
-    async def fake_bp(arg: str | None) -> None:
-        bp_calls.append(arg)
         raise main._CommandFinished
 
     async def fake_mode(ev: Any, mode: str) -> None:
@@ -50,7 +45,6 @@ def test_stage2_command_routing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main, "_cooldown_left", lambda _event: 0)
     monkeypatch.setattr(main, "_admin_ctx", lambda _event: False)
     monkeypatch.setattr(main, "_handle_h2h", fake_h2h)
-    monkeypatch.setattr(main, "_handle_bp", fake_bp)
     monkeypatch.setattr(main, "_handle_group_mode", fake_mode)
     monkeypatch.setattr(main, "_handle_group_mute", fake_mute)
     monkeypatch.setattr(main, "_handle_group_morning_report", fake_morning)
@@ -60,9 +54,6 @@ def test_stage2_command_routing(monkeypatch: pytest.MonkeyPatch) -> None:
         ("交手 Vitality Spirit", h2h_calls, [("Vitality", "Spirit")]),
         ("h2h FaZe vs NaVi", h2h_calls, [("Vitality", "Spirit"), ("FaZe", "NaVi")]),
         ("对阵历史 MOUZ vs Astralis", h2h_calls, [("Vitality", "Spirit"), ("FaZe", "NaVi"), ("MOUZ", "Astralis")]),
-        ("bp", bp_calls, [None]),
-        ("bp Vitality", bp_calls, [None, "Vitality"]),
-        ("选图 2395449", bp_calls, [None, "Vitality", "2395449"]),
         ("模式 精简", mode_calls, ["精简"]),
         ("mode home", mode_calls, ["精简", "home"]),
         ("静音 23:00-08:00", mute_calls, ["23:00-08:00"]),

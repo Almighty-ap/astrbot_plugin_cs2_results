@@ -526,35 +526,6 @@ class HltvParserDegradedInputContractTests(unittest.TestCase):
         self.assertEqual(t.logo_url, "https://img-cdn.hltv.org/teamlogo/tyloo.png")
         self.assertEqual(t.players, [("19698", "JamYoung"), ("11271", "advent")])
 
-    def test_parse_veto_steps(self) -> None:
-        html = """
-        <div class="veto-box"><div class="preformatted-text">Best of 3 (LAN)</div></div>
-        <div class="veto-box">
-            1. FaZe removed Mirage
-            2. Spirit removed Ancient
-            3. FaZe picked Nuke
-            4. Spirit picked Dust2
-            5. FaZe removed Inferno
-            6. Spirit removed Train
-            7. Anubis was left over
-        </div>
-        """
-        steps = self.hltv.parse_veto_steps(self.hltv.tree(html), "FaZe", "Spirit")
-        self.assertEqual(len(steps), 7)
-        self.assertEqual(steps[0].action, "ban")
-        self.assertEqual(steps[0].team, "FaZe")
-        self.assertEqual(steps[0].map_name, "Mirage")
-        self.assertEqual(steps[0].map_cn, "荒漠迷城")
-
-        self.assertEqual(steps[2].action, "pick")
-        self.assertEqual(steps[2].team, "FaZe")
-        self.assertEqual(steps[2].map_name, "Nuke")
-        self.assertEqual(steps[2].map_cn, "核子危机")
-
-        self.assertEqual(steps[6].action, "decider")
-        self.assertEqual(steps[6].map_name, "Anubis")
-        self.assertEqual(steps[6].map_cn, "阿努比斯")
-
     def test_parse_h2h_results(self) -> None:
         html = """
         <div class="result-con" data-zonedgrouping-entry-unix="1720000000000">

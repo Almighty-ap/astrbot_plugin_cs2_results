@@ -6,9 +6,7 @@ from astrbot_plugin_cs2_results import render
 from astrbot_plugin_cs2_results.hltv import (
     H2HMatch,
     H2HSummary,
-    MatchDetail,
     ScheduledMatch,
-    VetoStep,
 )
 
 
@@ -85,39 +83,6 @@ class TestRenderStage2(unittest.TestCase):
         self.assertIn("展示最近 1 场历史交锋", html)
         self.assertIn("2024-07-03", html)
         self.assertIn("历史回退", html)
-
-    def test_bp_card_html(self) -> None:
-        match = MatchDetail(
-            match_id="12345",
-            url="https://example.com/12345",
-            event_name="Major 2026",
-            event_id="9000",
-            stage="Grand Final",
-            best_of=3,
-            is_lan=True,
-            team1="FaZe",
-            team2="Spirit",
-            team1_logo=None,
-            team2_logo=None,
-            event_logo=None,
-            maps=[],
-            veto_steps=[
-                VetoStep(step=1, team="FaZe", action="ban", map_name="Mirage", map_cn="荒漠迷城"),
-                VetoStep(step=2, team="Spirit", action="ban", map_name="Ancient", map_cn="远古遗迹"),
-                VetoStep(step=3, team="FaZe", action="pick", map_name="Nuke", map_cn="核子危机"),
-                VetoStep(step=4, team="Spirit", action="pick", map_name="Dust2", map_cn="炙热沙城 II"),
-                VetoStep(step=5, team="决胜图", action="decider", map_name="Anubis", map_cn="阿努比斯"),
-            ],
-        )
-        html = render.build_bp_html(match, "18:00 北京时间")
-        self.assertIn("地图 BP", html)
-        self.assertIn("FaZe", html)
-        self.assertIn("Spirit", html)
-        self.assertIn("BAN 禁用", html)
-        self.assertIn("PICK 选图", html)
-        self.assertIn("DECIDER 决胜", html)
-        self.assertIn("荒漠迷城", html)
-        self.assertIn("比赛地图顺序", html)
 
     def test_morning_report_card_html(self) -> None:
         yesterday = [

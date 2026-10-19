@@ -2917,7 +2917,6 @@ def build_help_html(admin: bool, when_text: str) -> str:
         + _cmd_row("/cs2 战况 <战队>", "查询指定战队近期比赛、当前比分与赛果", False)
         + _cmd_row("/cs2 排名 [vrs|hltv]", "查看战队世界排名 TOP 20 榜单 (Valve VRS / HLTV)", False)
         + _cmd_row("/cs2 交手 <队A> <队B>", "两队历史交手战绩 (CS2 时代战绩与历史全战绩)", False)
-        + _cmd_row("/cs2 bp [战队/比赛]", "查询近期比赛的赛前选图与禁图结果 (Pick/Ban)", False)
         + _cmd_row("/cs2 查询 选手 <名字>", "查看选手近期 Rating / K/D、角色分和 Major 荣誉", False)
         + _cmd_row("/cs2 查询 战队 <名字>", "查看阵容、世界 / VRS 排名和近期战绩", False)
         + _cmd_row("/cs2 赛程", "正在进行 / 即将开赛赛事的完整对阵 · 小组赛 / 淘汰赛,可指定其一", True)
@@ -3142,112 +3141,6 @@ def build_h2h_html(summary: H2HSummary, when_text: str) -> str:
 
 async def render_h2h_card(summary: H2HSummary, when_text: str) -> bytes:
     return await _render_png(build_h2h_html(summary, when_text))
-
-
-# ———————————————————— 赛前 BP (Pick & Ban) 选图 ————————————————————
-def build_bp_html(match: MatchDetail, when_text: str) -> str:
-    badge1 = _badge(match.team1_logo, match.team1, 56, DARK, CARD)
-    badge2 = _badge(match.team2_logo, match.team2, 56, DARK, CARD)
-    event_badge = _badge(match.event_logo, match.event_name, 56, DARK, CARD)
-
-    stage_part = f"{match.stage} · " if match.stage else ""
-    meta_info = f"{stage_part}BO{match.best_of} · {'LAN' if match.is_lan else '线上'}"
-
-    step_rows = ""
-    picked_maps: list[tuple[str, str, str]] = []
-    for st in match.veto_steps:
-        if st.action == "ban":
-            tag_html = f'<span style="background:{BAD_BG};color:{BAD};font-weight:700;padding:4px 10px;border-radius:6px;font-size:12.5px;letter-spacing:0.3px;">BAN 禁用</span>'
-            row_bg = "transparent"
-        elif st.action == "pick":
-            tag_html = f'<span style="background:{ACCENT_BG};color:{ACCENT_D};font-weight:700;padding:4px 10px;border-radius:6px;font-size:12.5px;letter-spacing:0.3px;">PICK 选图</span>'
-            row_bg = "rgba(196,112,78,0.06)"
-            picked_maps.append((st.map_name, st.map_cn, f"{st.team} 选图"))
-        else:
-            tag_html = f'<span style="background:{GOOD_BG};color:{GOOD};font-weight:700;padding:4px 10px;border-radius:6px;font-size:12.5px;letter-spacing:0.3px;">DECIDER 决胜</span>'
-            row_bg = "rgba(94,112,82,0.06)"
-            picked_maps.append((st.map_name, st.map_cn, "决胜图"))
-
-        step_rows += (
-            f'<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;'
-            f'background:{row_bg};border-radius:10px;margin-bottom:6px;border:1px solid {BORDER_S};">'
-            f' <div style="display:flex;align-items:center;gap:14px;">'
-            f'  <div style="width:26px;height:26px;border-radius:999px;background:{PANEL};border:1px solid {BORDER};'
-            f'       font-size:13px;font-weight:700;color:{MUTE};display:flex;align-items:center;justify-content:center;">{st.step}</div>'
-            f'  <div style="font-size:16px;font-weight:700;color:{INK};">{_esc(st.team)}</div>'
-            f' </div>'
-            f' <div style="display:flex;align-items:center;gap:16px;">'
-            f'  {tag_html}'
-            f'  <div style="min-width:130px;text-align:right;">'
-            f'   <span style="font-size:16px;font-weight:700;color:{INK};">{_esc(st.map_name)}</span>'
-            f'   <span style="font-size:13.5px;color:{MUTE};margin-left:4px;">({_esc(st.map_cn)})</span>'
-            f'  </div>'
-            f' </div>'
-            f'</div>'
-        )
-
-    if not step_rows:
-        step_rows = f'<div style="padding:20px;text-align:center;color:{FAINT};font-size:15px;">该场比赛尚未公布 BP 禁选数据</div>'
-
-    order_chips = ""
-    for idx, (m_en, m_cn, who) in enumerate(picked_maps):
-        order_chips += (
-            f'<div style="flex:1;background:white;padding:14px 16px;border-radius:12px;border:1px solid {BORDER};'
-            f'box-shadow:0 1px 3px rgba(0,0,0,0.03);">'
-            f' <div style="font-size:12px;font-weight:700;color:{ACCENT_D};letter-spacing:0.3px;">图 {idx + 1} · {_esc(who)}</div>'
-            f' <div style="font-size:18px;font-weight:700;color:{INK};margin-top:4px;">{_esc(m_en)}</div>'
-            f' <div style="font-size:13px;color:{MUTE};">{_esc(m_cn)}</div>'
-            f'</div>'
-        )
-    order_section = (
-        f'<div style="margin-top:24px;">'
-        f' <div style="font-size:17px;font-weight:700;color:{INK};letter-spacing:-0.2px;margin-bottom:12px;">比赛地图顺序</div>'
-        f' <div style="display:flex;gap:12px;">{order_chips}</div>'
-        f'</div>'
-        if order_chips
-        else ""
-    )
-
-    body = f"""
-  <div style="display:flex;align-items:center;justify-content:space-between;gap:18px;">
-   <div style="display:flex;align-items:center;gap:16px;min-width:0;">
-    {event_badge}
-    <div style="min-width:0;">
-     <div style="font-size:26px;font-weight:700;color:{INK};letter-spacing:-0.3px;line-height:1.1;">{_esc(match.event_name) or "CS2 比赛"}</div>
-     <div style="font-size:15px;color:{SUB};font-weight:500;margin-top:4px;">{meta_info}</div>
-    </div>
-   </div>
-   <div style="background:{ACCENT_BG};color:{ACCENT_D};font-size:14px;font-weight:700;padding:8px 16px;border-radius:999px;">地图 BP</div>
-  </div>
-
-  <div style="margin-top:22px;background:{PANEL};border:1px solid {BORDER};border-radius:16px;padding:20px 24px;display:flex;align-items:center;justify-content:space-between;">
-   <div style="display:flex;align-items:center;gap:14px;flex:1;min-width:0;">
-    {badge1}
-    <div style="font-size:22px;font-weight:700;color:{INK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(match.team1)}</div>
-   </div>
-   <div style="font-size:24px;font-weight:800;color:{ACCENT};padding:0 20px;">VS</div>
-   <div style="display:flex;align-items:center;justify-content:flex-end;gap:14px;flex:1;min-width:0;text-align:right;">
-    <div style="font-size:22px;font-weight:700;color:{INK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(match.team2)}</div>
-    {badge2}
-   </div>
-  </div>
-
-  <div style="margin-top:26px;">
-   <div style="font-size:17px;font-weight:700;color:{INK};letter-spacing:-0.2px;margin-bottom:12px;">BP 禁选流程 (Map Veto)</div>
-   {step_rows}
-  </div>
-
-  {order_section}
-
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-top:28px;padding-top:18px;border-top:1px solid {BORDER};">
-   <div style="font-size:14px;color:{FAINT};">{_esc(when_text)}</div>
-   <div style="font-size:14px;color:{MUTE};">HLTV · <span style="color:{ACCENT};font-weight:600;">hltv.org</span></div>
-  </div>"""
-    return _shell(body, "42px 46px 36px")
-
-
-async def render_bp_card(match: MatchDetail, when_text: str) -> bytes:
-    return await _render_png(build_bp_html(match, when_text))
 
 
 # ———————————————————— 每日晨报 (Daily Morning Report) ————————————————————

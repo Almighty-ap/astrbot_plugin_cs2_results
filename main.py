@@ -482,10 +482,15 @@ async def _alert(text: str) -> None:
         return
     delivered = False
     for uid in admin_ids:
+        try:
+            uid_int = int(uid)
+        except (TypeError, ValueError):
+            logger.debug(f"[cs2] 跳过非数字管理员 ID: {uid}")
+            continue
         origin = (
-            user_origin_resolver(int(uid))
+            user_origin_resolver(uid_int)
             if user_origin_resolver is not None
-            else store.get_user_origin(int(uid))
+            else store.get_user_origin(uid_int)
         )
         if not origin:
             continue
@@ -2126,90 +2131,6 @@ async def _handle_h2h(t1_query: str, t2_query: str) -> None:
     await cs2.finish(png)
 
 
-async def _handle_bp(arg: str | None) -> None:
-    mid = None
-    target_team = None
-    if arg:
-        arg_clean = arg.strip()
-        if arg_clean.isdigit():
-            mid = arg_clean
-        else:
-            teams = store.all_index_teams()
-            res = names.resolve_team_local(arg_clean, teams)
-            if res.status not in ("ok", "ambiguous"):
-                res = await names.resolve_team(fetcher, arg_clean, teams)
-            if res.status == "ok" and res.team:
-                target_team = res.team.name
-            else:
-                target_team = arg_clean
-
-    match_url = None
-    if mid:
-        match_url = f"{hltv.BASE}/matches/{mid}/x"
-    else:
-        matches_html = await fetcher.get_html(
-            hltv.URL_MATCHES,
-            wait_selector=".upcomingMatchesSection",
-            max_age=120,
-            priority="user",
-        )
-        if not matches_html:
-            await cs2.finish("未能获取到最近赛程列表，请稍后再试")
-        live_list = hltv.parse_live_matches(matches_html)
-        up_list = hltv.parse_upcoming_matches(matches_html)
-
-        all_cands = []
-        for lm in live_list:
-            all_cands.append((lm.match_id, lm.team1, lm.team2, lm.url))
-        for um in up_list:
-            all_cands.append((um.match_id, um.team1, um.team2, um.url))
-
-        if target_team:
-            t_norm = target_team.casefold()
-            for _m_id, t1, t2, u in all_cands:
-                if t_norm in t1.casefold() or t_norm in t2.casefold() or t1.casefold() in t_norm or t2.casefold() in t_norm:
-                    match_url = u
-                    break
-            if not match_url:
-                await cs2.finish(f"近期赛程中未找到与「{target_team}」相关的对决")
-        else:
-            for _m_id, t1, t2, u in all_cands:
-                if t1 and t2 and t1 != "TBD" and t2 != "TBD":
-                    match_url = u
-                    break
-            if not match_url:
-                await cs2.finish("近期暂无正在进行或即将开赛的焦点对决")
-
-    await cs2.send("正在获取地图 BP 选图数据…")
-    try:
-        match_html = await fetcher.get_html(
-            match_url,
-            wait_selector=".veto-box",
-            max_age=180,
-            priority="user",
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("[cs2] BP 比赛页抓取失败: %s", exc)
-        await cs2.finish("比赛页抓取失败，请稍后再试")
-
-    if not match_html:
-        await cs2.finish("无法获取比赛页面(可能被 Cloudflare 拦截)，请稍后再试")
-
-    match_detail = hltv.parse_match(match_html, match_url)
-    if not match_detail.veto_steps:
-        await cs2.finish(
-            f"{match_detail.team1} vs {match_detail.team2} 尚未公布 BP 选图数据（通常在赛前 15~30 分钟由赛事方提交）"
-        )
-
-    when = f"{_now()} 北京时间"
-    try:
-        png = await card.render_bp_card(match_detail, when)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("[cs2] BP 卡片渲染失败: %s", exc)
-        await cs2.finish("BP 卡片渲染失败，请稍后再试")
-    await cs2.finish(png)
-
-
 async def _handle_group_mode(event: MessageEvent, mode_raw: str) -> None:
     if not event.is_group:
         await cs2.finish("请在群聊中使用该命令")
@@ -2368,10 +2289,6 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
             t1, t2 = parts[1].strip(), " ".join(parts[2:]).strip()
         await _handle_h2h(t1, t2)
 
-    if sub in ("bp", "BP", "选图", "bp选图"):
-        arg = " ".join(parts[1:]).strip() or None
-        await _handle_bp(arg)
-
     if sub in ("查询", "query", "查"):
         kind = parts[1] if len(parts) > 1 else ""
         name = " ".join(parts[2:]).strip()
@@ -2391,10 +2308,8 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
             elif len(parts) >= 4:
                 t1, t2 = parts[2].strip(), " ".join(parts[3:]).strip()
             await _handle_h2h(t1, t2)
-        if kind in ("bp", "BP", "选图", "bp选图"):
-            await _handle_bp(name or None)
         await cs2.finish(
-            "用法:/cs2 查询 选手 <名字> 或 /cs2 查询 战队 <名字> 或 /cs2 排名 [vrs|hltv] 或 /cs2 交手 <队A> <队B> 或 /cs2 bp [战队/比赛]"
+            "用法:/cs2 查询 选手 <名字> 或 /cs2 查询 战队 <名字> 或 /cs2 排名 [vrs|hltv] 或 /cs2 交手 <队A> <队B>"
         )
 
     # 兼容旧版直接以实体类型开头的查询写法。
@@ -2534,7 +2449,6 @@ async def _send_help(admin: bool) -> None:
             "/cs2 赛程 [赛事名] —— 正在进行赛事的完整赛程(小组赛/淘汰赛)",
             "/cs2 排名 [vrs|hltv] —— 查看战队世界排名 TOP 20 榜单 (默认 Valve VRS)",
             "/cs2 交手 <战队A> <战队B> —— 查询两队历史交手战绩 (CS2 + 全时期)",
-            "/cs2 bp [战队/比赛] —— 查询赛前地图选图与禁图 (Pick/Ban)",
             "/cs2 查询 选手 <名字> —— 选手近期 Rating / K/D、角色分与 Major 荣誉",
             "/cs2 查询 战队 <名字> —— 战队阵容、世界 / VRS 排名与近期战绩",
             "/cs2 订阅 / 退订 —— 本群加入/退出推送(群管理员)",
@@ -3503,7 +3417,11 @@ class Cs2ResultsPlugin(Star):
         return summary
 
     @filter.llm_tool(name="query_cs2_events")
-    async def query_cs2_events(self, event: AstrMessageEvent) -> str:
+    async def query_cs2_events(
+        self,
+        event: AstrMessageEvent,
+        **_kwargs: Any,
+    ) -> str:
         """查询 HLTV 未来三个月的 CS2 顶级赛事、赛事时间和地点。"""
         return await self._run_llm_tool_command(
             event,
@@ -3512,7 +3430,11 @@ class Cs2ResultsPlugin(Star):
         )
 
     @filter.llm_tool(name="query_cs2_schedule")
-    async def query_cs2_schedule(self, event: AstrMessageEvent) -> str:
+    async def query_cs2_schedule(
+        self,
+        event: AstrMessageEvent,
+        **_kwargs: Any,
+    ) -> str:
         """查询当前或下一个比赛日的 CS2 比赛、比分、直播和赛果。"""
         return await self._run_llm_tool_command(
             event,
@@ -3525,6 +3447,7 @@ class Cs2ResultsPlugin(Star):
         self,
         event: AstrMessageEvent,
         event_name: str = "",
+        **_kwargs: Any,
     ) -> str:
         """查询正在进行的 CS2 赛事完整赛程。
 
@@ -3539,7 +3462,11 @@ class Cs2ResultsPlugin(Star):
         )
 
     @filter.llm_tool(name="query_cs2_news")
-    async def query_cs2_news(self, event: AstrMessageEvent) -> str:
+    async def query_cs2_news(
+        self,
+        event: AstrMessageEvent,
+        **_kwargs: Any,
+    ) -> str:
         """查询最新一条 HLTV CS2 RSS 资讯。"""
         return await self._run_llm_tool_command(
             event,
@@ -3552,6 +3479,7 @@ class Cs2ResultsPlugin(Star):
         self,
         event: AstrMessageEvent,
         team: str = "",
+        **_kwargs: Any,
     ) -> str:
         """查询指定 CS2 战队近期比赛、当前比分和赛果。
 
@@ -3572,6 +3500,7 @@ class Cs2ResultsPlugin(Star):
         self,
         event: AstrMessageEvent,
         source: str = "vrs",
+        **_kwargs: Any,
     ) -> str:
         """查询 CS2 战队世界排名榜单卡片（TOP 20）。
 
@@ -3591,6 +3520,7 @@ class Cs2ResultsPlugin(Star):
         event: AstrMessageEvent,
         team1: str = "",
         team2: str = "",
+        **_kwargs: Any,
     ) -> str:
         """查询两支 CS2 战队的历史交手战绩 (Head-to-Head / H2H)。
 
@@ -3609,36 +3539,18 @@ class Cs2ResultsPlugin(Star):
             f"已发送 {team1} vs {team2} 的历史交手卡片。",
         )
 
-    @filter.llm_tool(name="query_cs2_bp")
-    async def query_cs2_bp(
-        self,
-        event: AstrMessageEvent,
-        match_or_team: str = "",
-    ) -> str:
-        """查询 CS2 比赛赛前的地图 BP 选图与禁图数据。
-
-        Args:
-            match_or_team(string): 战队名称或比赛 ID，例如 Vitality 或 2395449；可为空。
-        """
-        raw = f"bp {match_or_team}".strip()
-        return await self._run_llm_tool_command(
-            event,
-            raw,
-            f"已发送 CS2 地图 BP 选图卡片{f'：{match_or_team}' if match_or_team else ''}。",
-        )
-
     @filter.on_llm_request()
     async def add_cs2_llm_tool_hint(self, event: AstrMessageEvent, req: Any) -> None:
         if not cfg.cs2_llm_tools_enabled or not cfg.cs2_llm_tool_intent_hint:
             return
         text = (event.message_str or "").casefold()
         if not re.search(
-            r"cs2|hltv|比赛|赛程|战况|赛况|比分|赛果|战队|选手|资讯|排名|排行|rank|交手|h2h|bp|选图|禁图|晨报",
+            r"cs2|hltv|比赛|赛程|战况|赛况|比分|赛果|战队|选手|资讯|排名|排行|rank|交手|h2h|晨报",
             text,
         ):
             return
         req.system_prompt = (getattr(req, "system_prompt", "") or "") + (
-            "\n用户在询问 CS2/HLTV 赛事、战况、赛程、排名、交手历史、BP 选图或资讯。"
+            "\n用户在询问 CS2/HLTV 赛事、战况、赛程、排名、交手历史或资讯。"
             "请优先调用 query_cs2_* 工具获取实时数据，不要凭记忆回答。"
         )
 

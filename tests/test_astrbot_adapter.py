@@ -736,3 +736,72 @@ def test_recent_finished_event_id_picks_latest_whitelist_event(
     assert asyncio.run(main._recent_finished_event_id()) == "8932"
 
 
+def test_llm_tools_accept_extra_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = SimpleNamespace(
+        platform_manager=SimpleNamespace(platform_insts=[]),
+        get_config=lambda: {"admins_id": []},
+    )
+    plugin = main.Cs2ResultsPlugin(context=context, config={})
+    run_cmd = AsyncMock(return_value="ok")
+    monkeypatch.setattr(plugin, "_run_llm_tool_command", run_cmd)
+    event = SimpleNamespace()
+
+    assert asyncio.run(plugin.query_cs2_events(event, reason="check events")) == "ok"
+    assert asyncio.run(plugin.query_cs2_schedule(event, reason="check schedule")) == "ok"
+    assert (
+        asyncio.run(
+            plugin.query_cs2_bracket(event, event_name="IEM", reason="check bracket")
+        )
+        == "ok"
+    )
+    assert asyncio.run(plugin.query_cs2_news(event, reason="check news")) == "ok"
+    assert (
+        asyncio.run(
+            plugin.query_cs2_match_status(event, team="FaZe", reason="check match")
+        )
+        == "ok"
+    )
+    assert (
+        asyncio.run(
+            plugin.query_cs2_ranking(event, source="vrs", reason="check ranking")
+        )
+        == "ok"
+    )
+    assert (
+        asyncio.run(
+            plugin.query_cs2_h2h(
+                event, team1="FaZe", team2="Vitality", reason="check h2h"
+            )
+        )
+        == "ok"
+    )
+    assert run_cmd.await_count == 7
+
+
+def test_alert_skips_non_numeric_admin_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[tuple[str, object]] = []
+
+    async def send_message(origin: str, chain: object) -> None:
+        sent.append((origin, chain))
+
+    monkeypatch.setattr(
+        main,
+        "bot_context",
+        SimpleNamespace(send_message=send_message),
+        raising=False,
+    )
+    monkeypatch.setattr(main, "admin_ids", {"astrbot", "10001"}, raising=False)
+    monkeypatch.setattr(
+        main,
+        "user_origin_resolver",
+        lambda uid: f"onebot:FriendMessage:{uid}" if uid == 10001 else None,
+        raising=False,
+    )
+
+    asyncio.run(main._alert("测试告警"))
+    assert len(sent) == 1
+    assert sent[0][0] == "onebot:FriendMessage:10001"

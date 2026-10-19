@@ -229,30 +229,6 @@ class VrsForecast:
         return a, b
 
 
-MAP_NAMES_CN: dict[str, str] = {
-    "mirage": "荒漠迷城",
-    "inferno": "炼狱小镇",
-    "nuke": "核子危机",
-    "dust2": "炙热沙城 II",
-    "ancient": "远古遗迹",
-    "anubis": "阿努比斯",
-    "train": "列车停放站",
-    "vertigo": "殒命大厦",
-    "overpass": "死亡游乐园",
-    "cache": "死城之谜",
-    "cobblestone": "古堡激战",
-}
-
-
-@dataclass
-class VetoStep:
-    step: int
-    team: str
-    action: str  # "ban" / "pick" / "decider"
-    map_name: str
-    map_cn: str
-
-
 @dataclass
 class H2HMatch:
     match_id: str
@@ -305,7 +281,6 @@ class MatchDetail:
     event_logo: Optional[str]
     maps: list[MapResult]
     vrs: Optional[VrsForecast] = None
-    veto_steps: list[VetoStep] = field(default_factory=list)
 
     @property
     def series1(self) -> int:
@@ -806,57 +781,6 @@ def _pick_logo(t: HTMLParser, kind: str, title: str, allow_fallback: bool = Fals
     return fallback if allow_fallback else None
 
 
-def parse_veto_steps(t: HTMLParser, team1: str, team2: str) -> list[VetoStep]:
-    """从 veto 序列解析完整 BP 选图流程。"""
-    steps: list[VetoStep] = []
-    step_num = 1
-    for vb in t.css(".veto-box"):
-        txt = _txt(vb)
-        if "picked" not in txt and "removed" not in txt and "left over" not in txt:
-            continue
-        raw_segs = re.split(r"(?:^|\s+)(?=\d+\.\s*)", txt)
-        for seg in raw_segs:
-            seg = seg.strip()
-            if not seg:
-                continue
-            m_num = re.match(r"^(\d+)\.\s*(.+)$", seg)
-            curr_step = int(m_num.group(1)) if m_num else step_num
-            content = m_num.group(2).strip() if m_num else seg
-
-            m_act = re.match(r"^(.+?)\s+(picked|removed)\s+([A-Za-z0-9_ ]+)$", content, re.IGNORECASE)
-            if m_act:
-                tname = m_act.group(1).strip()
-                action_raw = m_act.group(2).lower()
-                mname = m_act.group(3).strip()
-                action = "pick" if action_raw == "picked" else "ban"
-                steps.append(
-                    VetoStep(
-                        step=curr_step,
-                        team=tname,
-                        action=action,
-                        map_name=mname,
-                        map_cn=MAP_NAMES_CN.get(mname.lower(), mname),
-                    )
-                )
-                step_num = curr_step + 1
-                continue
-
-            m_dec = re.match(r"^([A-Za-z0-9_ ]+?)\s+was left over", content, re.IGNORECASE)
-            if m_dec:
-                mname = m_dec.group(1).strip()
-                steps.append(
-                    VetoStep(
-                        step=curr_step,
-                        team="决胜图",
-                        action="decider",
-                        map_name=mname,
-                        map_cn=MAP_NAMES_CN.get(mname.lower(), mname),
-                    )
-                )
-                step_num = curr_step + 1
-    return steps
-
-
 def _parse_veto_picks(t: HTMLParser, team1: str, team2: str) -> dict[str, str]:
     """从 veto 序列解析每张图的归属 → {map_name_lower: "team1"/"team2"/"decider"}。"""
     def side(name: str) -> Optional[str]:
@@ -873,14 +797,25 @@ def _parse_veto_picks(t: HTMLParser, team1: str, team2: str) -> dict[str, str]:
         return None
 
     picks: dict[str, str] = {}
-    steps = parse_veto_steps(t, team1, team2)
-    for st in steps:
-        if st.action == "pick":
-            s = side(st.team)
-            if s:
-                picks[st.map_name.lower()] = s
-        elif st.action == "decider":
-            picks[st.map_name.lower()] = "decider"
+    for vb in t.css(".veto-box"):
+        txt = _txt(vb)
+        if "picked" not in txt and "left over" not in txt:
+            continue
+        for seg in re.split(r"(?:^|\s+)(?=\d+\.\s*)", txt):
+            seg = seg.strip()
+            if not seg:
+                continue
+            m_num = re.match(r"^(\d+)\.\s*(.+)$", seg)
+            content = m_num.group(2).strip() if m_num else seg
+            m_pick = re.match(r"^(.+?)\s+picked\s+([A-Za-z0-9_ ]+)$", content, re.IGNORECASE)
+            if m_pick:
+                s = side(m_pick.group(1).strip())
+                if s:
+                    picks[m_pick.group(2).strip().lower()] = s
+                continue
+            m_dec = re.match(r"^([A-Za-z0-9_ ]+?)\s+was left over", content, re.IGNORECASE)
+            if m_dec:
+                picks[m_dec.group(1).strip().lower()] = "decider"
     return picks
 
 
@@ -1056,7 +991,6 @@ def parse_match(match_html: Html, url: str) -> MatchDetail:
         event_logo=_pick_logo(t, "eventlogo", event_name, allow_fallback=True),
         maps=maps,
         vrs=parse_vrs(t),
-        veto_steps=parse_veto_steps(t, team1, team2),
     )
 
 
