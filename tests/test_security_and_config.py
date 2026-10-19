@@ -191,6 +191,12 @@ class ConfigBoundaryTests(unittest.TestCase):
         self.assertEqual(config.cs2_subscribed_groups, [123, 456])
         self.assertEqual(config.cs2_debug_groups, [456])
         self.assertEqual(config.cs2_force_include_events, ["123", "456"])
+        webui_config = self.Config(
+            cs2_subscribed_groups=[" 123456 ", "789012, 345678", "", "123456"],
+            cs2_debug_groups="111222，333444",
+        )
+        self.assertEqual(webui_config.cs2_subscribed_groups, [123456, 789012, 345678])
+        self.assertEqual(webui_config.cs2_debug_groups, [111222, 333444])
         for values in (
             {"cs2_subscribed_groups": [0]},
             {"cs2_debug_groups": [-1]},

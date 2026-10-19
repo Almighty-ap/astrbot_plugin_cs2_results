@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Iterator, Literal, Optional
+from typing import Callable, Iterable, Iterator, Literal, Optional
 
 from astrbot.api import logger
 
@@ -703,6 +703,88 @@ def seed_subscriptions_once(
         return added
 
 
+_CONFIG_SYNC_MARKER = "config_subscription_sync_v1"
+_CONFIG_NEWS_PENDING_KEY = "config_news_pending_groups_v1"
+
+
+def _parse_int_list_meta(raw: Optional[str]) -> list[int]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, list):
+            return []
+        return _normalize_group_ids(parsed)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def resolve_pending_news_groups(
+    origin_resolver: Callable[[int], Optional[str]],
+) -> int:
+    """将待解析会话的配置订阅群写入 HLTV RSS 资讯订阅列表，返回成功订阅数量。"""
+    pending = _parse_int_list_meta(get_meta(_CONFIG_NEWS_PENDING_KEY))
+    if not pending:
+        return 0
+    active_subs = get_subscriptions()
+    still_pending: list[int] = []
+    resolved = 0
+    for gid in pending:
+        if gid not in active_subs:
+            continue
+        umo = origin_resolver(gid)
+        if umo:
+            if news_subscribe(umo):
+                resolved += 1
+        else:
+            still_pending.append(gid)
+    set_meta(_CONFIG_NEWS_PENDING_KEY, json.dumps(sorted(set(still_pending))))
+    return resolved
+
+
+def sync_config_subscriptions(
+    groups: Iterable[int],
+    *,
+    origin_resolver: Optional[Callable[[int], Optional[str]]] = None,
+    marker: str = _CONFIG_SYNC_MARKER,
+) -> tuple[int, int]:
+    """按配置快照差量同步订阅群及 HLTV RSS 资讯推送，返回 (新增群数, 移除群数)。
+
+    - 配置新增的群：自动订阅赛果/晨报，并开启 HLTV RSS 资讯推送；
+    - 配置移除的群：自动退订赛果/晨报，并取消该群的 HLTV RSS 资讯推送；
+    - 配置未变动的群：保持数据库现状（群内手动退订过的群不会被重启复活）。
+    """
+    marker = str(marker).strip()
+    if not marker:
+        raise ValueError("marker 不能为空")
+    curr_list = _normalize_group_ids(groups)
+    curr_set = set(curr_list)
+    prev_set = set(_parse_int_list_meta(get_meta(marker)))
+    pending_set = set(_parse_int_list_meta(get_meta(_CONFIG_NEWS_PENDING_KEY)))
+
+    to_add = sorted(curr_set - prev_set)
+    to_remove = sorted(prev_set - curr_set)
+
+    added_count = seed_subscriptions(to_add) if to_add else 0
+    removed_count = 0
+    for gid in to_remove:
+        if unsubscribe(gid):
+            removed_count += 1
+        news_unsubscribe_group(gid)
+        pending_set.discard(gid)
+
+    for gid in to_add:
+        pending_set.add(gid)
+
+    set_meta(marker, json.dumps(curr_list))
+    set_meta(_CONFIG_NEWS_PENDING_KEY, json.dumps(sorted(pending_set)))
+
+    if origin_resolver is not None and pending_set:
+        resolve_pending_news_groups(origin_resolver)
+
+    return added_count, removed_count
+
+
 def migrate_legacy_subscriptions(path: Path = _SUBS) -> int:
     """一次性迁移旧 ``subscriptions.json``，返回新增行数。
 
@@ -1175,6 +1257,7 @@ def set_group_origin(group_id: int, unified_msg_origin: str) -> None:
     """Remember the platform session used to proactively deliver a QQ group."""
     if group_id and unified_msg_origin:
         set_meta(f"origin:group:{int(group_id)}", unified_msg_origin)
+        resolve_pending_news_groups(get_group_origin)
 
 
 def get_group_origin(group_id: int) -> str | None:
@@ -1240,6 +1323,27 @@ def news_unsubscribe(unified_msg_origin: str) -> bool:
         _dump(_NEWS_STATE, state)
     cancel_news_deliveries_for_umo(umo)
     return True
+
+
+def news_unsubscribe_group(group_id: int) -> int:
+    """取消指定 QQ 群关联的所有 RSS 资讯订阅会话，返回移除数量。"""
+    gid = _normalize_group_ids([group_id])[0]
+    removed_umos: list[str] = []
+    with _JSON_LOCK:
+        state = _news_state()
+        subscribers = state["subscribers"]
+        kept: list[str] = []
+        for item in subscribers:
+            if _group_id_from_umo(item) == gid:
+                removed_umos.append(item)
+            else:
+                kept.append(item)
+        if removed_umos:
+            state["subscribers"] = kept
+            _dump(_NEWS_STATE, state)
+    for umo in removed_umos:
+        cancel_news_deliveries_for_umo(umo)
+    return len(removed_umos)
 
 
 def news_seen_guids() -> list[str]:

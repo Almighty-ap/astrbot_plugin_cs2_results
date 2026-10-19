@@ -67,6 +67,7 @@ fetcher: Fetcher
 delivery_worker: DeliveryWorker
 news_service: NewsService | None = None
 bot_context: Context | None = None
+group_origin_resolver: Callable[[int], str | None] | None = None
 user_origin_resolver: Callable[[int], str | None] | None = None
 admin_ids: set[str] = set()
 CN = ZoneInfo("Asia/Shanghai")
@@ -1554,12 +1555,19 @@ async def startup() -> None:
         _last_backstop = 0.0
         _startup_backstop_pending = True
 
-    seeded = store.seed_subscriptions_once(cfg.cs2_subscribed_groups)
-    if seeded:
-        logger.info(f"[cs2] 已从配置一次性迁移 {seeded} 个订阅群到状态库")
+    added_subs, removed_subs = store.sync_config_subscriptions(
+        cfg.cs2_subscribed_groups,
+        origin_resolver=group_origin_resolver,
+    )
+    if added_subs or removed_subs:
+        logger.info(
+            f"[cs2] 已从配置同步订阅群: 新增 {added_subs} 个, 移除 {removed_subs} 个"
+        )
 
     async def _first() -> None:
         await asyncio.sleep(10)  # 等 NapCat 连上
+        if group_origin_resolver is not None:
+            store.resolve_pending_news_groups(group_origin_resolver)
         if target_groups():
             try:
                 await refresh_whitelist()
@@ -3304,9 +3312,11 @@ class Cs2ResultsPlugin(Star):
         self.astrbot_config = config
 
     async def initialize(self) -> None:
-        global cfg, fetcher, delivery_worker, bot_context, user_origin_resolver, admin_ids
+        global cfg, fetcher, delivery_worker, bot_context
+        global group_origin_resolver, user_origin_resolver, admin_ids
 
         bot_context = self.context
+        group_origin_resolver = self._resolve_group_origin
         user_origin_resolver = self._resolve_user_origin
         cfg = Config.model_validate(dict(self.astrbot_config))
         raw_admin_ids = self.context.get_config().get("admins_id", []) or []
@@ -3323,8 +3333,9 @@ class Cs2ResultsPlugin(Star):
         logger.info("[cs2] AstrBot 适配层已初始化")
 
     async def terminate(self) -> None:
-        global user_origin_resolver
+        global group_origin_resolver, user_origin_resolver
         card.bind_html_renderer(None)
+        group_origin_resolver = None
         user_origin_resolver = None
         await shutdown()
         logger.info("[cs2] AstrBot 适配层已停止")

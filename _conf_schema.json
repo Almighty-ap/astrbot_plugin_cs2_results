@@ -3,13 +3,13 @@
     "description": "预置推送目标群(QQ群号列表)",
     "type": "list",
     "default": [],
-    "hint": "运行时可叠加 /cs2 订阅 命令;JSON 里写成 [123456789, 987654321]"
+    "hint": "添加群号后自动开启赛果播报、每日晨报与 HLTV 资讯推送；运行时也可叠加 /cs2 订阅 命令"
   },
   "cs2_debug_groups": {
     "description": "调试群(只有这些群或超管私聊才能用管理/调试命令)",
     "type": "list",
     "default": [],
-    "hint": "JSON 格式如 [123456789]"
+    "hint": "填写 QQ 群号，如 123456789"
   },
   "cs2_live_poll_interval": {
     "description": "直播轮询间隔(分钟)",

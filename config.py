@@ -5,6 +5,8 @@
     CS2_LIVE_POLL_INTERVAL=2
 """
 
+import re as _re
+from collections.abc import Iterable as _Iterable
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -197,6 +199,25 @@ class Config(BaseModel):
     # 禁言期间战报最多顺延多久,超时直接丢弃(不告警)。隔夜的战报补发出来没意义,
     # 而且会在解禁那一刻一次性刷屏。
     cs2_mute_defer_max_hours: float = Field(default=6.0, ge=0.5, le=72)
+
+    @field_validator("cs2_subscribed_groups", "cs2_debug_groups", mode="before")
+    @classmethod
+    def normalize_group_inputs(cls, values: object) -> object:
+        if values is None:
+            return []
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, _Iterable) or isinstance(values, (bytes, bytearray)):
+            return values
+        normalized: list[object] = []
+        for item in values:
+            if isinstance(item, str):
+                for part in _re.split(r"[\s,，;；]+", item.strip()):
+                    if part:
+                        normalized.append(part)
+            else:
+                normalized.append(item)
+        return normalized
 
     @field_validator("cs2_subscribed_groups", "cs2_debug_groups")
     @classmethod

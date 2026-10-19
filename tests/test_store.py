@@ -195,6 +195,44 @@ def test_config_seed_once_does_not_resurrect_unsubscribed_group(
     assert 3002 not in store.get_subscriptions()
 
 
+def test_sync_config_subscriptions_diff_and_news(
+    store_factory: Callable[..., Any],
+) -> None:
+    store = store_factory([])
+
+    # 1. Initial startup with empty config
+    assert store.sync_config_subscriptions([]) == (0, 0)
+    assert store.get_subscriptions() == set()
+    assert store.news_subscribers() == []
+
+    # 2. User adds group 4001 and 4002 in WebUI; 4001 resolves immediately, 4002 resolves later
+    origins = {4001: "napcat:GroupMessage:4001"}
+    added, removed = store.sync_config_subscriptions(
+        [4001, 4002],
+        origin_resolver=lambda gid: origins.get(gid),
+    )
+    assert (added, removed) == (2, 0)
+    assert store.get_subscriptions() == {4001, 4002}
+    assert store.news_subscribers() == ["napcat:GroupMessage:4001"]
+
+    # When 4002 speaks or NapCat connects later, its news subscription is auto-activated
+    store.set_group_origin(4002, "napcat:GroupMessage:4002")
+    assert set(store.news_subscribers()) == {
+        "napcat:GroupMessage:4001",
+        "napcat:GroupMessage:4002",
+    }
+
+    # 3. Group 4001 unsubscribes via in-group command; restarting with same config does not resurrect it
+    assert store.unsubscribe(4001) is True
+    assert store.sync_config_subscriptions([4001, 4002], origin_resolver=origins.get) == (0, 0)
+    assert store.get_subscriptions() == {4002}
+
+    # 4. Removing 4002 from WebUI config unsubscribes both match results and RSS news
+    assert store.sync_config_subscriptions([4001], origin_resolver=origins.get) == (0, 1)
+    assert store.get_subscriptions() == set()
+    assert store.news_subscribers() == ["napcat:GroupMessage:4001"]
+
+
 def test_outbox_freezes_recipients_and_tracks_retry_to_dead(
     store_factory: Callable[..., Any],
 ) -> None:
