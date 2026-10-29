@@ -1218,11 +1218,14 @@ class Fetcher:
     async def _build_context(self, browser):
         proxy_url = self._curl_cffi_proxy()
         context_options: dict[str, object] = {
-            "user_agent": UA,
             "locale": "en-US",
             "viewport": {"width": 1366, "height": 900},
-            "proxy": {"server": proxy_url} if proxy_url else None,
         }
+        # 仅标准 Playwright Chromium 需要显式设置 Chrome UA, Camoufox 会自动适配自身指纹
+        if self._pw is not None:
+            context_options["user_agent"] = UA
+        if proxy_url:
+            context_options["proxy"] = {"server": proxy_url}
         state_file = self._storage_state_file()
         if state_file.is_file():
             context_options["storage_state"] = str(state_file)
