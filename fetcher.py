@@ -61,32 +61,133 @@ _PRIORITY_RANK: dict[str, int] = {
 _PAGE_HOSTS = frozenset({"hltv.org", "www.hltv.org"})
 _ASSET_HOSTS = frozenset({"hltv.org", "www.hltv.org", "img-cdn.hltv.org"})
 _STORAGE_STATE_FILENAME = "playwright_storage_state.json"
-_VNC_PORT = 5900
-_NOVNC_PORT = 6080
-_CACHED_CONTAINER_IP: str | None = None
-
-
-async def get_container_ip() -> str | None:
-    """Return the cached IP address of the local container/host asynchronously."""
-    global _CACHED_CONTAINER_IP
-    if _CACHED_CONTAINER_IP is not None:
-        return _CACHED_CONTAINER_IP
-    try:
-        hostname = socket.gethostname()
-        _CACHED_CONTAINER_IP = await asyncio.to_thread(socket.gethostbyname, hostname)
-    except OSError:
-        _CACHED_CONTAINER_IP = None
-    return _CACHED_CONTAINER_IP
 
 
 @dataclass(frozen=True, slots=True)
 class ManualVerifyResult:
+    """Result of Cloudflare verification probe."""
+
     ok: bool
     message: str
     display: str | None = None
-    vnc_port: int = _VNC_PORT
-    novnc_port: int = _NOVNC_PORT
+    vnc_port: int = 0
+    novnc_port: int = 0
     tunnel_target: str | None = None
+
+
+class TurnstileAutoSolver:
+    """Automatic detector and solver for Cloudflare Turnstile challenges."""
+
+    @staticmethod
+    def is_challenge(title: str, html: str = "") -> bool:
+        """Check if the title or HTML indicates a Cloudflare challenge/turnstile page."""
+        sample_title = (title or "").lower()
+        if "just a moment" in sample_title or "attention required" in sample_title:
+            return True
+        sample_html = (html or "")[:20000].lower()
+        return (
+            "just a moment" in sample_html
+            or "attention required" in sample_html
+            or ("cloudflare ray id" in sample_html and "access denied" in sample_html)
+            or "sorry, you have been blocked" in sample_html
+            or "challenges.cloudflare.com" in sample_html
+        )
+
+    @staticmethod
+    def generate_bezier_trajectory(
+        start_x: float,
+        start_y: float,
+        target_x: float,
+        target_y: float,
+        steps: int = 20,
+    ) -> list[tuple[float, float]]:
+        """Generate human-like mouse movement coordinates using a cubic Bezier curve."""
+        dx = target_x - start_x
+        dy = target_y - start_y
+        cx1 = start_x + dx * random.uniform(0.15, 0.45) + random.uniform(-25.0, 25.0)
+        cy1 = start_y + dy * random.uniform(0.15, 0.45) + random.uniform(-25.0, 25.0)
+        cx2 = start_x + dx * random.uniform(0.55, 0.85) + random.uniform(-15.0, 15.0)
+        cy2 = start_y + dy * random.uniform(0.55, 0.85) + random.uniform(-15.0, 15.0)
+
+        points: list[tuple[float, float]] = []
+        for i in range(1, steps + 1):
+            t = i / steps
+            t_eased = t * t * (3.0 - 2.0 * t)
+            u = 1.0 - t_eased
+            x = (
+                (u**3) * start_x
+                + 3.0 * (u**2) * t_eased * cx1
+                + 3.0 * u * (t_eased**2) * cx2
+                + (t_eased**3) * target_x
+            )
+            y = (
+                (u**3) * start_y
+                + 3.0 * (u**2) * t_eased * cy1
+                + 3.0 * u * (t_eased**2) * cy2
+                + (t_eased**3) * target_y
+            )
+            points.append((round(x, 1), round(y, 1)))
+        return points
+
+    @classmethod
+    async def solve(cls, page, timeout: float = 30.0) -> bool:
+        """Attempt to solve Cloudflare challenge (both JS Managed Challenge and Turnstile widget)."""
+        try:
+            logger.info("[cs2] 检测到 Cloudflare 挑战,尝试自动求解与穿透…")
+            deadline = time.monotonic() + timeout
+
+            clicked = False
+            iframe_selector = "iframe[src*='challenges.cloudflare.com']"
+
+            while time.monotonic() < deadline:
+                # 1. 检查是否已经放行通过 (Title 变更或出现 cf_clearance)
+                try:
+                    title = await page.title()
+                    if title and not cls.is_challenge(title):
+                        logger.info(f"[cs2] Cloudflare 挑战已成功放行: {title!r}")
+                        return True
+                    cookies = await page.context.cookies("https://www.hltv.org")
+                    if any(c.get("name") == "cf_clearance" for c in cookies):
+                        logger.info("[cs2] Cloudflare 挑战已捕获有效 cf_clearance")
+                        return True
+                except Exception:
+                    pass
+
+                # 2. 如果尚未点击过且检测到了 Turnstile iframe, 则执行模拟物理轨迹点击
+                if not clicked:
+                    try:
+                        iframe = await page.query_selector(iframe_selector)
+                        if iframe is not None:
+                            box = await iframe.bounding_box()
+                            if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
+                                target_x = box["x"] + min(30.0, box["width"] * 0.15) + random.uniform(-2.5, 2.5)
+                                target_y = box["y"] + (box["height"] / 2.0) + random.uniform(-2.5, 2.5)
+                                start_x = random.uniform(50.0, 200.0)
+                                start_y = random.uniform(50.0, 200.0)
+                                trajectory = cls.generate_bezier_trajectory(start_x, start_y, target_x, target_y)
+
+                                for px, py in trajectory:
+                                    await page.mouse.move(px, py)
+                                    await asyncio.sleep(random.uniform(0.005, 0.012))
+
+                                await asyncio.sleep(random.uniform(0.12, 0.25))
+                                await page.mouse.down()
+                                await asyncio.sleep(random.uniform(0.06, 0.12))
+                                await page.mouse.up()
+                                clicked = True
+                                logger.info(f"[cs2] 已向 Turnstile 坐标 ({target_x:.1f}, {target_y:.1f}) 发送拟真点击")
+                    except Exception as e:
+                        logger.debug(f"[cs2] 探测 Turnstile iframe 异常: {e}")
+
+                await asyncio.sleep(0.5)
+
+            logger.warning("[cs2] Cloudflare 挑战求解等待放行超时")
+            return False
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[cs2] Turnstile 求解异常: {exc}")
+            return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,12 +339,8 @@ class Fetcher:
         self._browser = None
         self._context = None
         self._xvfb_proc: subprocess.Popen[bytes] | None = None
-        self._x11vnc_proc: subprocess.Popen[bytes] | None = None
-        self._novnc_proc: subprocess.Popen[bytes] | None = None
         self._display: str | None = None
         self._lifecycle_lock = asyncio.Lock()
-        self._manual_verify_lock = asyncio.Lock()
-        self._manual_verify_requested = False
         # Browser operations are serialized as a whole so recycling can never
         # close the shared context while another command or logo batch uses it.
         self._browser_operation_lock = asyncio.Lock()
@@ -310,9 +407,9 @@ class Fetcher:
         return self._backoff_remaining()
 
     def _backoff_blocks(self, priority: FetchPriority) -> bool:
-        # Explicit interactive verification and the live result lane must remain
-        # available.  Everything decorative or periodic yields to the cooldown.
-        if self._manual_verify_enabled() or priority == PRIORITY_LIVE:
+        # The live result lane must remain available.
+        # Everything decorative or periodic yields to the cooldown.
+        if priority == PRIORITY_LIVE:
             return False
         return self._backoff_remaining() > 0
 
@@ -393,18 +490,14 @@ class Fetcher:
         return max(5.0, min(float(self.cfg.cs2_nav_timeout) / 1000.0, 120.0))
 
     def _headful_enabled(self) -> bool:
-        return bool(
-            self.cfg.cs2_headful
-            or self._manual_verify_enabled()
-        )
+        return bool(self.cfg.cs2_headful)
 
     def _manual_verify_enabled(self) -> bool:
-        return bool(self.cfg.cs2_manual_verify or self._manual_verify_requested)
+        # Kept for backward compatibility
+        return False
 
     def _visible_headful(self) -> bool:
-        return bool(
-            self._manual_verify_enabled() or os.name == "nt"
-        )
+        return bool(self.cfg.cs2_headful and os.name == "nt")
 
     def _chromium_launch_args(self) -> list[str]:
         args = ["--disable-blink-features=AutomationControlled"]
@@ -477,17 +570,33 @@ class Fetcher:
 
         proxy = self._curl_cffi_proxy()
         cookies = self._load_storage_cookies()
+        backend = str(getattr(self.cfg, "cs2_browser_backend", "camoufox") or "camoufox").lower()
+        impersonate_target = "firefox" if backend == "camoufox" else "chrome"
         session_kwargs: dict[str, object] = {
-            "impersonate": "chrome",
+            "impersonate": impersonate_target,
             "proxy": proxy,
             "timeout": self._curl_cffi_timeout(),
         }
         if cookies:
             session_kwargs["cookies"] = cookies
-        headers = {
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
+        if impersonate_target == "firefox":
+            ff_os = getattr(self.cfg, "cs2_camoufox_os", "windows")
+            ff_ua = (
+                "Mozilla/5.0 (X11; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0"
+                if ff_os == "linux"
+                else "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101 Firefox/156.0"
+            )
+            headers = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "User-Agent": ff_ua,
+            }
+        else:
+            headers = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "User-Agent": UA,
+            }
         async with self._gate.slot(priority):
             try:
                 async with AsyncSession(**session_kwargs) as session:
@@ -526,6 +635,89 @@ class Fetcher:
         self._record_fetch_success()
         return html_text
 
+    async def _fetch_via_nodriver(
+        self, url: str, priority: FetchPriority
+    ) -> Optional[str]:
+        """使用 nodriver 异步原生 CDP 直连抓取 HLTV 页面 (备选抗检测方案)。"""
+        if self._backoff_blocks(priority):
+            self._metrics["suppressed"] += 1
+            return None
+        try:
+            import nodriver as uc
+        except ImportError:
+            logger.debug("[cs2] nodriver 未安装,跳过 nodriver 通道")
+            return None
+
+        async with self._gate.slot(priority):
+            browser = None
+            try:
+                headful = getattr(self.cfg, "cs2_headful", False)
+                proxy = self._curl_cffi_proxy()
+                browser_args = []
+                if proxy:
+                    browser_args.append(f"--proxy-server={proxy}")
+                browser = await uc.start(
+                    headless=not headful,
+                    browser_args=browser_args if browser_args else None,
+                )
+                tab = await browser.get(url)
+                await tab.sleep(2.0)
+
+                content = await tab.get_content()
+                title = self._html_title(content)
+
+                if TurnstileAutoSolver.is_challenge(title, content):
+                    logger.info(f"[cs2] nodriver 遇到 Cloudflare 挑战,等待穿透: {url}")
+                    timeout = getattr(self.cfg, "cs2_turnstile_timeout", 30)
+                    start_t = time.monotonic()
+                    while time.monotonic() - start_t < timeout:
+                        await tab.sleep(1.5)
+                        content = await tab.get_content()
+                        title = self._html_title(content)
+                        if not TurnstileAutoSolver.is_challenge(title, content):
+                            break
+                    if TurnstileAutoSolver.is_challenge(title, content):
+                        logger.warning(f"[cs2] nodriver 挑战超时未放行: {url}")
+                        self._record_challenge()
+                        return None
+
+                if self._is_error_page(title, content):
+                    logger.warning(f"[cs2] nodriver 拒绝错误页 {title!r}: {url}")
+                    return None
+
+                try:
+                    cookies = await tab.send(uc.cdp.network.get_cookies())
+                    if cookies:
+                        formatted_cookies = [
+                            {
+                                "name": c.name,
+                                "value": c.value,
+                                "domain": c.domain,
+                                "path": c.path,
+                                "expires": getattr(c, "expires", -1),
+                                "httpOnly": getattr(c, "http_only", False),
+                                "secure": getattr(c, "secure", False),
+                            }
+                            for c in cookies
+                        ]
+                        self._save_storage_state({"cookies": formatted_cookies, "origins": []})
+                except Exception as c_exc:
+                    logger.debug(f"[cs2] nodriver 提取 cookies 失败: {c_exc}")
+
+                self._record_fetch_success()
+                return content
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"[cs2] nodriver 抓取失败 {url}: {exc}")
+                return None
+            finally:
+                if browser is not None:
+                    try:
+                        browser.stop()
+                    except Exception:
+                        pass
+
     async def _download_logo_via_curl_cffi(
         self, url: str, priority: FetchPriority
     ) -> Optional[bytes]:
@@ -542,8 +734,10 @@ class Fetcher:
 
         proxy = self._curl_cffi_proxy()
         cookies = self._load_storage_cookies()
+        backend = str(getattr(self.cfg, "cs2_browser_backend", "camoufox") or "camoufox").lower()
+        impersonate_target = "firefox" if backend == "camoufox" else "chrome"
         session_kwargs: dict[str, object] = {
-            "impersonate": "chrome",
+            "impersonate": impersonate_target,
             "proxy": proxy,
             "timeout": self._curl_cffi_timeout(),
         }
@@ -797,7 +991,7 @@ class Fetcher:
         return None
 
     async def start(self) -> None:
-        """Start Chromium once; concurrent callers share the same launch."""
+        """Start browser once; concurrent callers share the same launch."""
         async with self._lifecycle_lock:
             if self._closing:
                 raise RuntimeError("fetcher is shutting down")
@@ -805,8 +999,9 @@ class Fetcher:
                 await self._ensure_context_locked()
                 return
 
-            from playwright.async_api import async_playwright
-
+            backend = str(
+                getattr(self.cfg, "cs2_browser_backend", "camoufox") or "camoufox"
+            ).lower()
             launch_env: dict[str, str] | None = None
             headful = self._headful_enabled()
             if headful and os.name != "nt":
@@ -818,36 +1013,94 @@ class Fetcher:
                 launch_env = os.environ.copy()
                 launch_env["DISPLAY"] = display
 
-            pw = await async_playwright().start()
-            args = self._chromium_launch_args()
-            try:
-                browser = await pw.chromium.launch(
-                    headless=not headful,
-                    args=args,
-                    ignore_default_args=["--enable-automation"],
-                    env=launch_env,
-                )
-            except asyncio.CancelledError:
-                await pw.stop()
-                raise
-            except Exception as exc:
-                await pw.stop()
-                if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc):
-                    logger.error(
-                        "[cs2] Chromium 抓取内核未安装或路径不存在。"
-                        "请在服务器/容器终端执行: playwright install chromium"
+            browser = None
+            pw = None
+
+            # 1. 首选 Camoufox (C++ 级反检测 Firefox 内核)
+            if backend == "camoufox":
+                try:
+                    from camoufox.async_api import AsyncCamoufox
+
+                    try:
+                        from camoufox.addons import DefaultAddons
+
+                        exclude_addons = [DefaultAddons.UBO]
+                    except Exception:
+                        exclude_addons = None
+
+                    proxy_url = self._curl_cffi_proxy()
+                    camoufox_opts: dict[str, object] = {
+                        "headless": not headful,
+                        "geoip": False,
+                        "os": getattr(self.cfg, "cs2_camoufox_os", "windows"),
+                        "firefox_user_prefs": {
+                            "browser.tabs.remote.maxAttributeContentProcesses": 1,
+                            "dom.ipc.processCount": 1,
+                            "dom.ipc.processCount.webIsolated": 1,
+                            "browser.cache.memory.capacity": 2048,
+                            "browser.cache.disk.enable": False,
+                            "image.mem.decode_bytes_at_a_time": 16384,
+                            "javascript.options.mem.gc_frequency": 10,
+                        },
+                    }
+                    if exclude_addons:
+                        camoufox_opts["exclude_addons"] = exclude_addons
+                    if proxy_url:
+                        camoufox_opts["proxy"] = {"server": proxy_url}
+                    if launch_env:
+                        camoufox_opts["env"] = launch_env
+                    cm = AsyncCamoufox(**camoufox_opts)
+                    browser = await cm.start()
+                    logger.info(
+                        f"[cs2] Camoufox 反检测内核已启动"
+                        f"(os={getattr(self.cfg, 'cs2_camoufox_os', 'windows')}, headless={not headful})"
                     )
-                raise
+                except ImportError:
+                    logger.warning("[cs2] camoufox 未安装,回退 Playwright Chromium")
+                except Exception as exc:
+                    logger.warning(
+                        f"[cs2] Camoufox 启动失败({exc}),回退 Playwright Chromium"
+                    )
+
+            # 2. 备用 Playwright Chromium (标准内核)
+            if browser is None:
+                from playwright.async_api import async_playwright
+
+                pw = await async_playwright().start()
+                args = self._chromium_launch_args()
+                try:
+                    browser = await pw.chromium.launch(
+                        headless=not headful,
+                        args=args,
+                        ignore_default_args=["--enable-automation"],
+                        env=launch_env,
+                    )
+                except asyncio.CancelledError:
+                    await pw.stop()
+                    raise
+                except Exception as exc:
+                    await pw.stop()
+                    if (
+                        "Executable doesn't exist" in str(exc)
+                        or "playwright install" in str(exc)
+                    ):
+                        logger.error(
+                            "[cs2] Chromium 抓取内核未安装或路径不存在。"
+                            "请在服务器/容器终端执行: playwright install chromium"
+                        )
+                    raise
 
             try:
                 context = await self._build_context(browser)
             except asyncio.CancelledError:
                 await browser.close()
-                await pw.stop()
+                if pw:
+                    await pw.stop()
                 raise
             except Exception:
                 await browser.close()
-                await pw.stop()
+                if pw:
+                    await pw.stop()
                 raise
 
             self._pw = pw
@@ -858,8 +1111,9 @@ class Fetcher:
             mode = "无头"
             if headful:
                 mode = "有头/可见" if self._visible_headful() else "有头/屏幕外"
+            engine_name = "Camoufox" if pw is None else "Playwright Chromium"
             logger.info(
-                f"[cs2] Chromium 抓取浏览器已启动({mode})"
+                f"[cs2] {engine_name} 抓取浏览器已启动({mode})"
             )
 
     def _start_xvfb(self) -> str:
@@ -967,124 +1221,6 @@ class Fetcher:
         socket_path = Path(f"/tmp/.X11-unix/X{number}")
         return socket_path.exists() and self._display_socket_alive(socket_path)
 
-    @staticmethod
-    def _tcp_port_ready(host: str, port: int) -> bool:
-        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            probe.settimeout(0.2)
-            probe.connect((host, port))
-            return True
-        except OSError:
-            return False
-        finally:
-            probe.close()
-
-    def _start_x11vnc(self, display: str) -> None:
-        """Start a temporary x11vnc server for the managed X display."""
-        proc = self._x11vnc_proc
-        if proc is not None and proc.poll() is None:
-            return
-        if self._tcp_port_ready("127.0.0.1", _VNC_PORT):
-            logger.info(f"[cs2] 检测到已有 x11vnc 监听 :{_VNC_PORT}")
-            return
-
-        binary = shutil.which("x11vnc")
-        if not binary:
-            raise RuntimeError(
-                "未安装 x11vnc;Debian/Ubuntu 可执行 apt-get install -y x11vnc"
-            )
-        child = subprocess.Popen(
-            [
-                binary,
-                "-display",
-                display,
-                "-localhost",
-                "-forever",
-                "-shared",
-                "-rfbport",
-                str(_VNC_PORT),
-                "-nolookup",
-                "-quiet",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        for _ in range(50):
-            if child.poll() is not None:
-                raise RuntimeError("x11vnc 启动失败")
-            if self._tcp_port_ready("127.0.0.1", _VNC_PORT):
-                self._x11vnc_proc = child
-                logger.info(f"[cs2] x11vnc 已启动: display={display}, port={_VNC_PORT}")
-                return
-            time.sleep(0.1)
-        child.terminate()
-        raise RuntimeError("x11vnc 启动超时")
-
-    async def _stop_x11vnc(self) -> None:
-        proc = self._x11vnc_proc
-        self._x11vnc_proc = None
-        if proc is None or proc.poll() is not None:
-            return
-        proc.terminate()
-        try:
-            await asyncio.to_thread(proc.wait, 5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            await asyncio.to_thread(proc.wait, 5)
-        logger.info("[cs2] x11vnc 已停止")
-
-    def _start_novnc(self) -> None:
-        """Start a temporary browser-based noVNC frontend."""
-        proc = self._novnc_proc
-        if proc is not None and proc.poll() is None:
-            return
-        if self._tcp_port_ready("127.0.0.1", _NOVNC_PORT):
-            logger.info(f"[cs2] 检测到已有 noVNC 监听 :{_NOVNC_PORT}")
-            return
-
-        binary = shutil.which("websockify")
-        web_root = Path("/usr/share/novnc")
-        if not binary or not (web_root / "vnc.html").is_file():
-            raise RuntimeError(
-                "未安装 noVNC/websockify;"
-                "Debian/Ubuntu 可执行 apt-get install -y novnc websockify"
-            )
-        child = subprocess.Popen(
-            [
-                binary,
-                f"--web={web_root}",
-                str(_NOVNC_PORT),
-                f"127.0.0.1:{_VNC_PORT}",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        for _ in range(50):
-            if child.poll() is not None:
-                raise RuntimeError("noVNC 启动失败")
-            if self._tcp_port_ready("127.0.0.1", _NOVNC_PORT):
-                self._novnc_proc = child
-                logger.info(f"[cs2] noVNC 已启动: port={_NOVNC_PORT}")
-                return
-            time.sleep(0.1)
-        child.terminate()
-        raise RuntimeError("noVNC 启动超时")
-
-    async def _stop_novnc(self) -> None:
-        proc = self._novnc_proc
-        self._novnc_proc = None
-        if proc is None or proc.poll() is not None:
-            return
-        proc.terminate()
-        try:
-            await asyncio.to_thread(proc.wait, 5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            await asyncio.to_thread(proc.wait, 5)
-        logger.info("[cs2] noVNC 已停止")
-
     def _track_task(self, coro, *, name: str) -> asyncio.Task[None] | None:
         if self._closing:
             coro.close()
@@ -1110,6 +1246,10 @@ class Fetcher:
             async with self._lifecycle_lock:
                 await self._close_playwright_stack(stop_xvfb=True)
 
+    async def close(self) -> None:
+        """Alias for shutdown to support context managers and standard cleanup."""
+        await self.shutdown()
+
     @asynccontextmanager
     async def _navigation_slot(self, priority: FetchPriority) -> AsyncIterator[None]:
         async with self._gate.slot(priority):
@@ -1118,18 +1258,21 @@ class Fetcher:
     async def _build_context(self, browser):
         proxy_url = self._curl_cffi_proxy()
         context_options: dict[str, object] = {
-            "user_agent": UA,
             "locale": "en-US",
             "viewport": {"width": 1366, "height": 900},
-            "proxy": {"server": proxy_url} if proxy_url else None,
         }
+        # 仅标准 Playwright Chromium 需要显式设置 Chrome UA, Camoufox 会自动适配自身指纹
+        if self._pw is not None:
+            context_options["user_agent"] = UA
+        if proxy_url:
+            context_options["proxy"] = {"server": proxy_url}
         state_file = self._storage_state_file()
         if state_file.is_file():
             context_options["storage_state"] = str(state_file)
         return await browser.new_context(**context_options)
 
     async def _save_storage_state(self, *, context=None) -> None:
-        """Persist cookies/local storage after a manual Cloudflare verification."""
+        """Persist cookies/local storage after Cloudflare verification."""
         ctx = context or self._context
         if ctx is None:
             return
@@ -1139,11 +1282,11 @@ class Fetcher:
             state_file.parent.mkdir(parents=True, exist_ok=True)
             await ctx.storage_state(path=str(tmp_file))
             await asyncio.to_thread(os.replace, tmp_file, state_file)
-            logger.info(f"[cs2] 已保存 Playwright 验证状态: {state_file}")
+            logger.info(f"[cs2] 已保存验证凭证状态: {state_file}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[cs2] 保存 Playwright 验证状态失败: {exc}")
+            logger.warning(f"[cs2] 保存验证凭证状态失败: {exc}")
         finally:
             try:
                 tmp_file.unlink(missing_ok=True)
@@ -1162,93 +1305,60 @@ class Fetcher:
             return False
         return any(cookie.get("name") == "cf_clearance" for cookie in cookies)
 
-    async def _vnc_tunnel_target(self) -> str | None:
-        host = await get_container_ip()
-        return f"{host}:{_VNC_PORT}" if host else None
-
     async def manual_verify(self) -> ManualVerifyResult:
-        """Open a visible browser, wait for manual Cloudflare clearance, and persist it."""
-        async with self._manual_verify_lock:
-            if self._closing:
-                return ManualVerifyResult(False, "插件正在关闭,无法开始验证")
+        """Trigger an automated Turnstile solving probe and persist clearance."""
+        if self._closing:
+            return ManualVerifyResult(False, "插件正在关闭,无法开始验证")
 
-            self._manual_verify_requested = True
-            display: str | None = None
+        if self._curl_cffi_enabled():
             try:
-                async with self._navigation_slot(PRIORITY_USER):
-                    async with self._browser_operation_lock:
-                        # A browser started for normal scraping may use the offscreen
-                        # window position, so recycle it before opening the VNC view.
-                        async with self._lifecycle_lock:
-                            if self._browser is not None:
-                                await self._close_playwright_stack(stop_xvfb=False)
-
-                        await self.start()
-                        self._browser_uses += 1
-                        display = self._display or os.environ.get("DISPLAY")
-                        if os.name != "nt":
-                            if not display:
-                                return ManualVerifyResult(
-                                    False, "没有可用的 Xvfb DISPLAY,无法启动 VNC"
-                                )
-                            await asyncio.to_thread(self._start_x11vnc, display)
-                            await asyncio.to_thread(self._start_novnc)
-
-                        context = await self._new_context()
-                        page = None
-                        try:
-                            page = await context.new_page()
-                            await self._guard_top_level_navigation(page, _PAGE_HOSTS)
-                            html = await self._navigate_html(
-                                page,
-                                hltv.URL_MATCHES,
-                                ".match",
-                                PRIORITY_USER,
-                            )
-                            if html is None:
-                                return ManualVerifyResult(
-                                    False,
-                                    "等待人工验证超时,HLTV 仍未放行",
-                                    display=display,
-                                    tunnel_target=await self._vnc_tunnel_target(),
-                                )
-                            has_clearance = await self._has_cf_clearance()
-                            await self._save_storage_state()
-                            target = await self._vnc_tunnel_target()
-                            return ManualVerifyResult(
-                                True,
-                                (
-                                    "Cloudflare 验证成功,已保存 cf_clearance 登录状态"
-                                    if has_clearance
-                                    else "HLTV 已成功进入 /matches,已保存浏览器登录状态"
-                                ),
-                                display=display,
-                                tunnel_target=target,
-                            )
-                        finally:
-                            if page is not None:
-                                await self._close_page(page)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[cs2] 人工验证失败: {exc}")
-                if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc):
-                    msg = (
-                        "未安装 Chromium 浏览器内核,无法打开验证窗口。"
-                        "请在服务器/容器终端执行: playwright install chromium"
+                html = await self._fetch_via_curl_cffi(hltv.URL_MATCHES, PRIORITY_USER)
+                if html is not None and not TurnstileAutoSolver.is_challenge(self._html_title(html), html):
+                    return ManualVerifyResult(
+                        True,
+                        "当前 Cloudflare 凭证有效且 curl_cffi 通信正常,无需额外解盾",
                     )
-                else:
-                    msg = f"人工验证启动失败:{exc}"
-                return ManualVerifyResult(
-                    False,
-                    msg,
-                    display=display,
-                    tunnel_target=await self._vnc_tunnel_target(),
-                )
-            finally:
-                self._manual_verify_requested = False
-                await self._stop_novnc()
-                await self._stop_x11vnc()
+            except Exception as exc:
+                logger.debug(f"[cs2] curl_cffi 验证探针预检异常: {exc}")
+
+        try:
+            async with self._navigation_slot(PRIORITY_USER):
+                async with self._browser_operation_lock:
+                    await self.start()
+                    self._browser_uses += 1
+                    context = await self._new_context()
+                    page = None
+                    try:
+                        page = await context.new_page()
+                        await self._guard_top_level_navigation(page, _PAGE_HOSTS)
+                        html = await self._navigate_html(
+                            page,
+                            hltv.URL_MATCHES,
+                            ".match",
+                            PRIORITY_USER,
+                        )
+                        if html is None:
+                            return ManualVerifyResult(
+                                False, "Cloudflare 自动求解未通过或 HLTV 拒绝访问"
+                            )
+                        has_clearance = await self._has_cf_clearance()
+                        await self._save_storage_state()
+                        return ManualVerifyResult(
+                            True,
+                            (
+                                "Cloudflare Turnstile 自动求解成功,已捕获并保存 cf_clearance"
+                                if has_clearance
+                                else "HLTV 已成功通过防风控验证,并已保存浏览器会话状态"
+                            ),
+                        )
+                    finally:
+                        if page is not None:
+                            await self._close_page(page)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[cs2] 自动验证探针执行失败: {exc}")
+            return ManualVerifyResult(False, f"验证失败: {exc}")
 
     async def _ensure_context_locked(self):
         if self._context is not None:
@@ -1296,8 +1406,6 @@ class Fetcher:
                         logger.warning(f"[cs2] Playwright 关闭失败: {exc}")
 
         if stop_xvfb:
-            await self._stop_novnc()
-            await self._stop_x11vnc()
             xvfb = self._xvfb_proc
             self._xvfb_proc = None
             self._display = None
@@ -1317,7 +1425,14 @@ class Fetcher:
         if self._closing or self._browser is None:
             return
 
-        use_limit = self.cfg.cs2_browser_recycle_uses
+        backend = str(
+            getattr(self.cfg, "cs2_browser_backend", "camoufox") or "camoufox"
+        ).lower()
+        use_limit = (
+            min(self.cfg.cs2_browser_recycle_uses, 1)
+            if backend == "camoufox"
+            else self.cfg.cs2_browser_recycle_uses
+        )
         age_limit_seconds = self.cfg.cs2_browser_recycle_hours * 3600.0
         uses_due = use_limit > 0 and self._browser_uses >= use_limit
         age_due = (
@@ -1470,19 +1585,32 @@ class Fetcher:
                 except Exception:  # timeout is validated below, never cached
                     selector_found = False
 
-                # 还在挑战页(宽限窗口内没自行放行)→ 不必再取 title/content,
-                # 直接进下一轮 reload。
+                # 还在挑战页(宽限窗口内没自行放行)
                 if was_challenge and not selector_found:
-                    if manual_verify:
-                        logger.warning(
-                            f"[cs2] 手动验证等待超时({self.cfg.cs2_manual_verify_timeout}s): {url}"
+                    # 尝试 Turnstile 自动求解 (免除人工 noVNC 依赖)
+                    if getattr(self.cfg, "cs2_turnstile_auto_solve", True):
+                        solved = await TurnstileAutoSolver.solve(
+                            page, timeout=getattr(self.cfg, "cs2_turnstile_timeout", 30)
                         )
+                        if solved:
+                            await self._save_storage_state()
+                            try:
+                                await page.wait_for_selector(
+                                    wait_selector,
+                                    state="attached",
+                                    timeout=15000,
+                                )
+                                selector_found = True
+                                was_challenge = False
+                            except Exception:
+                                pass
+
+                    if was_challenge and not selector_found:
+                        if attempt + 1 < attempts and time.monotonic() - started < budget:
+                            continue
+                        self._record_challenge(arm_backoff=True)
+                        logger.warning(f"[cs2] Cloudflare 挑战未通过: {url}")
                         return None
-                    if attempt + 1 < attempts and time.monotonic() - started < budget:
-                        continue
-                    self._record_challenge(arm_backoff=True)
-                    logger.warning(f"[cs2] Cloudflare 挑战未通过: {url}")
-                    return None
 
                 final_url = page.url
                 if not self._allowed_url(final_url, _PAGE_HOSTS):
@@ -1591,7 +1719,14 @@ class Fetcher:
             if html is not None:
                 await self._cache_html(url, html)
                 return html
-            logger.info(f"[cs2] curl_cffi 通道失败,回退 Playwright: {url}")
+            logger.info(f"[cs2] curl_cffi 通道失败,回退浏览器管线: {url}")
+
+        if getattr(self.cfg, "cs2_browser_backend", "camoufox").lower() == "nodriver":
+            html = await self._fetch_via_nodriver(url, priority)
+            if html is not None:
+                await self._cache_html(url, html)
+                return html
+            logger.info("[cs2] nodriver 通道未放行,回退标准浏览器管线")
 
         async with self._navigation_slot(priority):
             cached = store.cache_get(url, 0)

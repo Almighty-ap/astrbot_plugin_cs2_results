@@ -7,6 +7,7 @@
 
 import re as _re
 from collections.abc import Iterable as _Iterable
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -78,12 +79,17 @@ class Config(BaseModel):
     # —— 抓取(反爬)——
     # Linux 无 DISPLAY 时,插件会自动启动私有 Xvfb;需先安装系统包 xvfb。
     cs2_headful: bool = False
-    # 手动验证模式:保留有头浏览器并等待人工通过 Cloudflare 挑战。适用于本机
-    # 可见窗口,或通过 VNC 连接的 Xvfb。成功后会把 Playwright storage_state
-    # 保存到数据目录,后续浏览器重建时自动复用 cf_clearance。
+    # 备用浏览器抓取内核: camoufox(抗检测 Firefox,首选) / nodriver(异步原生 CDP) / playwright(标准 Chromium)
+    cs2_browser_backend: Literal["camoufox", "nodriver", "playwright"] = "camoufox"
+    # 是否启用 Cloudflare Turnstile 自动识别与拟真物理轨迹点选(免除人工 noVNC 依赖)
+    cs2_turnstile_auto_solve: bool = True
+    # Turnstile 自动求解超时秒数
+    cs2_turnstile_timeout: int = Field(default=30, ge=5, le=120)
+    # Camoufox 操作系统伪装指纹 (windows / linux / macos)
+    cs2_camoufox_os: Literal["windows", "linux", "macos"] = "windows"
+    # [已弃用] 原 noVNC 人工验证模式配置(保留默认值用于向下兼容旧环境)
     cs2_manual_verify: bool = False
     cs2_manual_verify_timeout: int = Field(default=180, ge=10, le=900)
-    # /cs2 验证 输出的 SSH 隧道主机名或公网 IP;留空时显示占位符。
     cs2_vnc_ssh_host: str = ""
     # 启用 curl_cffi(Chrome TLS 指纹伪装)作为优先抓取通道
     # 开启后优先抓 HLTV 页面、搜索与 logo;挑战/超时/异常自动回退 Playwright
@@ -115,8 +121,9 @@ class Config(BaseModel):
     # Playwright keeps one Node driver alive. Reusing the context preserves
     # Cloudflare cookies, but its JS heap grows after repeated navigations.
     # Rebuild the whole stack after either threshold. 0 disables that limit.
-    cs2_browser_recycle_uses: int = Field(default=100, ge=0, le=100000)
-    cs2_browser_recycle_hours: float = Field(default=4.0, ge=0, le=168)
+    # For anti-detect engines (e.g. Camoufox), 1-shot recycle is recommended on 2C2G hosts.
+    cs2_browser_recycle_uses: int = Field(default=1, ge=0, le=100000)
+    cs2_browser_recycle_hours: float = Field(default=1.0, ge=0, le=168)
 
     # —— 兜底 & 告警 ——
     cs2_results_backstop: bool = True  # 补报:重启/离线/漏扫期间结束的比赛,发现后补推

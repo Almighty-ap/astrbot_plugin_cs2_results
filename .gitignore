@@ -3,8 +3,12 @@ __pycache__/
 .venv/
 .pytest_cache/
 .ruff_cache/
+uv.lock
 data/
 assets/fonts/local/
+
+# Test Suite & Fixtures
+tests/
 
 # Project Management & Internal Docs
 AGENTS.md

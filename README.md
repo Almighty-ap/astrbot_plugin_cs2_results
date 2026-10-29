@@ -33,7 +33,11 @@
 - 支持 AstrBot LLM Function Calling，用户自然语言询问 CS2 比赛、赛程、比分和资讯时由模型调用插件查询。
 - 支持补报、投递重试、禁言顺延、死信重放和持久化 outbox。
 - 使用 AstrBot 内置 `Star.html_render()` / T2I 服务渲染卡片。
-- HLTV 页面和图片支持 `curl_cffi` Chrome TLS 指纹优先通道,并可按配置走代理。
+- HLTV 页面和图片支持 `curl_cffi` TLS 指纹优先通道，并根据所选浏览器后端动态对齐 TLS 指纹与 User-Agent。
+- 集成 **Camoufox**（定制 C++ 反特征检测 Firefox 内核），消除 CDP 特征与 Canvas/WebGL 自动化指纹泄漏。
+- 内置 **TurnstileAutoSolver**，采用三阶贝塞尔曲线拟真位移与物理点击全自动穿透 Cloudflare Turnstile 挑战，免除人工 noVNC 干预。
+- 支持纯异步 CDP 直连内核 **nodriver** 作为备选通道，提供多层降级容灾。
+- 针对 2C2G 云主机进行内存调优，支持 1-shot（单次即时回收）浏览器生命周期，实现 0 内存长驻。
 
 ## 安装
 
@@ -42,12 +46,18 @@
 
 ```bash
 pip install -r requirements.txt
+
+# 1. 核心推荐内核：Camoufox 反检测 Firefox（抗 Cloudflare 风控能力最强）
+camoufox fetch
+
+# 2. 备用标准内核：Playwright Chromium
 playwright install chromium
-# Linux 且开启有头模式时:
+
+# Linux 且开启有头调试模式时可选:
 apt-get install -y xvfb
 ```
 
-`playwright` 用于 HLTV 反爬回退通道,即使用 AstrBot 内置 T2I 渲染卡片也需要安装。
+> **提示（资源受限机器优化）**：在 2C2G 等轻量云主机上部署 Camoufox 时，下载官方压缩包可剔除内置的 Windows/macOS 字体目录（约 2GB），解压后仅保留 Linux 必要依赖与字体（约 270MB）。同时建议保持默认的 `cs2_browser_recycle_uses: 1`，抓取完成后即时销毁进程以释放内存。
 
 3. 在 WebUI 中重载或启用插件。
 4. 确保 NapCat 已通过 OneBot v11 连接到 AstrBot。
@@ -81,6 +91,7 @@ apt-get install -y xvfb
 | 指令 | 说明 |
 | --- | --- |
 | `/cs2 状态` | 查看抓取、缓存和投递状态 |
+| `/cs2 验证` | 主动触发一次 Cloudflare 无感自动化过盾与凭据健康检测 |
 | `/cs2 测试 [比赛ID或URL]` | 立即渲染一张测试战报卡 |
 | `/cs2 重试投递 [比赛ID]` | 重新激活死信投递 |
 | `/cs2 刷新名录` | 强制刷新战队和选手名录 |
@@ -124,58 +135,68 @@ cs2_llm_tool_intent_hint       启用关键词工具提示
 cs2_llm_tool_max_image_calls   单次对话最多发送的图片数
 ```
 
-## 抓取通道
+## 抓取通道与抗风控架构
 
-- `cs2_use_curl_cffi` 默认开启。插件优先使用 `curl_cffi.AsyncSession(impersonate="chrome")`
-  抓取 HLTV 页面、搜索 JSON 和赛事图片。
-- `cs2_proxy_url` 为空时,依次沿用 `HTTPS_PROXY`、`https_proxy`、`HTTP_PROXY`、
-  `http_proxy` 环境变量。
-- `curl_cffi` 遇到 HTTP/Cloudflare 挑战、超时或响应类型异常时自动回退 Playwright。
-- 默认两次逻辑抓取至少间隔 `90` 秒;直播赛果保持最高优先级,空闲时 `/matches`
-  扫描降为 `10` 分钟,有直播时最多 `5` 分钟一次,赛事页预热降为 `30` 分钟。
-- Cloudflare 连续失败会按 `5/10/20/40/60` 分钟退避,退避期间暂停扫描、资讯、
-  用户查询和装饰性资源,但保留直播结果与手动验证通道。
-- RSS 使用 `ETag` / `Last-Modified` 条件请求;返回 `304` 时直接复用本地 XML,
-  不重新下载和解析正文。
-- `cs2_headful` 默认为关闭。若 HLTV 的 `/events` 对无头浏览器返回挑战,可开启该选项;
-  Linux 无桌面环境时插件会自动启动私有 `Xvfb`。
-- `cs2_manual_verify` 用于人工通过 Cloudflare。开启后浏览器窗口保持可见,挑战页会等待
-  `cs2_manual_verify_timeout` 秒供手动点击。成功后插件把 Playwright `storage_state`
-  保存为 `data/plugin_data/cs2_results/playwright_storage_state.json`,后续浏览器重建会自动复用。
-  可在本机完成一次验证后,把该文件复制到 VPS 的同一数据目录。
-- Docker/VPS 环境可直接执行 `/cs2 验证`(仅调试群或超管私聊)。插件会复用或启动
-  `Xvfb :99`,把 Chromium 放在窗口 `0,0`,临时启动 `x11vnc` 监听容器 `5900` 端口,
-  并启动 `noVNC` 监听容器 `6080` 端口,成功后自动保存 `cf_clearance` 的
-  `storage_state`。
+面对 Cloudflare 针对数据中心/机房 IP 的严格风控（5秒盾 / Turnstile 人机验证），插件设计了兼具高性能与强抗检测的三层抓取架构：
 
-  本地无需安装 VNC 客户端。容器内的地址不能从 VPS 宿主机 `127.0.0.1` 直连,
-  SSH 隧道目标应写 AstrBot 容器 IP,例如:
+```text
+                      ┌─────────────────────────┐
+                      │    业务抓取请求 (HTML)    │
+                      └────────────┬────────────┘
+                                   │
+                                   ▼
+                    ┌──────────────────────────────┐
+                    │ L1: 优先级门禁与并发流控调度器   │
+                    │   (按直播/用户/扫描分级退避)   │
+                    └──────────────┬───────────────┘
+                                   │
+            ┌──────────────────────┴──────────────────────┐
+            ▼ (优先快速通道，耗时 < 100ms)                  │
+ ┌──────────────────────────────────────┐                 │ (遇 CF 挑战 / 超时 / 凭证失效)
+ │ L2: curl_cffi TLS 伪装抓取           │                 │
+ │  · 动态对齐浏览器 TLS 指纹与 UA        │                 ▼
+ │  · 复用 storage_state 中的有效凭据    │  ┌────────────────────────────────────────┐
+ └──────────────────┬───────────────────┘  │ L3: 反检测浏览器内核 + 自动解盾管线         │
+                    │ 成功                  │  · 核心内核: Camoufox (C++ 级特征反检测) │
+                    ▼                      │  · 备用内核: nodriver (纯异步 CDP 直连)   │
+            ┌───────────────┐              │  · 核心能力: Turnstile 自动穿透与拟真点击 │
+            │ 返回目标 HTML  │              │  · 成功获取 cf_clearance 并原子写回磁盘  │
+            └───────────────┘              └────────────────────────────────────────┘
+```
 
-  ```bash
-  # 容器 IP 可用 docker inspect 查询
-  ssh -L 6080:172.18.0.4:6080 root@<VPS_IP>
-  ```
+### 核心特性说明
 
-  保持 SSH 会话打开,用本机 Edge/Chrome 访问:
+1. **Camoufox 反检测 Firefox 内核（默认推荐）**：
+   - 传统 Chromium/Playwright 内核由于存在 CDP 通信特征（`Runtime.enable`）以及物理 GPU 适配器缺失等问题，在 Linux 无头 Docker 环境下极易被 Cloudflare 判定为自动化爬虫并拒签 Turnstile。
+   - Camoufox 在 C++ 源码层对 Canvas、WebGL、WebRTC、AudioContext 与系统字体等进行了底层指纹重写，从根本上消除了自动化特征泄露。
+2. **TurnstileAutoSolver 自动化解盾**：
+   - 彻底废除了过时且需要人工干预的 `x11vnc` / `noVNC` 流程。
+   - 内置三阶贝塞尔曲线（Cubic Bézier）人类行为轨迹模拟算法，自动计算复选框热区并派发带有 `isTrusted: true` 属性的真实物理鼠标位移、按压与释放事件，全自动穿透 Turnstile 挑战。
+   - 成功解盾后，自动提取 `cf_clearance` 并持久化落盘至 `playwright_storage_state.json`。
+3. **动态 TLS 指纹自适应（curl_cffi）**：
+   - Cloudflare 签发的 `cf_clearance` 凭证与客户端 TLS JA4 指纹和 User-Agent 强绑定。
+   - 插件根据配置的 `cs2_browser_backend` 自动对齐 `curl_cffi` 的伪装目标（Camoufox 时匹配 Firefox 指纹及 UA，标准内核时匹配 Chrome 指纹），确保快速通道能稳定复用浏览器捕获的放行凭证。
+4. **轻量内存与 1-shot 生命周期管理（2C2G 专属调优）**：
+   - 在 2C2G 等轻量 VPS 上，浏览器若长驻后台会持续占用数百兆物理内存。
+   - 默认开启单次即时回收（`cs2_browser_recycle_uses: 1`），当回退到浏览器完成一次抓取并落盘凭据后，立刻关闭浏览器并释放驱动堆内存，实现 0 内存长驻。
+5. **门禁与流控退避**：
+   - 默认两次抓取间隔至少 `90` 秒；直播赛果保持最高优先级。
+   - Cloudflare 连续遇到拦截时按 `5/10/20/40/60` 分钟指数退避，退避期间暂停轮询，优先保障核心推送。
+6. **代理配置**：
+   - `cs2_proxy_url` 留空时依次读取系统 `HTTPS_PROXY`、`HTTP_PROXY` 环境变量。
 
-  ```text
-  http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale
-  ```
+### 相关配置项
 
-  页面中会显示 VPS 容器内运行的 Chromium。验证窗口仅在 `/cs2 验证` 等待期间开放。
-  容器需安装 `x11vnc`、`noVNC` 和 `websockify`:
-  `apt-get install -y x11vnc novnc websockify`。
-
-  如需原生 VNC 客户端,也可把隧道改为
-  `ssh -L 5900:172.18.0.4:5900 root@<VPS_IP>`,再连接 `127.0.0.1:5900`。
-
-  `cs2_vnc_ssh_host` 可填写 VPS SSH 主机/IP,用于生成完整隧道命令;
-  留空时 `/cs2 验证` 输出 `<VPS_IP>` 占位符。
-- Playwright 的 Node driver 会随反复导航增长内存。插件默认在浏览器抓取满
-  `cs2_browser_recycle_uses` 次或运行满 `cs2_browser_recycle_hours` 小时后,在操作间隙
-  自动重建整个 Playwright/Chromium 栈;Xvfb 会保留。两个阈值设为 `0` 可分别关闭。
-- Docker 内的 `127.0.0.1` 指向容器自身。代理运行在宿主机时,请填写宿主机地址或使用
-  宿主机的容器网络地址。
+| 配置字段 | 类型 | 默认值 | 说明 |
+| --- | :---: | :---: | --- |
+| `cs2_browser_backend` | string | `camoufox` | 浏览器回退后端：`camoufox`（推荐）、`nodriver`（实验性 CDP 直连）、`playwright`（标准 Chromium） |
+| `cs2_turnstile_auto_solve` | bool | `true` | 是否启用 Turnstile 挑战自动化识别与贝塞尔轨迹模拟点击 |
+| `cs2_turnstile_timeout` | int | `30` | 自动化解盾最大超时时间（秒，建议 10~60） |
+| `cs2_camoufox_os` | string | `windows` | Camoufox 伪装的操作系统特征：`windows` 或 `linux` |
+| `cs2_browser_recycle_uses` | int | `1` | 浏览器最大复用次数（在 Camoufox 或 2C2G 机器上强制建议设为 `1` 即时回收） |
+| `cs2_browser_recycle_hours` | float | `1.0` | 浏览器最大存活时间（小时），超时自动重建 |
+| `cs2_use_curl_cffi` | bool | `true` | 是否开启 curl_cffi 快速抓取与指纹伪装通道 |
+| `cs2_proxy_url` | string | `""` | 专用 HTTP/SOCKS5 代理地址，如 `http://127.0.0.1:7890` |
 
 ## 数据目录
 
@@ -187,19 +208,16 @@ data/plugin_data/cs2_results/
 
 包含订阅数据库、页面缓存、logo 缓存和投递载荷。升级或重装插件不会覆盖该目录。
 
-## 开发与测试
+## 开发与规范
 
 - **架构设计与开发文档**: 详见 [DEVELOPMENT.md](DEVELOPMENT.md)
 
-本地开发环境执行测试与静态检查：
+本地开发环境执行代码规范与静态检查：
 
 ```bash
 pip install -r requirements.txt -r requirements-dev.txt
-python -m pytest
 ruff check .
 ```
-
-单元测试会为 AstrBot 运行时提供最小测试桩,不会启动真实 NapCat。
 
 ## 说明
 

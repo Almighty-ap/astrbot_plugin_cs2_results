@@ -60,34 +60,42 @@
     "hint": "示例:http://127.0.0.1:7890;留空时自动沿用 HTTP_PROXY/HTTPS_PROXY"
   },
   "cs2_headful": {
-    "description": "Playwright 浏览器有头模式(调试用)",
+    "description": "浏览器有头模式(调试用)",
     "type": "bool",
     "default": false,
     "hint": "HLTV /events 反爬较严时建议开启;Linux 无 DISPLAY 会自动启动 Xvfb,需安装 xvfb"
   },
-  "cs2_manual_verify": {
-    "description": "手动通过 Cloudflare 人机验证",
-    "type": "bool",
-    "default": false,
-    "hint": "保留有头浏览器并等待人工点击;验证成功后保存 Playwright 登录状态,后续自动复用"
-  },
-  "cs2_manual_verify_timeout": {
-    "description": "手动验证等待超时(秒)",
-    "type": "int",
-    "default": 180,
-    "hint": "10~900 秒;仅 cs2_manual_verify=true 时生效"
-  },
-  "cs2_vnc_ssh_host": {
-    "description": "VNC SSH 隧道连接主机",
+  "cs2_browser_backend": {
+    "description": "备用浏览器抓取内核",
     "type": "string",
-    "default": "",
-    "hint": "填写 VPS 公网 IP 或 SSH Host;/cs2 验证 会据此生成 ssh -L 命令"
+    "default": "camoufox",
+    "options": ["camoufox", "nodriver", "playwright"],
+    "hint": "camoufox(抗检测 Firefox,首选) / nodriver(异步原生 CDP 直连) / playwright(标准 Chromium)"
+  },
+  "cs2_turnstile_auto_solve": {
+    "description": "Cloudflare Turnstile 自动求解",
+    "type": "bool",
+    "default": true,
+    "hint": "遇 Cloudflare 挑战自动识别并模拟真实人类轨迹点选复选框,无需人工 VNC 干预"
+  },
+  "cs2_turnstile_timeout": {
+    "description": "Turnstile 自动求解超时(秒)",
+    "type": "int",
+    "default": 30,
+    "hint": "5~120 秒;自动点选与等待 cf_clearance 捕获的最长时限"
+  },
+  "cs2_camoufox_os": {
+    "description": "Camoufox 操作系统伪装指纹",
+    "type": "string",
+    "default": "windows",
+    "options": ["windows", "linux", "macos"],
+    "hint": "伪装的操作系统特征,默认 windows"
   },
   "cs2_browser_recycle_uses": {
-    "description": "Playwright 浏览器栈最大使用次数(0=不按次数回收)",
+    "description": "浏览器栈最大使用次数(0=不按次数回收)",
     "type": "int",
-    "default": 100,
-    "hint": "每次回退浏览器抓取计 1 次;达到后自动关闭并重建 Playwright/Chromium,释放 Node driver 堆内存"
+    "default": 1,
+    "hint": "达到后自动关闭并重建浏览器以彻底释放内存;在 Camoufox 内核或 2C2G 环境下强制建议设为 1(单次即时回收)"
   },
   "cs2_browser_recycle_hours": {
     "description": "Playwright 浏览器栈最长存活小时数(0=不按时间回收)",
