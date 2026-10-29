@@ -93,6 +93,7 @@ def test_curl_cffi_page_fetch_uses_chrome_and_explicit_proxy(
     fetcher = Fetcher(
         Config(
             cs2_use_curl_cffi=True,
+            cs2_browser_backend="playwright",
             cs2_proxy_url="http://127.0.0.1:7890",
             cs2_request_min_gap=0,
             cs2_nav_timeout=1000,

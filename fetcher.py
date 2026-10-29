@@ -570,17 +570,33 @@ class Fetcher:
 
         proxy = self._curl_cffi_proxy()
         cookies = self._load_storage_cookies()
+        backend = str(getattr(self.cfg, "cs2_browser_backend", "camoufox") or "camoufox").lower()
+        impersonate_target = "firefox" if backend == "camoufox" else "chrome"
         session_kwargs: dict[str, object] = {
-            "impersonate": "chrome",
+            "impersonate": impersonate_target,
             "proxy": proxy,
             "timeout": self._curl_cffi_timeout(),
         }
         if cookies:
             session_kwargs["cookies"] = cookies
-        headers = {
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
+        if impersonate_target == "firefox":
+            ff_os = getattr(self.cfg, "cs2_camoufox_os", "windows")
+            ff_ua = (
+                "Mozilla/5.0 (X11; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0"
+                if ff_os == "linux"
+                else "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101 Firefox/156.0"
+            )
+            headers = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "User-Agent": ff_ua,
+            }
+        else:
+            headers = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "User-Agent": UA,
+            }
         async with self._gate.slot(priority):
             try:
                 async with AsyncSession(**session_kwargs) as session:
@@ -718,8 +734,10 @@ class Fetcher:
 
         proxy = self._curl_cffi_proxy()
         cookies = self._load_storage_cookies()
+        backend = str(getattr(self.cfg, "cs2_browser_backend", "camoufox") or "camoufox").lower()
+        impersonate_target = "firefox" if backend == "camoufox" else "chrome"
         session_kwargs: dict[str, object] = {
-            "impersonate": "chrome",
+            "impersonate": impersonate_target,
             "proxy": proxy,
             "timeout": self._curl_cffi_timeout(),
         }
