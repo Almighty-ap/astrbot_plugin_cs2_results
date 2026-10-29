@@ -1021,12 +1021,21 @@ class Fetcher:
                 try:
                     from camoufox.async_api import AsyncCamoufox
 
+                    try:
+                        from camoufox.addons import DefaultAddons
+
+                        exclude_addons = [DefaultAddons.UBO]
+                    except Exception:
+                        exclude_addons = None
+
                     proxy_url = self._curl_cffi_proxy()
                     camoufox_opts: dict[str, object] = {
                         "headless": not headful,
-                        "geoip": True,
+                        "geoip": False,
                         "os": getattr(self.cfg, "cs2_camoufox_os", "windows"),
                     }
+                    if exclude_addons:
+                        camoufox_opts["exclude_addons"] = exclude_addons
                     if proxy_url:
                         camoufox_opts["proxy"] = {"server": proxy_url}
                     if launch_env:
@@ -1227,6 +1236,10 @@ class Fetcher:
             # cancelled while it is waiting for its children.
             async with self._lifecycle_lock:
                 await self._close_playwright_stack(stop_xvfb=True)
+
+    async def close(self) -> None:
+        """Alias for shutdown to support context managers and standard cleanup."""
+        await self.shutdown()
 
     @asynccontextmanager
     async def _navigation_slot(self, priority: FetchPriority) -> AsyncIterator[None]:
