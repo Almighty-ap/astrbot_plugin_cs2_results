@@ -221,6 +221,33 @@ class ConfigBoundaryTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 self.Config(cs2_proxy_url=value)
 
+    def test_browser_backend_and_turnstile_config(self) -> None:
+        default_cfg = self.Config()
+        self.assertEqual(default_cfg.cs2_browser_backend, "camoufox")
+        self.assertTrue(default_cfg.cs2_turnstile_auto_solve)
+        self.assertEqual(default_cfg.cs2_turnstile_timeout, 30)
+        self.assertEqual(default_cfg.cs2_camoufox_os, "windows")
+
+        custom_cfg = self.Config(
+            cs2_browser_backend="nodriver",
+            cs2_turnstile_auto_solve=False,
+            cs2_turnstile_timeout=60,
+            cs2_camoufox_os="linux",
+        )
+        self.assertEqual(custom_cfg.cs2_browser_backend, "nodriver")
+        self.assertFalse(custom_cfg.cs2_turnstile_auto_solve)
+        self.assertEqual(custom_cfg.cs2_turnstile_timeout, 60)
+        self.assertEqual(custom_cfg.cs2_camoufox_os, "linux")
+
+        with self.assertRaises(ValidationError):
+            self.Config(cs2_browser_backend="unsupported_engine")
+
+        with self.assertRaises(ValidationError):
+            self.Config(cs2_turnstile_timeout=2)  # ge=5
+
+        with self.assertRaises(ValidationError):
+            self.Config(cs2_camoufox_os="android")
+
 
 if __name__ == "__main__":
     unittest.main()

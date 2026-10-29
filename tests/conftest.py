@@ -10,6 +10,13 @@ from typing import Any
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT.parent))
+sys.path.insert(0, str(PLUGIN_ROOT))
+
+# Ensure astrbot_plugin_cs2_results can be imported even when directory is named with a suffix (e.g. -main)
+if "astrbot_plugin_cs2_results" not in sys.modules:
+    pkg = types.ModuleType("astrbot_plugin_cs2_results")
+    pkg.__path__ = [str(PLUGIN_ROOT)]
+    sys.modules["astrbot_plugin_cs2_results"] = pkg
 
 
 def _module(name: str) -> types.ModuleType:

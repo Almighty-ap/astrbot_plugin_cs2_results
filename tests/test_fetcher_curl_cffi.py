@@ -7,7 +7,7 @@ import sys
 import time
 import types
 from typing import ClassVar
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from astrbot_plugin_cs2_results import fetcher as fetcher_module
@@ -256,16 +256,6 @@ def test_playwright_context_uses_same_proxy_and_is_reused() -> None:
     assert first["proxy"] == {"server": "http://mihomo:7890"}
 
 
-def test_manual_verify_uses_visible_chromium_window() -> None:
-    fetcher = Fetcher(
-        Config(cs2_manual_verify=True, cs2_request_min_gap=0)
-    )
-
-    assert fetcher._headful_enabled() is True
-    args = fetcher._chromium_launch_args()
-    assert "--window-position=0,0" in args
-
-
 def test_browser_context_loads_saved_storage_state(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -285,141 +275,61 @@ def test_browser_context_loads_saved_storage_state(
     assert context["storage_state"] == str(state_file)
 
 
-def test_manual_verify_saves_state_after_matches_page() -> None:
-    class _Page:
-        closed = False
-
-        async def close(self) -> None:
-            self.closed = True
-
-    class _Context:
-        def __init__(self) -> None:
-            self.page = _Page()
-
-        async def new_page(self) -> _Page:
-            return self.page
-
+def test_manual_verify_curl_cffi_fast_path() -> None:
     fetcher = Fetcher(Config(cs2_request_min_gap=0))
-    fetcher._display = ":99"
+    fetcher._fetch_via_curl_cffi = AsyncMock(
+        return_value="<html><title>Matches | HLTV.org</title></html>"
+    )
+    result = asyncio.run(fetcher.manual_verify())
+    assert result.ok is True
+    assert "当前 Cloudflare 凭证有效" in result.message
+
+
+def test_manual_verify_browser_auto_solve_success() -> None:
+    fetcher = Fetcher(Config(cs2_request_min_gap=0))
+    fetcher._fetch_via_curl_cffi = AsyncMock(return_value=None)
     fetcher.start = AsyncMock()
-    fetcher._new_context = AsyncMock(return_value=_Context())
+    page = MagicMock()
+    context = MagicMock()
+    context.new_page = AsyncMock(return_value=page)
+    fetcher._new_context = AsyncMock(return_value=context)
     fetcher._guard_top_level_navigation = AsyncMock()
     fetcher._navigate_html = AsyncMock(
         return_value="<html><title>Matches | HLTV.org</title></html>"
     )
     fetcher._has_cf_clearance = AsyncMock(return_value=True)
     fetcher._save_storage_state = AsyncMock()
+    fetcher._close_page = AsyncMock()
 
     result = asyncio.run(fetcher.manual_verify())
-
     assert result.ok is True
-    assert "cf_clearance" in result.message
-    fetcher._save_storage_state.assert_awaited_once()
-    assert fetcher._manual_verify_requested is False
+    assert "自动求解成功" in result.message
 
 
-def test_start_x11vnc_launches_temporary_server(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[list[str]] = []
-
-    class _Proc:
-        def poll(self) -> None:
-            return None
-
-    def fake_popen(args: list[str], **_kwargs: object) -> _Proc:
-        calls.append(args)
-        return _Proc()
-
-    ready = iter((False, True))
+def test_manual_verify_browser_solve_failure() -> None:
     fetcher = Fetcher(Config(cs2_request_min_gap=0))
-    monkeypatch.setattr(fetcher_module.shutil, "which", lambda _name: "/usr/bin/x11vnc")
-    monkeypatch.setattr(fetcher_module.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(fetcher, "_tcp_port_ready", lambda *_args: next(ready))
+    fetcher._fetch_via_curl_cffi = AsyncMock(return_value=None)
+    fetcher.start = AsyncMock()
+    page = MagicMock()
+    context = MagicMock()
+    context.new_page = AsyncMock(return_value=page)
+    fetcher._new_context = AsyncMock(return_value=context)
+    fetcher._guard_top_level_navigation = AsyncMock()
+    fetcher._navigate_html = AsyncMock(return_value=None)
+    fetcher._close_page = AsyncMock()
 
-    fetcher._start_x11vnc(":99")
-
-    assert calls
-    assert calls[0][0] == "/usr/bin/x11vnc"
-    assert calls[0][1:3] == ["-display", ":99"]
-    assert "-localhost" in calls[0]
-    assert "-forever" in calls[0]
-    assert "-shared" in calls[0]
-
-
-def test_get_container_ip_and_vnc_tunnel_target(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fetcher_module._CACHED_CONTAINER_IP = None
-    dns_calls = []
-
-    def fake_gethostbyname(hostname: str) -> str:
-        dns_calls.append(hostname)
-        return "172.18.0.5"
-
-    monkeypatch.setattr(fetcher_module.socket, "gethostbyname", fake_gethostbyname)
-    monkeypatch.setattr(fetcher_module.socket, "gethostname", lambda: "astrbot-container")
-
-    async def run() -> None:
-        ip1 = await fetcher_module.get_container_ip()
-        assert ip1 == "172.18.0.5"
-        assert len(dns_calls) == 1
-
-        # Second call should hit memory cache without querying DNS
-        ip2 = await fetcher_module.get_container_ip()
-        assert ip2 == "172.18.0.5"
-        assert len(dns_calls) == 1
-
-        fetcher = Fetcher(Config(cs2_request_min_gap=0))
-        target = await fetcher._vnc_tunnel_target()
-        assert target == "172.18.0.5:5900"
-
-    asyncio.run(run())
+    result = asyncio.run(fetcher.manual_verify())
+    assert result.ok is False
+    assert "未通过" in result.message
 
 
-def test_manual_verify_missing_browser_error_message(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_manual_verify_exception_handling() -> None:
     fetcher = Fetcher(Config(cs2_request_min_gap=0))
-
-    async def fake_start() -> None:
-        raise RuntimeError("Executable doesn't exist at /root/.cache/ms-playwright/chromium")
-
-    monkeypatch.setattr(fetcher, "start", fake_start)
-    res = asyncio.run(fetcher.manual_verify())
-    assert not res.ok
-    assert "未安装 Chromium 浏览器内核" in res.message
-    assert "playwright install chromium" in res.message
-
-
-def test_start_novnc_launches_websockify_bridge(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[list[str]] = []
-
-    class _Proc:
-        def poll(self) -> None:
-            return None
-
-    def fake_popen(args: list[str], **_kwargs: object) -> _Proc:
-        calls.append(args)
-        return _Proc()
-
-    ready = iter((False, True))
-    fetcher = Fetcher(Config(cs2_request_min_gap=0))
-    monkeypatch.setattr(fetcher_module.shutil, "which", lambda _name: "/usr/bin/websockify")
-    monkeypatch.setattr(fetcher_module.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(fetcher, "_tcp_port_ready", lambda *_args: next(ready))
-    monkeypatch.setattr(fetcher_module.Path, "is_file", lambda _self: True)
-
-    fetcher._start_novnc()
-
-    assert calls
-    assert calls[0][0] == "/usr/bin/websockify"
-    assert calls[0][1].startswith("--web=")
-    assert calls[0][1].endswith("novnc")
-    assert "6080" in calls[0]
-    assert "127.0.0.1:5900" in calls[0]
+    fetcher._fetch_via_curl_cffi = AsyncMock(return_value=None)
+    fetcher.start = AsyncMock(side_effect=RuntimeError("Browser launch crash"))
+    result = asyncio.run(fetcher.manual_verify())
+    assert result.ok is False
+    assert "Browser launch crash" in result.message
 
 
 def test_page_fetch_closes_page_but_keeps_shared_context(

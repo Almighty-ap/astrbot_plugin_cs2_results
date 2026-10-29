@@ -27,7 +27,7 @@
   /cs2 重试投递 [比赛ID] 重新激活全部或指定比赛的死信
   /cs2 刷新名录         强制刷新战队/选手本地名录(抓一次世界排行榜)
   /cs2 刷新VRS          强制刷新 Valve 世界排名总榜(抓一次 /valve-ranking/teams)
-  /cs2 验证             启动可见 Chromium + noVNC,人工完成 Cloudflare 验证
+  /cs2 验证             测试 Cloudflare 通信并触发 Turnstile 自动穿透解盾
 适配 AstrBot + NapCat(OneBot v11)。
 """
 
@@ -2414,27 +2414,14 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
 
 
 async def _handle_manual_verify() -> None:
-    host = await fetcher.get_container_ip()
-    container_ip = host or "<AstrBot容器IP>"
-    vnc_target = f"{container_ip}:5900"
-    novnc_target = f"{container_ip}:6080"
-    ssh_host = cfg.cs2_vnc_ssh_host.strip() or "<VPS_IP>"
-    await cs2.send(
-        "正在启动人工验证浏览器…\n"
-        "无需安装 VNC 客户端,使用浏览器即可。\n"
-        f"1. 本机执行: ssh -L 6080:{novnc_target} root@{ssh_host}\n"
-        "2. 浏览器打开: "
-        "http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale\n"
-        "3. 在页面中的 Chromium 完成 HLTV 验证。\n"
-        f"原生 VNC 备用隧道: ssh -L 5900:{vnc_target} root@{ssh_host}"
-    )
+    await cs2.send("正在启动 Cloudflare 通信测试与 Turnstile 自动穿透求解…")
     result = await fetcher.manual_verify()
     if result.ok:
         await cs2.finish(
-            f"{result.message}\n后续自动抓取将复用这次 cf_clearance;失效时再执行 /cs2 验证"
+            f"验证成功: {result.message}\n后续自动抓取将复用新凭证(cf_clearance)"
         )
     else:
-        await cs2.finish(f"人工验证失败:{result.message}")
+        await cs2.finish(f"验证未通过: {result.message}")
 
 
 async def _send_help(admin: bool) -> None:
@@ -2469,7 +2456,7 @@ async def _send_help(admin: bool) -> None:
                 "/cs2 重试投递 [比赛ID] —— 重新激活死信(仅调试群)",
                 "/cs2 刷新名录 —— 强制刷新战队/选手名录(仅调试群)",
                 "/cs2 刷新VRS —— 强制刷新 Valve 世界排名总榜(仅调试群)",
-                "/cs2 验证 —— 启动网页 VNC 人工完成 Cloudflare 验证(仅调试群)",
+                "/cs2 验证 —— 测试 Cloudflare 通信并触发 Turnstile 自动穿透(仅调试群)",
                 "/cs2 资讯检查 —— 立即检查并推送 HLTV RSS 新资讯(仅调试群)",
             ]
         await cs2.finish("\n".join(lines))
