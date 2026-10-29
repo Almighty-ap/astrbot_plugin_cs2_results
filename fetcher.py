@@ -131,65 +131,57 @@ class TurnstileAutoSolver:
 
     @classmethod
     async def solve(cls, page, timeout: float = 30.0) -> bool:
-        """Attempt to locate Turnstile widget and dispatch simulated human click."""
+        """Attempt to solve Cloudflare challenge (both JS Managed Challenge and Turnstile widget)."""
         try:
-            logger.info("[cs2] 检测到 Cloudflare Turnstile 挑战,尝试自动求解…")
-            iframe_selector = "iframe[src*='challenges.cloudflare.com']"
-            try:
-                iframe = await page.wait_for_selector(
-                    iframe_selector,
-                    state="visible",
-                    timeout=min(float(timeout) * 1000.0, 10000.0),
-                )
-            except Exception:
-                iframe = None
-
-            if iframe is None:
-                logger.info("[cs2] 未检测到明显的 Turnstile iframe 元素")
-                return False
-
-            box = await iframe.bounding_box()
-            if not box:
-                logger.info("[cs2] 无法获取 Turnstile iframe 边界尺寸")
-                return False
-
-            target_x = box["x"] + min(30.0, box["width"] * 0.15) + random.uniform(-2.5, 2.5)
-            target_y = box["y"] + (box["height"] / 2.0) + random.uniform(-2.5, 2.5)
-
-            start_x = random.uniform(50.0, 200.0)
-            start_y = random.uniform(50.0, 200.0)
-            trajectory = cls.generate_bezier_trajectory(start_x, start_y, target_x, target_y)
-
-            for px, py in trajectory:
-                await page.mouse.move(px, py)
-                await asyncio.sleep(random.uniform(0.005, 0.012))
-
-            await asyncio.sleep(random.uniform(0.12, 0.25))
-            await page.mouse.down()
-            await asyncio.sleep(random.uniform(0.06, 0.12))
-            await page.mouse.up()
-            logger.info(f"[cs2] 已向 Turnstile 坐标 ({target_x:.1f}, {target_y:.1f}) 发送拟真点击")
-
+            logger.info("[cs2] 检测到 Cloudflare 挑战,尝试自动求解与穿透…")
             deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                await asyncio.sleep(0.5)
-                try:
-                    cookies = await page.context.cookies("https://www.hltv.org")
-                    if any(c.get("name") == "cf_clearance" for c in cookies):
-                        logger.info("[cs2] Turnstile 自动求解成功: 已捕获 cf_clearance")
-                        return True
-                except Exception:
-                    pass
 
+            clicked = False
+            iframe_selector = "iframe[src*='challenges.cloudflare.com']"
+
+            while time.monotonic() < deadline:
+                # 1. 检查是否已经放行通过 (Title 变更或出现 cf_clearance)
                 try:
                     title = await page.title()
                     if title and not cls.is_challenge(title):
-                        logger.info(f"[cs2] Turnstile 自动放行成功: {title!r}")
+                        logger.info(f"[cs2] Cloudflare 挑战已成功放行: {title!r}")
+                        return True
+                    cookies = await page.context.cookies("https://www.hltv.org")
+                    if any(c.get("name") == "cf_clearance" for c in cookies):
+                        logger.info("[cs2] Cloudflare 挑战已捕获有效 cf_clearance")
                         return True
                 except Exception:
                     pass
 
-            logger.warning("[cs2] Turnstile 自动求解等待放行超时")
+                # 2. 如果尚未点击过且检测到了 Turnstile iframe, 则执行模拟物理轨迹点击
+                if not clicked:
+                    try:
+                        iframe = await page.query_selector(iframe_selector)
+                        if iframe is not None:
+                            box = await iframe.bounding_box()
+                            if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
+                                target_x = box["x"] + min(30.0, box["width"] * 0.15) + random.uniform(-2.5, 2.5)
+                                target_y = box["y"] + (box["height"] / 2.0) + random.uniform(-2.5, 2.5)
+                                start_x = random.uniform(50.0, 200.0)
+                                start_y = random.uniform(50.0, 200.0)
+                                trajectory = cls.generate_bezier_trajectory(start_x, start_y, target_x, target_y)
+
+                                for px, py in trajectory:
+                                    await page.mouse.move(px, py)
+                                    await asyncio.sleep(random.uniform(0.005, 0.012))
+
+                                await asyncio.sleep(random.uniform(0.12, 0.25))
+                                await page.mouse.down()
+                                await asyncio.sleep(random.uniform(0.06, 0.12))
+                                await page.mouse.up()
+                                clicked = True
+                                logger.info(f"[cs2] 已向 Turnstile 坐标 ({target_x:.1f}, {target_y:.1f}) 发送拟真点击")
+                    except Exception as e:
+                        logger.debug(f"[cs2] 探测 Turnstile iframe 异常: {e}")
+
+                await asyncio.sleep(0.5)
+
+            logger.warning("[cs2] Cloudflare 挑战求解等待放行超时")
             return False
         except asyncio.CancelledError:
             raise

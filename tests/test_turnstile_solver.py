@@ -67,6 +67,7 @@ def test_turnstile_solver_success_flow() -> None:
     element = MagicMock()
     element.bounding_box = AsyncMock(return_value={"x": 200, "y": 150, "width": 300, "height": 65})
     page.wait_for_selector = AsyncMock(return_value=element)
+    page.query_selector = AsyncMock(return_value=element)
 
     mouse = MagicMock()
     mouse.move = AsyncMock()
