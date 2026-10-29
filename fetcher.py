@@ -1033,6 +1033,15 @@ class Fetcher:
                         "headless": not headful,
                         "geoip": False,
                         "os": getattr(self.cfg, "cs2_camoufox_os", "windows"),
+                        "firefox_user_prefs": {
+                            "browser.tabs.remote.maxAttributeContentProcesses": 1,
+                            "dom.ipc.processCount": 1,
+                            "dom.ipc.processCount.webIsolated": 1,
+                            "browser.cache.memory.capacity": 2048,
+                            "browser.cache.disk.enable": False,
+                            "image.mem.decode_bytes_at_a_time": 16384,
+                            "javascript.options.mem.gc_frequency": 10,
+                        },
                     }
                     if exclude_addons:
                         camoufox_opts["exclude_addons"] = exclude_addons
@@ -1416,7 +1425,14 @@ class Fetcher:
         if self._closing or self._browser is None:
             return
 
-        use_limit = self.cfg.cs2_browser_recycle_uses
+        backend = str(
+            getattr(self.cfg, "cs2_browser_backend", "camoufox") or "camoufox"
+        ).lower()
+        use_limit = (
+            min(self.cfg.cs2_browser_recycle_uses, 1)
+            if backend == "camoufox"
+            else self.cfg.cs2_browser_recycle_uses
+        )
         age_limit_seconds = self.cfg.cs2_browser_recycle_hours * 3600.0
         uses_due = use_limit > 0 and self._browser_uses >= use_limit
         age_due = (

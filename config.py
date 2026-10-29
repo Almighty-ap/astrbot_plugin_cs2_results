@@ -121,8 +121,9 @@ class Config(BaseModel):
     # Playwright keeps one Node driver alive. Reusing the context preserves
     # Cloudflare cookies, but its JS heap grows after repeated navigations.
     # Rebuild the whole stack after either threshold. 0 disables that limit.
-    cs2_browser_recycle_uses: int = Field(default=100, ge=0, le=100000)
-    cs2_browser_recycle_hours: float = Field(default=4.0, ge=0, le=168)
+    # For anti-detect engines (e.g. Camoufox), 1-shot recycle is recommended on 2C2G hosts.
+    cs2_browser_recycle_uses: int = Field(default=1, ge=0, le=100000)
+    cs2_browser_recycle_hours: float = Field(default=1.0, ge=0, le=168)
 
     # —— 兜底 & 告警 ——
     cs2_results_backstop: bool = True  # 补报:重启/离线/漏扫期间结束的比赛,发现后补推

@@ -92,10 +92,10 @@
     "hint": "伪装的操作系统特征,默认 windows"
   },
   "cs2_browser_recycle_uses": {
-    "description": "Playwright 浏览器栈最大使用次数(0=不按次数回收)",
+    "description": "浏览器栈最大使用次数(0=不按次数回收)",
     "type": "int",
-    "default": 100,
-    "hint": "每次回退浏览器抓取计 1 次;达到后自动关闭并重建 Playwright/Chromium,释放 Node driver 堆内存"
+    "default": 1,
+    "hint": "达到后自动关闭并重建浏览器以彻底释放内存;在 Camoufox 内核或 2C2G 环境下强制建议设为 1(单次即时回收)"
   },
   "cs2_browser_recycle_hours": {
     "description": "Playwright 浏览器栈最长存活小时数(0=不按时间回收)",
