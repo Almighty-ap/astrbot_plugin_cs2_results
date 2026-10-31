@@ -24,6 +24,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -129,55 +130,126 @@ class TurnstileAutoSolver:
             points.append((round(x, 1), round(y, 1)))
         return points
 
+    @staticmethod
+    async def _click_widget(page) -> bool:
+        """点击 Turnstile 复选框。
+
+        新版 Cloudflare 挑战把 Turnstile 组件放进 closed shadow root,
+        ``query_selector("iframe[src*=challenges.cloudflare.com"]")`` 永远命中不了。
+        这里改用隐藏字段 ``input[name=cf-turnstile-response]`` 的父容器定位整个组件,
+        再按人类轨迹点击左侧复选框。
+        """
+        try:
+            box = await page.evaluate(
+                """() => {
+                    const i = document.querySelector('input[name="cf-turnstile-response"]');
+                    const host = i && i.parentElement;
+                    if (!host) return null;
+                    const r = host.getBoundingClientRect();
+                    if (r.width < 40 || r.height < 20) return null;
+                    return {x: r.x, y: r.y, w: r.width, h: r.height};
+                }"""
+            )
+            if not box:
+                return False
+            target_x = box["x"] + min(34.0, max(18.0, box["w"] * 0.10))
+            target_y = box["y"] + box["h"] / 2.0
+            start_x = random.uniform(40.0, 180.0)
+            start_y = random.uniform(40.0, 180.0)
+            for px, py in TurnstileAutoSolver.generate_bezier_trajectory(
+                start_x, start_y, target_x, target_y
+            ):
+                await page.mouse.move(px, py)
+                await asyncio.sleep(random.uniform(0.008, 0.02))
+            await asyncio.sleep(random.uniform(0.15, 0.3))
+            await page.mouse.click(target_x, target_y)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[cs2] 定位 Turnstile 组件异常: {exc}")
+            return False
+
+    @staticmethod
+    async def _page_ready(page) -> tuple[bool, str]:
+        """页面是否真正加载完成(排除挑战页与过渡期的 Loading 标题)。"""
+        try:
+            info = await page.evaluate(
+                """() => {
+                    const t = document.title || "";
+                    const rs = document.readyState || "";
+                    const len = document.body ? document.body.innerText.trim().length : 0;
+                    return {t, rs, len};
+                }"""
+            )
+        except Exception:
+            return False, ""
+        title = str((info or {}).get("t") or "")
+        ready = (
+            (info or {}).get("rs") == "complete"
+            and int((info or {}).get("len") or 0) > 500
+            and not title.lower().startswith("loading")
+            and title.lower() != "about:blank"
+            and not TurnstileAutoSolver.is_challenge(title)
+        )
+        return ready, title
+
     @classmethod
-    async def solve(cls, page, timeout: float = 30.0) -> bool:
-        """Attempt to solve Cloudflare challenge (both JS Managed Challenge and Turnstile widget)."""
+    async def solve(cls, page, timeout: float = 90.0) -> bool:  # noqa: ASYNC109
+        """等待挑战放行;交互式 Turnstile 会在宽限期后补一次拟真点击。"""
         try:
             logger.info("[cs2] 检测到 Cloudflare 挑战,尝试自动求解与穿透…")
-            deadline = time.monotonic() + timeout
+            deadline = time.monotonic() + max(10.0, timeout)
+            started = time.monotonic()
+
+            # 记录初始 cf_clearance，防止旧 storage_state 携带的陈旧凭证误判为挑战已放行
+            initial_clearance = None
+            try:
+                initial_cookies = await page.context.cookies("https://www.hltv.org")
+                initial_clearance = next(
+                    (c.get("value") for c in initial_cookies if c.get("name") == "cf_clearance"),
+                    None,
+                )
+            except Exception:
+                pass
 
             clicked = False
-            iframe_selector = "iframe[src*='challenges.cloudflare.com']"
 
             while time.monotonic() < deadline:
-                # 1. 检查是否已经放行通过 (Title 变更或出现 cf_clearance)
+                # 1. Title 变更离开挑战页即视为放行
+                ready, title = await cls._page_ready(page)
+                if ready:
+                    logger.info(f"[cs2] Cloudflare 挑战已成功放行: {title!r}")
+                    return True
+
+                # 2. 捕获新颁发的 cf_clearance;若页面仍不跳转则重载一次
                 try:
-                    title = await page.title()
-                    if title and not cls.is_challenge(title):
-                        logger.info(f"[cs2] Cloudflare 挑战已成功放行: {title!r}")
-                        return True
                     cookies = await page.context.cookies("https://www.hltv.org")
-                    if any(c.get("name") == "cf_clearance" for c in cookies):
-                        logger.info("[cs2] Cloudflare 挑战已捕获有效 cf_clearance")
-                        return True
+                    cur_clearance = next(
+                        (c.get("value") for c in cookies if c.get("name") == "cf_clearance"),
+                        None,
+                    )
+                    if cur_clearance and cur_clearance != initial_clearance:
+                        initial_clearance = cur_clearance
+                        logger.info("[cs2] 已捕获新颁发的 cf_clearance,等待页面跳转…")
+                        for _ in range(20):
+                            await asyncio.sleep(0.5)
+                            ready, title = await cls._page_ready(page)
+                            if ready:
+                                logger.info(f"[cs2] 携带新 cf_clearance 成功进入目标页: {title!r}")
+                                return True
+                        logger.info("[cs2] cf_clearance 已颁发但页面未跳转,重载一次")
+                        try:
+                            await page.reload(wait_until="domcontentloaded", timeout=30000)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
-                # 2. 如果尚未点击过且检测到了 Turnstile iframe, 则执行模拟物理轨迹点击
-                if not clicked:
-                    try:
-                        iframe = await page.query_selector(iframe_selector)
-                        if iframe is not None:
-                            box = await iframe.bounding_box()
-                            if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
-                                target_x = box["x"] + min(30.0, box["width"] * 0.15) + random.uniform(-2.5, 2.5)
-                                target_y = box["y"] + (box["height"] / 2.0) + random.uniform(-2.5, 2.5)
-                                start_x = random.uniform(50.0, 200.0)
-                                start_y = random.uniform(50.0, 200.0)
-                                trajectory = cls.generate_bezier_trajectory(start_x, start_y, target_x, target_y)
-
-                                for px, py in trajectory:
-                                    await page.mouse.move(px, py)
-                                    await asyncio.sleep(random.uniform(0.005, 0.012))
-
-                                await asyncio.sleep(random.uniform(0.12, 0.25))
-                                await page.mouse.down()
-                                await asyncio.sleep(random.uniform(0.06, 0.12))
-                                await page.mouse.up()
-                                clicked = True
-                                logger.info(f"[cs2] 已向 Turnstile 坐标 ({target_x:.1f}, {target_y:.1f}) 发送拟真点击")
-                    except Exception as e:
-                        logger.debug(f"[cs2] 探测 Turnstile iframe 异常: {e}")
+                # 3. 交互式 Managed Challenge: 等 8 秒仍未放行才点复选框,
+                #    避免干扰可以自行放行的非交互挑战。
+                if not clicked and time.monotonic() - started >= 8.0:
+                    clicked = await cls._click_widget(page)
+                    if clicked:
+                        logger.info("[cs2] 已向 Turnstile 复选框发送拟真点击")
 
                 await asyncio.sleep(0.5)
 
@@ -344,8 +416,11 @@ class Fetcher:
         # Browser operations are serialized as a whole so recycling can never
         # close the shared context while another command or logo batch uses it.
         self._browser_operation_lock = asyncio.Lock()
+        self._render_lock = asyncio.Lock()
         self._browser_uses = 0
         self._browser_started_at: float | None = None
+        self._last_browser_activity: float = 0.0
+        self._idle_watchdog_task: asyncio.Task[None] | None = None
         self._gate = _FairPriorityGate(cfg.cs2_request_min_gap)
         self._asset_semaphore = asyncio.Semaphore(self._LOGO_FETCH_CONCURRENCY)
         self._closing = False
@@ -408,8 +483,9 @@ class Fetcher:
 
     def _backoff_blocks(self, priority: FetchPriority) -> bool:
         # The live result lane must remain available.
+        # User interactive commands must not be blocked by periodic scan backoff.
         # Everything decorative or periodic yields to the cooldown.
-        if priority == PRIORITY_LIVE:
+        if priority in (PRIORITY_LIVE, PRIORITY_USER):
             return False
         return self._backoff_remaining() > 0
 
@@ -485,6 +561,16 @@ class Fetcher:
             if value:
                 return value
         return None
+
+    @staticmethod
+    def _browser_proxy(proxy_url: Optional[str]) -> dict[str, str]:
+        """Playwright 只认 socks5://,把 socks5h:// 归一化(仍由代理端解析域名)。"""
+        if not proxy_url:
+            return {}
+        value = proxy_url.strip()
+        if value.startswith("socks5h://"):
+            value = "socks5://" + value[len("socks5h://"):]
+        return {"server": value}
 
     def _curl_cffi_timeout(self) -> float:
         return max(5.0, min(float(self.cfg.cs2_nav_timeout) / 1000.0, 120.0))
@@ -1029,24 +1115,42 @@ class Fetcher:
                         exclude_addons = None
 
                     proxy_url = self._curl_cffi_proxy()
+                    camoufox_headless: bool | str = not headful
+                    if not headful and sys.platform.startswith("linux") and shutil.which("Xvfb"):
+                        camoufox_headless = "virtual"
+
                     camoufox_opts: dict[str, object] = {
-                        "headless": not headful,
+                        "headless": camoufox_headless,
                         "geoip": False,
                         "os": getattr(self.cfg, "cs2_camoufox_os", "windows"),
                         "firefox_user_prefs": {
+                            # 1. 限制单进程渲染 (核心降噪，避免派生 4~8 个子进程)
                             "browser.tabs.remote.maxAttributeContentProcesses": 1,
                             "dom.ipc.processCount": 1,
                             "dom.ipc.processCount.webIsolated": 1,
+                            # 2. 内存与磁盘缓存: 限制内存缓存上限 2MB, 彻底关闭磁盘缓存
+                            "browser.cache.memory.enable": True,
                             "browser.cache.memory.capacity": 2048,
                             "browser.cache.disk.enable": False,
+                            # 3. 彻底禁用 SafeBrowsing 恶意网址与钓鱼库 (立减 30MB~50MB 常驻内存并加速冷启动)
+                            "browser.safebrowsing.malware.enabled": False,
+                            "browser.safebrowsing.phishing.enabled": False,
+                            "browser.safebrowsing.downloads.enabled": False,
+                            "browser.safebrowsing.blockedURIs.enabled": False,
+                            "browser.safebrowsing.provider.google4.updateURL": "",
+                            "browser.safebrowsing.provider.google.updateURL": "",
+                            # 4. 禁用无头爬虫不需要的多媒体/WebRTC 探测通道 (节省约 15MB~25MB)
+                            "media.peerconnection.enabled": False,
+                            # 5. 激进的 SpiderMonkey GC 频率与图片显存流控
                             "image.mem.decode_bytes_at_a_time": 16384,
                             "javascript.options.mem.gc_frequency": 10,
+                            # 注意: 严禁设置 webgl.disabled: True! Cloudflare Turnstile 依赖 WebGL 画布指纹进行人机校验
                         },
                     }
                     if exclude_addons:
                         camoufox_opts["exclude_addons"] = exclude_addons
                     if proxy_url:
-                        camoufox_opts["proxy"] = {"server": proxy_url}
+                        camoufox_opts["proxy"] = self._browser_proxy(proxy_url)
                     if launch_env:
                         camoufox_opts["env"] = launch_env
                     cm = AsyncCamoufox(**camoufox_opts)
@@ -1108,6 +1212,7 @@ class Fetcher:
             self._context = context
             self._browser_uses = 0
             self._browser_started_at = time.monotonic()
+            self._touch_browser_activity()
             mode = "无头"
             if headful:
                 mode = "有头/可见" if self._visible_headful() else "有头/屏幕外"
@@ -1246,6 +1351,63 @@ class Fetcher:
             async with self._lifecycle_lock:
                 await self._close_playwright_stack(stop_xvfb=True)
 
+    async def render_html(
+        self,
+        html: str,
+        *,
+        width: int = 1080,
+        height: int = 900,
+        dpr: float = 2.0,
+        timeout: float = 45.0,  # noqa: ASYNC109 - 由内部 asyncio.timeout 消费
+        idle_close: float = 60.0,
+    ) -> bytes:
+        """Render local HTML to PNG on the shared browser stack.
+
+        Reuses the fetch browser (already tuned for a small footprint)
+        instead of launching a second engine, then lets the idle watchdog
+        release it so a quiet bot keeps its usual memory usage.
+        """
+        if self._closing:
+            raise RuntimeError("fetcher is shutting down")
+        async with self._render_lock:
+            async with self._browser_operation_lock:
+                await self.start()
+                browser = self._browser
+                if browser is None:
+                    raise RuntimeError("browser stack unavailable")
+                try:
+                    async with asyncio.timeout(timeout):
+                        context = await browser.new_context(
+                            viewport={"width": width, "height": height},
+                            device_scale_factor=dpr,
+                            locale="zh-CN",
+                        )
+                        try:
+                            page = await context.new_page()
+                            await page.set_content(html, wait_until="load")
+                            await page.wait_for_timeout(250)
+                            png = await page.screenshot(
+                                full_page=True, type="png"
+                            )
+                        finally:
+                            await context.close()
+                finally:
+                    self._expire_browser_soon(idle_close)
+        if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise RuntimeError("local render produced a non-PNG payload")
+        return png
+
+    def _expire_browser_soon(self, grace: float) -> None:
+        """Ask the idle watchdog to release the browser after ``grace``."""
+        if self._browser is None:
+            return
+        timeout = float(getattr(self.cfg, "cs2_browser_idle_timeout", 300) or 0)
+        if timeout <= 0:
+            return
+        grace = max(0.0, min(float(grace), timeout))
+        self._touch_browser_activity()
+        self._last_browser_activity = time.monotonic() - (timeout - grace)
+
     async def close(self) -> None:
         """Alias for shutdown to support context managers and standard cleanup."""
         await self.shutdown()
@@ -1265,7 +1427,7 @@ class Fetcher:
         if self._pw is not None:
             context_options["user_agent"] = UA
         if proxy_url:
-            context_options["proxy"] = {"server": proxy_url}
+            context_options["proxy"] = self._browser_proxy(proxy_url)
         state_file = self._storage_state_file()
         if state_file.is_file():
             context_options["storage_state"] = str(state_file)
@@ -1354,6 +1516,7 @@ class Fetcher:
                     finally:
                         if page is not None:
                             await self._close_page(page)
+                        self._touch_browser_activity()
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -1428,11 +1591,7 @@ class Fetcher:
         backend = str(
             getattr(self.cfg, "cs2_browser_backend", "camoufox") or "camoufox"
         ).lower()
-        use_limit = (
-            min(self.cfg.cs2_browser_recycle_uses, 1)
-            if backend == "camoufox"
-            else self.cfg.cs2_browser_recycle_uses
-        )
+        use_limit = self.cfg.cs2_browser_recycle_uses
         age_limit_seconds = self.cfg.cs2_browser_recycle_hours * 3600.0
         uses_due = use_limit > 0 and self._browser_uses >= use_limit
         age_due = (
@@ -1452,9 +1611,61 @@ class Fetcher:
         async with self._lifecycle_lock:
             if self._closing or self._browser is None:
                 return
-            logger.info(f"[cs2] Playwright 达到回收阈值({reason} {detail}),重建浏览器栈")
+            logger.info(
+                f"[cs2] {backend.capitalize()} 达到回收阈值({reason} {detail}),重建浏览器栈"
+            )
             await self._close_playwright_stack(stop_xvfb=False)
-            logger.info("[cs2] Playwright 浏览器栈已回收,Xvfb 保持复用")
+            logger.info("[cs2] 浏览器栈已回收,Xvfb 保持复用")
+
+    def _touch_browser_activity(self) -> None:
+        """Record browser activity timestamp and ensure idle watchdog is running."""
+        self._last_browser_activity = time.monotonic()
+        timeout = getattr(self.cfg, "cs2_browser_idle_timeout", 300)
+        if timeout <= 0 or self._closing or self._browser is None:
+            return
+        if self._idle_watchdog_task is None or self._idle_watchdog_task.done():
+            self._idle_watchdog_task = self._track_task(
+                self._browser_idle_watchdog_loop(),
+                name="cs2-browser-idle-watchdog",
+            )
+
+    async def _browser_idle_watchdog_loop(self) -> None:
+        """Periodically check browser idle duration and release stack to free memory."""
+        try:
+            while not self._closing and self._browser is not None:
+                timeout = getattr(self.cfg, "cs2_browser_idle_timeout", 300)
+                if timeout <= 0:
+                    break
+                elapsed = time.monotonic() - self._last_browser_activity
+                remaining = timeout - elapsed
+                if remaining > 0:
+                    await asyncio.sleep(max(0.05, min(remaining, 15.0)))
+                    continue
+                # Timeout elapsed: attempt graceful release without disrupting active operations
+                try:
+                    async with asyncio.timeout(2.0):
+                        async with self._browser_operation_lock:
+                            async with self._lifecycle_lock:
+                                if self._closing or self._browser is None:
+                                    break
+                                if time.monotonic() - self._last_browser_activity >= timeout:
+                                    backend = str(
+                                        getattr(self.cfg, "cs2_browser_backend", "camoufox")
+                                        or "camoufox"
+                                    ).capitalize()
+                                    logger.info(
+                                        f"[cs2] {backend} 浏览器空闲超过 {timeout} 秒，"
+                                        "主动关闭浏览器栈以彻底释放内存(平时 0 MB)"
+                                    )
+                                    await self._close_playwright_stack(stop_xvfb=False)
+                                    break
+                except (asyncio.TimeoutError, TimeoutError):
+                    # Operation lock was held by an in-flight request; retry on next tick
+                    await asyncio.sleep(5.0)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[cs2] 浏览器空闲看门狗异常: {exc}")
 
     @staticmethod
     async def _close_context(ctx) -> None:
@@ -1635,8 +1846,12 @@ class Fetcher:
             # in that case its initial 403 is no longer the current page status.
             if not was_challenge and (response is None or not response.ok):
                 status = response.status if response else "no response"
-                logger.warning(f"[cs2] HLTV 返回异常状态 {status}: {url}")
-                return None
+                # 挑战页会先返回 403,页面随后自行放行并载入真实内容;
+                # 最终文档有效(选择器命中)就不应判失败。
+                if not (status == 403 and selector_found):
+                    logger.warning(f"[cs2] HLTV 返回异常状态 {status}: {url}")
+                    return None
+                logger.info(f"[cs2] 初始响应 {status} 但页面已放行,继续使用: {url}")
             if not selector_found:
                 logger.warning(f"[cs2] 页面缺少预期选择器 {wait_selector!r}: {url}")
                 return None
@@ -1709,6 +1924,15 @@ class Fetcher:
     ) -> Optional[str]:
         if self._backoff_blocks(priority):
             self._metrics["suppressed"] += 1
+            # 退避期间继续供应最后一次成功的页面,避免把「主动冷静」误报成抓取故障。
+            # 注意 store.cache_get 的 max_age<=0 表示「禁用缓存」,这里用 inf 表示不限年龄。
+            stale = store.cache_get(url, float("inf"))
+            if stale:
+                logger.info(
+                    f"[cs2] Cloudflare 退避中({self._backoff_remaining():.0f}s),"
+                    f"使用缓存页面: {url}"
+                )
+                return stale
             logger.warning(
                 f"[cs2] Cloudflare 退避中,暂缓页面抓取({self._backoff_remaining():.0f}s): {url}"
             )
@@ -1750,6 +1974,7 @@ class Fetcher:
                     if page is not None:
                         await self._close_page(page)
                     await self._recycle_browser_if_needed()
+                    self._touch_browser_activity()
 
     @staticmethod
     async def _cache_html(url: str, html: str) -> None:
@@ -1822,6 +2047,7 @@ class Fetcher:
                     if page is not None:
                         await self._close_page(page)
                     await self._recycle_browser_if_needed()
+                    self._touch_browser_activity()
 
     def spawn_logos(
         self,
@@ -1973,6 +2199,7 @@ class Fetcher:
                     )
                 finally:
                     await self._recycle_browser_if_needed()
+                    self._touch_browser_activity()
 
     async def _get_logos_via_browser(
         self,

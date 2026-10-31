@@ -1,7 +1,7 @@
 # CS2 Results 插件开发文档
 
 本文档面向继续维护和扩展 `astrbot_plugin_cs2_results` 的开发者。当前开发基线为
-`v1.8.0`（2026-10-30），目标运行时是 AstrBot `>=4.25.3,<5` 与
+`v1.8.1`（2026-10-31），目标运行时是 AstrBot `>=4.25.3,<5` 与
 NapCat/OneBot v11。
 
 ## 1. 项目定位
@@ -42,7 +42,7 @@ AstrBot 事件/命令/LLM 工具
             |
             +--> hltv.py 解析领域模型
             |
-            +--> render.py 生成 HTML，调用 AstrBot T2I
+            +--> render.py 生成 HTML，由 Fetcher 本地渲染 PNG（远端 T2I 兜底）
             |
             +--> store.py 持久化订阅、去重、缓存和 outbox
             |
@@ -128,21 +128,33 @@ RSS 轮询 -> 去重 -> LLM 翻译 -> 渲染 -> 资讯 outbox -> DeliveryWorker 
 群会话优先使用数据库中记录的 origin，缺失时回退到当前 `aiocqhttp` 平台实例。
 `DeliveryWorker` 通过 `Context.send_message(umo, MessageChain)` 发送。
 
-### 4.4 T2I 渲染
+### 4.4 卡片渲染
 
-`render.py` 只负责构造 HTML。真正截图由 AstrBot 的 `Star.html_render()` 完成：
+`render.py` 只负责构造 HTML，截图由两条链路完成，默认走本地：
 
 ```python
-await self.html_render(
-    html,
-    {},
-    return_url=False,
-    options={"type": "png", "full_page": True, "scale": "device"},
+# 1) 本地：复用抓取层同一个 Camoufox，独立 context + full_page 截图
+png = await fetcher.render_html(html)
+
+# 2) 兜底：AstrBot 远程 T2I，包在 60 秒超时内
+await asyncio.wait_for(
+    self.html_render(
+        html,
+        {},
+        return_url=False,
+        options={"type": "png", "full_page": True, "scale": "device"},
+    ),
+    timeout=60,
 )
 ```
 
-部署环境必须配置可用的 AstrBot T2I 服务。Playwright 是 HLTV 抓取回退通道，
-不能替代 T2I。
+- `render.py` 通过 `bind_html_renderer()` 注入渲染器，本身不关心是本地还是远端。
+- 渲染结果必须通过 PNG 文件头校验，否则抛错，绝不把错误页当图片缓存或发送。
+- 远端 T2I 只作为兜底：卡片 HTML 约 180KB（内嵌字体），公共 T2I 服务通常限制
+  20KB 级请求体，必然 413/502，且 AstrBot 的 `download_image_by_url()` 不校验状态码，
+  会把错误页当图片存下来。因此不能依赖远端渲染。
+- 本地渲染结束后会调用 `_expire_browser_soon()`，让空闲看门狗在约 60 秒后释放
+  整个浏览器栈（详见 10.1）。
 
 ## 5. 后台任务
 
@@ -309,11 +321,21 @@ Outbox 的关键语义：
 
 ### 10.1 通道选择
 
-- 默认优先使用 `curl_cffi.AsyncSession(impersonate="chrome")`。
-- 遇到 Cloudflare 挑战、超时、错误内容类型或导入失败时回退 Playwright。
-- Playwright 可按 `cs2_headful` 启动有头模式。
-- Linux 无 DISPLAY 且启用有头模式时，会尝试启动私有 Xvfb。
-- Playwright 会持久化 `storage_state`，并在达到导航或运行时阈值后整体回收浏览器栈。
+- 默认优先使用 `curl_cffi.AsyncSession`，TLS 指纹与 UA 按 `cs2_browser_backend`
+  对齐（Camoufox 时用 Firefox 指纹，标准内核时用 Chrome 指纹）。
+- 遇到 Cloudflare 挑战、超时、错误内容类型或导入失败时回退到反检测浏览器：
+  `camoufox`（默认，C++ 级特征重写）、`nodriver`（CDP 直连）或 `playwright`（标准内核）。
+- 可按 `cs2_headful` 启动有头模式；Linux 无 DISPLAY 时，有头模式会尝试使用
+  `virtual`（Xvfb）显示而不是直接失败。
+- 浏览器栈复用同一个实例，通过三道机制回收：`cs2_browser_recycle_uses`
+  （默认 1 次即回收）、`cs2_browser_recycle_hours`（存活上限）与
+  `cs2_browser_idle_timeout`（空闲看门狗，默认 300 秒）。看门狗在最后一次
+  抓取/渲染结束后计时，超时即关闭 context、browser、playwright 与 Xvfb。
+- 过盾失败时不再删除已有的 `storage_state`（旧行为会清掉仍然有效的 cookies，
+  导致下一次重新挑战）；成功拿到新 `cf_clearance` 后会以临时文件 + `os.replace`
+  原子写回磁盘。
+- 代理统一走 `_browser_proxy()`：Playwright 只接受 `socks5://`，`socks5h://`
+  会在传给浏览器前归一化（域名仍由代理端解析），`curl_cffi` 侧保持原样。
 
 ### 10.2 URL 安全
 
@@ -338,7 +360,12 @@ live > user > scan > warm
 30 分钟且每轮只刷 1 个，避免装饰性请求抢占直播赛果额度。
 
 Cloudflare 连续失败会触发 5、10、20、40、60 分钟指数退避。退避期间暂停
-`scan`、`user`、`warm` 和 logo 请求，但保留 `live` 与手动验证通道。
+`scan`、`warm` 和 logo 请求，但保留 `live`、`user` 与手动验证通道。
+
+退避期间 `scan` 的抓取请求不会直接失败，而是用 `store.cache_get(url, float("inf"))`
+返回上一次成功的页面（注意 `max_age<=0` 在 `cache_get` 里表示“禁用缓存”，所以这里
+必须传 `inf`），同时 `_fail()` 会跳过失败计数与告警，避免把主动冷却误报成
+“连续 N 次抓取失败”。
 
 RSS 使用 `ETag` 和 `Last-Modified` 条件请求。HTTP 304 不下载、不解析正文，
 直接复用本地保存的上一份 XML。
@@ -368,11 +395,20 @@ RSS 使用 `ETag` 和 `Last-Modified` 条件请求。HTTP 304 不下载、不解
 
 ## 11. 渲染约定
 
-渲染模块采用“纯 HTML 构造 + AstrBot T2I”模式：
+渲染模块采用“纯 HTML 构造 + 外部渲染器”模式，渲染器由 `main.py` 注入：
 
 ```text
-build_*_html() -> HTML 字符串 -> Star.html_render() -> PNG bytes
+build_*_html() -> HTML 字符串 -> _html_render() -> PNG bytes
+                                    ├─ Fetcher.render_html()（本地，默认）
+                                    └─ Star.html_render()（远端 T2I，60 秒超时兜底）
 ```
+
+本地渲染的约束：
+
+- 复用抓取层同一个浏览器实例，用独立 context，不新起内核进程。
+- 视口 `1080×900`、DPR `2.0`、`wait_until="load"` + 250ms 稳定等待、整体 45 秒超时。
+- 返回前校验 PNG 文件头；`render.py` 侧再校验一次，双重保证不会把错误页当图片。
+- 相同 HTML 命中 `_PNG_CACHE`（sha1(html) 为键）时直接返回，不再渲染。
 
 主要入口：
 
@@ -384,7 +420,7 @@ build_*_html() -> HTML 字符串 -> Star.html_render() -> PNG bytes
 - `render_news_card`
 - `render_help_card`
 
-图片资源优先转为 data URI，避免 T2I 运行时再次访问外部网络。
+图片资源优先转为 data URI，避免渲染时再次访问外部网络。
 
 ## 12. 新增配置
 
@@ -443,19 +479,20 @@ ruff check .
 - 配置边界和 URL 安全。
 - RSS 解析、实体匹配、条件请求和资讯 outbox 状态。
 - Cloudflare 退避、人工验证状态和 Playwright `storage_state`。
-- AstrBot 事件适配、T2I 调用和 LLM 工具限制。
+- AstrBot 事件适配、渲染器注入（本地 / 远端 T2I）和 LLM 工具限制。
 
 ### 13.3 在 AstrBot 中调试
 
 1. 将整个插件目录放到 AstrBot 的 `data/plugins/`。
-2. 安装插件依赖和 Playwright Chromium。
+2. 安装插件依赖并执行 `camoufox fetch`（默认内核）；标准内核再执行 `playwright install chromium`。
 3. 在 WebUI 中启用插件或点击“重载插件”。
 4. 配置至少一个订阅群或调试群。
-5. 使用 `/cs2 状态` 和 `/cs2 测试 <比赛ID>` 验证抓取、T2I 和发送链路。
+5. 使用 `/cs2 状态` 和 `/cs2 测试 <比赛ID>` 验证抓取、本地渲染和发送链路。
 6. 在 Docker/VPS 中遇到 Cloudflare 时，使用 `/cs2 验证` 完成一次人工验证并观察
    后续抓取是否复用 `storage_state`。
 
-真实端到端调试需要同时具备 AstrBot、NapCat、T2I 和可访问 HLTV 的网络环境。
+真实端到端调试需要同时具备 AstrBot、NapCat 和可访问 HLTV 的网络环境；T2I 只在
+本地渲染失败时才会被用到。
 
 ## 14. 常见修改入口
 
@@ -485,7 +522,9 @@ ruff check .
   查询任意战队的完整历史比赛。
 - `main.py` 仍保留大量模块级全局状态，适合现有单体插件运行方式，但不利于隔离测试和
   多实例运行。
-- 测试以单元和适配层为主，尚未覆盖真实 AstrBot + NapCat + T2I + HLTV 的端到端链路。
+- 测试以单元和适配层为主，尚未覆盖真实 AstrBot + NapCat + 浏览器渲染 + HLTV 的端到端链路。
+- 本地渲染复用抓取浏览器，因此“空闲看门狗”日志仍打印配置值（默认 300 秒），
+  而渲染完成后的实际回收宽限期是 60 秒，两者文案尚未统一。
 
 ## 16. 发布检查
 

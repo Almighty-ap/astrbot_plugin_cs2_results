@@ -84,7 +84,7 @@ class Config(BaseModel):
     # 是否启用 Cloudflare Turnstile 自动识别与拟真物理轨迹点选(免除人工 noVNC 依赖)
     cs2_turnstile_auto_solve: bool = True
     # Turnstile 自动求解超时秒数
-    cs2_turnstile_timeout: int = Field(default=30, ge=5, le=120)
+    cs2_turnstile_timeout: int = Field(default=90, ge=5, le=120)
     # Camoufox 操作系统伪装指纹 (windows / linux / macos)
     cs2_camoufox_os: Literal["windows", "linux", "macos"] = "windows"
     # [已弃用] 原 noVNC 人工验证模式配置(保留默认值用于向下兼容旧环境)
@@ -124,6 +124,9 @@ class Config(BaseModel):
     # For anti-detect engines (e.g. Camoufox), 1-shot recycle is recommended on 2C2G hosts.
     cs2_browser_recycle_uses: int = Field(default=1, ge=0, le=100000)
     cs2_browser_recycle_hours: float = Field(default=1.0, ge=0, le=168)
+    # 浏览器空闲主动回收超时(秒):最后一次浏览器操作后若超过此时间无新任务,
+    # 自动释放浏览器进程栈以彻底归还内存(平时 0 MB)。0=禁用空闲看门狗。
+    cs2_browser_idle_timeout: int = Field(default=300, ge=0, le=86400)
 
     # —— 兜底 & 告警 ——
     cs2_results_backstop: bool = True  # 补报:重启/离线/漏扫期间结束的比赛,发现后补推

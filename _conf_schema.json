@@ -81,8 +81,8 @@
   "cs2_turnstile_timeout": {
     "description": "Turnstile 自动求解超时(秒)",
     "type": "int",
-    "default": 30,
-    "hint": "5~120 秒;自动点选与等待 cf_clearance 捕获的最长时限"
+    "default": 90,
+    "hint": "5~120 秒;托管挑战通常需要数十秒自行校验,建议 60~120 秒,过短会误判失败"
   },
   "cs2_camoufox_os": {
     "description": "Camoufox 操作系统伪装指纹",
@@ -102,6 +102,12 @@
     "type": "float",
     "default": 4.0,
     "hint": "达到后在下一次浏览器操作结束时自动重建;0~168 小时"
+  },
+  "cs2_browser_idle_timeout": {
+    "description": "浏览器空闲自动释放超时(秒, 0=禁用)",
+    "type": "int",
+    "default": 300,
+    "hint": "最后一次抓取或卡片渲染后若无新操作,超时后主动销毁浏览器栈以实现平时 0 MB 常驻;建议 120~300 秒"
   },
   "cs2_nav_timeout": {
     "description": "页面导航超时(毫秒)",

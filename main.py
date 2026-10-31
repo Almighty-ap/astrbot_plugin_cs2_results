@@ -462,6 +462,13 @@ def _ok(source: str) -> None:
 
 
 async def _fail(source: str, msg: str) -> None:
+    # 主动的 Cloudflare 退避不是抓取故障,不应累计失败次数或触发告警。
+    if "抓取失败" in msg and fetcher.backoff_remaining_seconds() > 0:
+        logger.info(
+            f"[cs2] {source}:{msg}(Cloudflare 退避中 "
+            f"{fetcher.backoff_remaining_seconds() / 60:.1f} 分钟,不计入失败)"
+        )
+        return
     sources: dict = _stat["sources"]
     state = sources.setdefault(source, {"fail_streak": 0, "last_error": ""})
     state["fail_streak"] += 1
@@ -3242,13 +3249,29 @@ class Cs2ResultsPlugin(Star):
         logger.info("[cs2] AstrBot 适配层已停止")
 
     async def _html_render(self, html: str) -> Any:
-        """Call AstrBot's built-in HTML-to-image service."""
-        return await self.html_render(
-            html,
-            {},
-            return_url=False,
-            options={"type": "png", "full_page": True, "scale": "device"},
-        )
+        """Render locally first; fall back to AstrBot's t2i service."""
+        renderer = globals().get("fetcher")
+        if renderer is not None:
+            try:
+                png = await renderer.render_html(html)
+                if png.startswith(b"\x89PNG\r\n\x1a\n"):
+                    return png
+                logger.warning("[cs2] 本地渲染返回非 PNG 数据,回退远程 t2i")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[cs2] 本地渲染失败({exc}),回退远程 t2i")
+        try:
+            return await asyncio.wait_for(
+                self.html_render(
+                    html,
+                    {},
+                    return_url=False,
+                    options={"type": "png", "full_page": True, "scale": "device"},
+                ),
+                timeout=60,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[cs2] 远程 t2i 渲染超时(60s),放弃本次渲染")
+            raise RuntimeError("remote t2i render timed out") from None
 
     def _resolve_group_origin(self, group_id: int) -> str | None:
         """Return a proactive-send session for a subscribed QQ group."""

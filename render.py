@@ -184,6 +184,11 @@ async def _render_png(html: str) -> bytes:
     try:
         rendered = await _HTML_RENDERER(html)
         png = await _read_render_result(rendered)
+        if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+            head = png[:120].decode("utf-8", "replace").replace("\n", " ")
+            raise RuntimeError(
+                f"html_render returned a non-PNG payload: {head!r}"
+            )
     except BaseException:
         raise
 

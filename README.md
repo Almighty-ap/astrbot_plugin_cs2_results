@@ -32,12 +32,12 @@
 - 新闻提及已订阅战队或选手时，会在订阅群自动 `@` 对应用户。
 - 支持 AstrBot LLM Function Calling，用户自然语言询问 CS2 比赛、赛程、比分和资讯时由模型调用插件查询。
 - 支持补报、投递重试、禁言顺延、死信重放和持久化 outbox。
-- 使用 AstrBot 内置 `Star.html_render()` / T2I 服务渲染卡片。
+- 卡片默认由插件内置的浏览器栈（Camoufox）本地渲染，复用抓取层同一个内核，用完即由空闲看门狗释放；本地渲染异常时自动回退 AstrBot 的 `Star.html_render()` / T2I 服务。
 - HLTV 页面和图片支持 `curl_cffi` TLS 指纹优先通道，并根据所选浏览器后端动态对齐 TLS 指纹与 User-Agent。
 - 集成 **Camoufox**（定制 C++ 反特征检测 Firefox 内核），消除 CDP 特征与 Canvas/WebGL 自动化指纹泄漏。
-- 内置 **TurnstileAutoSolver**，采用三阶贝塞尔曲线拟真位移与物理点击全自动穿透 Cloudflare Turnstile 挑战，免除人工 noVNC 干预。
+- 内置 **TurnstileAutoSolver**，采用三阶贝塞尔曲线拟真位移与物理点击全自动穿透 Cloudflare Turnstile 挑战：优先等待挑战自行放行，8 秒仍未放行才补一次拟真点击，避免干扰可以自动放行的非交互挑战。
 - 支持纯异步 CDP 直连内核 **nodriver** 作为备选通道，提供多层降级容灾。
-- 针对 2C2G 云主机进行内存调优，支持 1-shot（单次即时回收）浏览器生命周期，实现 0 内存长驻。
+- 针对 2C2G 云主机进行内存调优，支持 1-shot（单次即时回收）与空闲看门狗双重回收：抓取或渲染结束后 `cs2_browser_idle_timeout` 秒内没有新任务就销毁浏览器栈，实现平时 0 内存长驻。
 
 ## 安装
 
@@ -57,11 +57,11 @@ playwright install chromium
 apt-get install -y xvfb
 ```
 
-> **提示（资源受限机器优化）**：在 2C2G 等轻量云主机上部署 Camoufox 时，下载官方压缩包可剔除内置的 Windows/macOS 字体目录（约 2GB），解压后仅保留 Linux 必要依赖与字体（约 270MB）。同时建议保持默认的 `cs2_browser_recycle_uses: 1`，抓取完成后即时销毁进程以释放内存。
+> **提示（资源受限机器优化）**：在 2C2G 等轻量云主机上部署 Camoufox 时，下载官方压缩包可剔除内置的 Windows/macOS 字体目录（约 2GB），解压后仅保留 Linux 必要依赖与字体（约 270MB）。同时建议保持默认的 `cs2_browser_recycle_uses: 1`，并配合 `cs2_browser_idle_timeout: 120`：抓取或渲染完成后最多两分钟无新任务即销毁进程，渲染峰值约 600MB、空闲回落至 200MB 以内。
 
 3. 在 WebUI 中重载或启用插件。
 4. 确保 NapCat 已通过 OneBot v11 连接到 AstrBot。
-5. 确保 AstrBot 已配置可用的 T2I 渲染服务;离线部署可使用自部署 T2I。
+5. T2I 服务为可选项：卡片默认本地渲染，只有本地渲染失败时才会回退到 AstrBot 的 T2I。若 AstrBot 配置了远端 T2I，请留意其请求体上限（卡片 HTML 约 180KB，多数公共 T2I 服务上限在 20KB 左右，必然失败），因此本地渲染是推荐路径。
 
 ## 指令
 
@@ -106,7 +106,7 @@ apt-get install -y xvfb
 - 自动推送先持久化到 outbox,发送失败会按现有退避策略重试,避免单次超时丢新闻。
 - 可调用 AstrBot 已配置的 LLM,将英文标题和摘要翻译总结成中文。
 - 新闻卡片使用与战报、赛程相同的暖米色设计,支持 RSS 封面图。
-- RSS 和封面图复用插件当前的 `curl_cffi` 指纹回退链与 mihomo 代理。
+- RSS 和封面图复用插件当前的 `curl_cffi` 指纹回退链与 `cs2_proxy_url` 代理通道。
 - 新闻标题和原始描述只在本地的已订阅战队/选手中做完整词语匹配;支持 `NAVI`、
   `NIP`、`VP` 等战队别名及 `s1mple/simple` 这类昵称变体，不额外调用 LLM 做实体识别。
 
@@ -171,19 +171,24 @@ cs2_llm_tool_max_image_calls   单次对话最多发送的图片数
    - Camoufox 在 C++ 源码层对 Canvas、WebGL、WebRTC、AudioContext 与系统字体等进行了底层指纹重写，从根本上消除了自动化特征泄露。
 2. **TurnstileAutoSolver 自动化解盾**：
    - 彻底废除了过时且需要人工干预的 `x11vnc` / `noVNC` 流程。
-   - 内置三阶贝塞尔曲线（Cubic Bézier）人类行为轨迹模拟算法，自动计算复选框热区并派发带有 `isTrusted: true` 属性的真实物理鼠标位移、按压与释放事件，全自动穿透 Turnstile 挑战。
+   - 内置三阶贝塞尔曲线（Cubic Bézier）人类行为轨迹模拟算法，通过隐藏字段 `input[name="cf-turnstile-response"]` 的父容器定位组件热区，派发带 `isTrusted: true` 属性的真实鼠标位移与点击，全自动穿透 Turnstile 挑战。
+   - 交互式挑战先给 8 秒宽限期：托管挑战多数能自行放行，只有持续不放行才补一次拟真点击，避免多余交互反而延长校验。
    - 成功解盾后，自动提取 `cf_clearance` 并持久化落盘至 `playwright_storage_state.json`。
 3. **动态 TLS 指纹自适应（curl_cffi）**：
    - Cloudflare 签发的 `cf_clearance` 凭证与客户端 TLS JA4 指纹和 User-Agent 强绑定。
    - 插件根据配置的 `cs2_browser_backend` 自动对齐 `curl_cffi` 的伪装目标（Camoufox 时匹配 Firefox 指纹及 UA，标准内核时匹配 Chrome 指纹），确保快速通道能稳定复用浏览器捕获的放行凭证。
 4. **轻量内存与 1-shot 生命周期管理（2C2G 专属调优）**：
    - 在 2C2G 等轻量 VPS 上，浏览器若长驻后台会持续占用数百兆物理内存。
-   - 默认开启单次即时回收（`cs2_browser_recycle_uses: 1`），当回退到浏览器完成一次抓取并落盘凭据后，立刻关闭浏览器并释放驱动堆内存，实现 0 内存长驻。
+   - 默认开启单次即时回收（`cs2_browser_recycle_uses: 1`），当回退到浏览器完成一次抓取并落盘凭据后，立刻关闭浏览器并释放驱动堆内存。
+   - 另有空闲看门狗兜底：最后一次浏览器操作（抓取或卡片渲染）后超过 `cs2_browser_idle_timeout` 秒无新任务，直接销毁整个浏览器栈，避免长期占用。
+   - 完成过盾拿到 `cf_clearance` 后不会再主动删除已落盘的 `storage_state`，避免把仍有效的凭证清掉、导致下一次重新挑战。
 5. **门禁与流控退避**：
-   - 默认两次抓取间隔至少 `90` 秒；直播赛果保持最高优先级。
+   - 默认两次抓取间隔至少 `90` 秒；直播赛果与用户主动查询保持最高优先级，不会被周期扫描的冷却拖住。
    - Cloudflare 连续遇到拦截时按 `5/10/20/40/60` 分钟指数退避，退避期间暂停轮询，优先保障核心推送。
+   - 退避期间对周期任务的抓取请求直接返回上一次成功的缓存页面，且不计入失败统计，不会再把“主动冷静”误报成“连续抓取失败”告警。
 6. **代理配置**：
    - `cs2_proxy_url` 留空时依次读取系统 `HTTPS_PROXY`、`HTTP_PROXY` 环境变量。
+   - 支持 `http://`、`socks5://` 与 `socks5h://`；Playwright 不接受 `socks5h://`，插件会在传给浏览器前自动改写为 `socks5://`（域名仍由代理端解析），而 `curl_cffi` 通道保留 `socks5h://` 原样使用。
 
 ### 相关配置项
 
@@ -191,12 +196,29 @@ cs2_llm_tool_max_image_calls   单次对话最多发送的图片数
 | --- | :---: | :---: | --- |
 | `cs2_browser_backend` | string | `camoufox` | 浏览器回退后端：`camoufox`（推荐）、`nodriver`（实验性 CDP 直连）、`playwright`（标准 Chromium） |
 | `cs2_turnstile_auto_solve` | bool | `true` | 是否启用 Turnstile 挑战自动化识别与贝塞尔轨迹模拟点击 |
-| `cs2_turnstile_timeout` | int | `30` | 自动化解盾最大超时时间（秒，建议 10~60） |
+| `cs2_turnstile_timeout` | int | `90` | 自动化解盾最大超时时间（秒，建议 60~120；挑战页通常需要数十秒自行校验，过短会误判失败） |
 | `cs2_camoufox_os` | string | `windows` | Camoufox 伪装的操作系统特征：`windows` 或 `linux` |
 | `cs2_browser_recycle_uses` | int | `1` | 浏览器最大复用次数（在 Camoufox 或 2C2G 机器上强制建议设为 `1` 即时回收） |
 | `cs2_browser_recycle_hours` | float | `1.0` | 浏览器最大存活时间（小时），超时自动重建 |
+| `cs2_browser_idle_timeout` | int | `300` | 浏览器空闲自动释放超时（秒，`0` 关闭看门狗；建议 120~300） |
 | `cs2_use_curl_cffi` | bool | `true` | 是否开启 curl_cffi 快速抓取与指纹伪装通道 |
-| `cs2_proxy_url` | string | `""` | 专用 HTTP/SOCKS5 代理地址，如 `http://127.0.0.1:7890` |
+| `cs2_proxy_url` | string | `""` | 专用 HTTP/SOCKS5 代理地址，如 `http://127.0.0.1:7890`、`socks5h://127.0.0.1:7892` |
+
+## 卡片渲染
+
+卡片渲染分两步：`render.py` 只负责构造 HTML，截图由插件自己完成。
+
+```text
+build_*_html() -> HTML 字符串
+      ├─ 本地渲染（默认）: Fetcher.render_html() -> Camoufox 新开 context -> full_page PNG
+      └─ 失败回退: Star.html_render(..., return_url=False)，包在 60 秒超时内
+```
+
+- 本地渲染复用抓取层同一个 Camoufox 实例与内存调优参数，独立 context、`1080×900 @2x` 视口、45 秒超时，不额外拉起第二套内核。
+- 渲染结束后把浏览器空闲计时往前拨，看门狗在约 60 秒后关掉整个浏览器栈；渲染期间容器峰值约 600MB，空闲后回落到 200MB 以内。
+- 渲染结果必须是合法 PNG（校验文件头），错误页不会再被当成图片缓存或发给 QQ。
+- 相同 HTML 命中进程内 PNG 缓存，重复查询 0 秒返回。
+- 远端 T2I 只作为兜底：公共 T2I 服务普遍限制 20KB 级请求体，而卡片 HTML 约 180KB（内嵌字体），几乎必然 413/502，因此不要依赖远端渲染。
 
 ## 数据目录
 
