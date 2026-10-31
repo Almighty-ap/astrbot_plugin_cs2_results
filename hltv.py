@@ -2215,7 +2215,16 @@ def parse_player_profile(player_html: Html, player_id: str = "") -> PlayerProfil
     t = tree(player_html)
     nick = _txt(t.css_first(".playerNickname")) or _txt(t.css_first(".playerName"))
     realname = _txt(t.css_first(".playerRealname"))
-    age_text = _txt(t.css_first(".playerAge .listRight")) or _txt(t.css_first(".playerAge"))
+    age_node = (
+        t.css_first(".playerAge .listRight span[itemprop='text']")
+        or t.css_first(".playerAge .listRight span")
+        or t.css_first(".playerAge .listRight")
+        or t.css_first(".playerAge")
+    )
+    age_text = _txt(age_node)
+    if age_text:
+        if age_match := re.search(r"(\d+\s*years(?:\s*old)?)", age_text, re.IGNORECASE):
+            age_text = age_match.group(1).strip()
     flag = t.css_first(".player-summary-stat-box-left-flag img") or t.css_first(".playerFlagName img")
     country = ""
     if flag:
@@ -2258,9 +2267,15 @@ def parse_player_profile(player_html: Html, player_id: str = "") -> PlayerProfil
 
     recent_matches: list[RecentMatch] = []
     for box in t.css(".playerpage-matchbox"):
+        score_node = box.css_first(".playerpage-match-result")
+        if score_node is None:
+            # 过滤未开赛赛程（Upcoming matches 无 .playerpage-match-result 节点）
+            continue
+        score = _txt(score_node)
+        if not score:
+            continue
         opponent = _txt(box.css_first(".playerpage-matchbox-team .text-ellipsis"))
         event = _txt(box.css_first(".playerpage-matchbox-bottom"))
-        score = _txt(box.css_first(".playerpage-match-result"))
         classes = box.attributes.get("class", "") or ""
         result = "win" if "won-matchbox" in classes else "loss" if "lost-matchbox" in classes else "unknown"
         rating_text = _txt(box.css_first(".playerpage-match-rating"))

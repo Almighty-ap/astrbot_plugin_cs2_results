@@ -2528,6 +2528,8 @@ def build_player_profile_html(
         f'<div style="margin-top:8px;color:{MUTE};font-size:14px;">'
         "暂无 Major 冠军 / MVP 记录</div>"
     )
+    has_ratings = any(m.rating is not None for m in profile.recent_matches)
+    recent_subtitle = "最近 5 场 · 比分 / Rating" if has_ratings else "最近 5 场 · 赛果 / 比分"
     body = f"""
   <div style="display:flex;align-items:center;gap:20px;">
    {avatar_html}
@@ -2564,9 +2566,9 @@ def build_player_profile_html(
   <div style="margin-top:28px;border-top:1px solid {LINE};padding-top:18px;">
    <div style="display:flex;align-items:baseline;justify-content:space-between;">
     <div style="font-size:18px;font-weight:800;color:{INK};">近期比赛</div>
-    <div style="font-size:13px;color:{MUTE};">最近 5 场 · 比分 / Rating</div>
+    <div style="font-size:13px;color:{MUTE};">{recent_subtitle}</div>
    </div>
-   {_profile_recent_rows(profile.recent_matches, show_rating=True)}
+   {_profile_recent_rows(profile.recent_matches, show_rating=has_ratings)}
   </div>
   <div style="display:flex;align-items:center;justify-content:space-between;margin-top:26px;
        padding-top:18px;border-top:1px solid {BORDER};font-size:14px;color:{FAINT};">
