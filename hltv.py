@@ -798,13 +798,21 @@ def _parse_veto_picks(t: HTMLParser, team1: str, team2: str) -> dict[str, str]:
 
     picks: dict[str, str] = {}
     for vb in t.css(".veto-box"):
-        txt = _txt(vb)
-        if "picked" not in txt and "left over" not in txt:
+        cls = vb.attributes.get("class", "") or ""
+        # 排除 HLTV 引入的模拟 BP 面板 (Simulated Veto)
+        if "simulated-veto" in cls:
             continue
-        for seg in re.split(r"(?:^|\s+)(?=\d+\.\s*)", txt):
-            seg = seg.strip()
-            if not seg:
+        # 优先读取 .padding > div 逐行条目，避免子 div 文本粘连（如 Dust22. Falcons）
+        item_divs = vb.css(".padding > div")
+        if item_divs:
+            lines = [_txt(d) for d in item_divs]
+        else:
+            txt = _txt(vb)
+            if "picked" not in txt and "left over" not in txt:
                 continue
+            lines = [seg.strip() for seg in re.split(r"(?:\r?\n|(?=\b\d+\.\s*))", txt) if seg.strip()]
+
+        for seg in lines:
             m_num = re.match(r"^(\d+)\.\s*(.+)$", seg)
             content = m_num.group(2).strip() if m_num else seg
             m_pick = re.match(r"^(.+?)\s+picked\s+([A-Za-z0-9_ ]+)$", content, re.IGNORECASE)
@@ -940,7 +948,11 @@ def parse_match(match_html: Html, url: str) -> MatchDetail:
 
     # 地图
     maps: list[MapResult] = []
-    for mh in t.css(".mapholder"):
+    for mh in t.css(".mapholder:not(.simulated-map)"):
+        # 双重防御：排除 HLTV 新增的模拟选图预测图块 (Simulated Veto)
+        cls = mh.attributes.get("class", "") or ""
+        if "simulated-map" in cls:
+            continue
         name = _txt(mh.css_first(".mapname"))
         if not name or name.upper() in ("TBA", "DEFAULT"):
             continue
