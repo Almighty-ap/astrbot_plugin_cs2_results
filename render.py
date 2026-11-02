@@ -213,17 +213,17 @@ def _shell(body: str, pad: str, min_width: str = "") -> str:
 
     font-family 必须写在 <style> 里而非内联 style="...":字体栈里的双引号会把
     双引号包裹的 style 属性提前截断,导致整个字体声明失效(回退衬线体)。"""
-    wrap_style = f"min-width:{min_width};display:inline-flex;" if min_width else "display:flex;"
-    card_style = f"width:{min_width};min-width:{min_width};" if min_width else "width:100%;max-width:1200px;"
+    wrap_min = f"min-width:{min_width};" if min_width else ""
+    card_min = f"min-width:{min_width};" if min_width else ""
     return f"""<style>{_font_face()}
 *{{margin:0;padding:0;box-sizing:border-box;}}
-html,body{{background:{PAGE};min-width:fit-content;width:100%;}}
+html,body{{background:{PAGE};min-width:fit-content;width:100%;display:flex;justify-content:center;}}
 body{{font-family:{FONT};}}
 </style>
 <div style="background:{PAGE};padding:clamp(28px,7vw,56px) clamp(24px,5vw,60px);
-     {wrap_style}justify-content:center;
+     display:flex;justify-content:center;width:100%;{wrap_min}
      color:{INK};-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;">
- <div style="{card_style}background:{CARD};border:1px solid {BORDER};
+ <div style="width:100%;max-width:1200px;{card_min}background:{CARD};border:1px solid {BORDER};
       border-radius:24px;
       box-shadow:{_SHADOW};padding:{pad};">
 {body}
@@ -2387,7 +2387,7 @@ def build_news_html(
    <span>{_esc(pub_time_text)}</span>
    {link_html}
   </div>"""
-    return _shell(body, "42px 46px 36px", min_width="880px")
+    return _shell(body, "42px 46px 36px")
 
 
 async def render_news_card(
