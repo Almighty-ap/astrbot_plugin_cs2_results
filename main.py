@@ -3566,18 +3566,87 @@ class Cs2ResultsPlugin(Star):
             f"已发送 {team1} vs {team2} 的历史交手卡片。",
         )
 
+    @filter.llm_tool(name="query_cs2_player")
+    async def query_cs2_player(
+        self,
+        event: AstrMessageEvent,
+        player: str = "",
+        **_kwargs: Any,
+    ) -> str:
+        """查询指定 CS2 选手的个人详情、近期 Rating / K/D 数据、角色分与 Major 荣誉。
+
+        Args:
+            player(string): 选手昵称或常用外号，例如 donk、ZywOo、载物、s1mple、m0NESY。
+        """
+        player = (
+            player
+            or str(_kwargs.get("name") or _kwargs.get("player_name") or "")
+        ).strip()
+        if not player:
+            return "请提供要查询的 CS2 选手名称。"
+        return await self._run_llm_tool_command(
+            event,
+            f"选手 {player}".strip(),
+            f"已发送选手 {player} 的详情卡片。",
+        )
+
+    @filter.llm_tool(name="query_cs2_team")
+    async def query_cs2_team(
+        self,
+        event: AstrMessageEvent,
+        team: str = "",
+        **_kwargs: Any,
+    ) -> str:
+        """查询指定 CS2 战队的详情、当前阵容名单、教练、世界排名与 VRS 排名及近期战绩。
+
+        Args:
+            team(string): 战队名称或常用别名，例如 Vitality、小蜜蜂、Spirit、绿龙、FaZe、NAVI。
+        """
+        team = (
+            team
+            or str(_kwargs.get("name") or _kwargs.get("team_name") or "")
+        ).strip()
+        if not team:
+            return "请提供要查询的 CS2 战队名称。"
+        return await self._run_llm_tool_command(
+            event,
+            f"战队 {team}".strip(),
+            f"已发送战队 {team} 的详情卡片。",
+        )
+
+    @staticmethod
+    def _matches_cs2_llm_intent(text: str) -> bool:
+        text = (text or "").casefold()
+        if not text:
+            return False
+        if re.search(
+            r"cs2|hltv|vrs|major|rating|adr|kast|比赛|赛程|战况|赛况|比分|赛果|战队|选手|阵容|资讯|排名|排行|rank|交手|h2h|晨报",
+            text,
+        ):
+            return True
+        if not re.search(
+            r"数据|战绩|状态|名单|队员|教练|荣誉|mvp|top|k/?d|近期|最近|现在|目前|哪个队|哪支队|什么队|查|看",
+            text,
+        ):
+            return False
+        for alias in (*names.TEAM_ALIASES, *names.PLAYER_ALIASES):
+            if len(alias) < 2:
+                continue
+            if alias.isascii():
+                if re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", text):
+                    return True
+            elif alias in text:
+                return True
+        return False
+
     @filter.on_llm_request()
     async def add_cs2_llm_tool_hint(self, event: AstrMessageEvent, req: Any) -> None:
         if not cfg.cs2_llm_tools_enabled or not cfg.cs2_llm_tool_intent_hint:
             return
-        text = (event.message_str or "").casefold()
-        if not re.search(
-            r"cs2|hltv|比赛|赛程|战况|赛况|比分|赛果|战队|选手|资讯|排名|排行|rank|交手|h2h|晨报",
-            text,
-        ):
+        if not self._matches_cs2_llm_intent(event.message_str or ""):
             return
         req.system_prompt = (getattr(req, "system_prompt", "") or "") + (
-            "\n用户在询问 CS2/HLTV 赛事、战况、赛程、排名、交手历史或资讯。"
+            "\n用户在询问 CS2/HLTV 赛事、战况、赛程、排名、交手历史、选手详情、战队阵容或资讯。"
             "请优先调用 query_cs2_* 工具获取实时数据，不要凭记忆回答。"
         )
 

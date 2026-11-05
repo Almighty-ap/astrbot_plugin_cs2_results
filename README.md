@@ -121,6 +121,9 @@ query_cs2_bracket       查询正在进行的赛事赛程
 query_cs2_news          查询最新 HLTV RSS 资讯
 query_cs2_match_status  查询指定战队近期比赛和比分
 query_cs2_ranking       查询 CS2 战队世界排名 TOP 20 榜单
+query_cs2_h2h           查询两支 CS2 战队历史交手战绩
+query_cs2_player        查询指定 CS2 选手近期数据、角色分与荣誉
+query_cs2_team          查询指定 CS2 战队当前阵容、排名与近期战绩
 ```
 
 当用户消息包含 `CS2`、`HLTV`、比赛、赛程、战况、比分、战队、选手或资讯等关键词时，

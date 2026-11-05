@@ -219,19 +219,20 @@ await asyncio.wait_for(
 
 ### 7.1 SQLite
 
-当前 schema 版本为 `6`，主要表：
+数据库文件为 `<AstrBot data>/plugin_data/cs2_results/state.sqlite3`，当前 schema 版本为 `8`，主要表：
 
 | 表 | 用途 |
 | --- | --- |
 | `metadata` | schema 版本、刷新时间、会话 origin 等键值状态 |
-| `subscriptions` | 群级战报订阅 |
+| `subscriptions` | 群级战报订阅（含推送模式 `mode`、静音时段与晨报开关） |
 | `subscription_targets` | 群内用户的战队/选手订阅 |
 | `player_team_cache` | 选手当前所属队伍缓存 |
-| `team_index` | 本地战队名录 |
-| `vrs_ranking` | Valve 世界排名 |
+| `team_index` | 本地战队名录（含世界排名、名次变化、Logo 与国家） |
+| `vrs_ranking` | Valve 世界排名（含积分、赛区、Logo 与国家） |
 | `delivery_batches` | 每个 `(match_id, map_key)` 的 PNG 载荷 |
 | `deliveries` | 每个群的投递状态、尝试次数、lease 和 mentions |
 | `news_deliveries` | 每条资讯在每个订阅会话中的投递状态和 mentions |
+| `morning_reports` | 每日 08:30 晨报聚合推送记录 |
 
 Outbox 的关键语义：
 
@@ -306,6 +307,10 @@ Outbox 的关键语义：
 | `query_cs2_bracket` | `赛程 [event_name]` |
 | `query_cs2_news` | `资讯` |
 | `query_cs2_match_status` | `战况 [team]` |
+| `query_cs2_ranking` | `排名 [source]` |
+| `query_cs2_h2h` | `交手 <team1> vs <team2>` |
+| `query_cs2_player` | `选手 <player>` |
+| `query_cs2_team` | `战队 <team>` |
 
 工作方式：
 
@@ -460,9 +465,9 @@ playwright install chromium
 > **⚠️ Git 提交约束（铁律）**：**未经用户的明确指示，绝不自行提交（git commit）和推送到 GitHub（git push）**。修改代码默认仅在工作区调试与测试，提交必须获得用户明确授权。
 
 ```bash
-# 推荐：针对改动的单个测试文件精准执行
-python -m pytest tests/test_render_stage2.py
-python -m pytest tests/test_hltv_parsers.py -k test_parse_h2h_results
+# 推荐：针对改动的单个测试文件或单个用例精准执行
+python -m pytest tests/test_simulated_veto.py -k test_parse_match_filters_simulated_veto_maps
+python -m pytest tests/test_match_start_dispatch.py
 
 # 代码风格与静态检查
 ruff check .
