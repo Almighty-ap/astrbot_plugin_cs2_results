@@ -1972,33 +1972,31 @@ async def _handle_player_detail(name: str) -> None:
         await cs2.finish("选手 ID 无效")
 
     await cs2.send(f"正在查询 {player.nick} 的近期数据…")
-    end_date = datetime.now(CN).date()
-    start_date = end_date - timedelta(days=90)
-    profile_url = f"{hltv.BASE}/player/{player.id}/x"
-    stats_url = (
-        f"{hltv.BASE}/stats/players/individual/{player.id}/x"
-        f"?startDate={start_date.isoformat()}&endDate={end_date.isoformat()}"
-    )
+    slug = re.sub(r"[^a-z0-9_-]+", "-", (player.nick or "").casefold()).strip("-") or "x"
+    profile_url = f"{hltv.BASE}/player/{player.id}/{slug}"
+    matches_url = f"{hltv.BASE}/stats/players/matches/{player.id}/{slug}"
 
-    async def _fetch_optional_stats() -> str | None:
+    async def _fetch_optional_matches() -> str | None:
         try:
-            # stats 统计页是可选增强数据，仅走轻量 curl_cffi 且设置 6 秒预算，遇盾或超时秒级跳过，不阻塞基础详情出图
+            # 独立比赛记录页 (/stats/players/matches/...) 受 Cloudflare /stats/ 规则保护，
+            # 允许在 curl_cffi 403 时回退至 Camoufox（顺带预热后续渲染所需的浏览器实例），
+            # 并设 20 秒总预算；若仍遇 403 阻断或超时则平滑回退至无 Rating 模式
             return await asyncio.wait_for(
                 fetcher.get_html(
-                    stats_url,
-                    wait_selector=".stats-rows",
+                    matches_url,
+                    wait_selector=".stats-table",
                     max_age=cfg.cs2_cache_event_page_ttl,
                     stale_age=cfg.cs2_stale_event_page,
                     priority="user",
-                    allow_browser_fallback=False,
+                    allow_browser_fallback=True,
                 ),
-                timeout=6.0,
+                timeout=20.0,
             )
         except Exception:
             return None
 
     try:
-        profile_html, stats_html = await asyncio.gather(
+        profile_html, matches_html = await asyncio.gather(
             fetcher.get_html(
                 profile_url,
                 wait_selector=".playerProfile",
@@ -2006,7 +2004,7 @@ async def _handle_player_detail(name: str) -> None:
                 stale_age=cfg.cs2_stale_event_page,
                 priority="user",
             ),
-            _fetch_optional_stats(),
+            _fetch_optional_matches(),
             return_exceptions=True,
         )
     except Exception as exc:  # noqa: BLE001
@@ -2017,17 +2015,8 @@ async def _handle_player_detail(name: str) -> None:
     profile = hltv.parse_player_profile(profile_html, player.id)
     if not profile.nick:
         profile.nick = player.nick
-    if isinstance(stats_html, str):
-        stats = hltv.parse_player_stats(stats_html)
-        if stats["kd"] is not None:
-            profile.kd = stats["kd"]  # type: ignore[assignment]
-            profile.kd_scope = "近期统计"
-        if stats["kills"] is not None:
-            profile.kills = stats["kills"]  # type: ignore[assignment]
-        if stats["deaths"] is not None:
-            profile.deaths = stats["deaths"]  # type: ignore[assignment]
-        if stats["maps"] is not None:
-            profile.maps = stats["maps"]  # type: ignore[assignment]
+    if isinstance(matches_html, str) and matches_html:
+        hltv.enrich_player_profile_matches(profile, matches_html)
     avatar_bytes = None
     if profile.avatar:
         try:

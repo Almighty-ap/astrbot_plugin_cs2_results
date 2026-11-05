@@ -2397,6 +2397,333 @@ def parse_player_stats(player_stats_html: Html) -> dict[str, float | int | None]
     }
 
 
+@dataclass
+class PlayerMatchSeries:
+    """从 `/stats/players/matches/{id}/{nick}` 解析并聚合出的单场系列赛统计。"""
+
+    opponent: str
+    rating: Optional[float]
+    team: str = ""
+    date: str = ""
+    map_name: str = ""
+    is_best_of: bool = False
+    kills: Optional[int] = None
+    deaths: Optional[int] = None
+    maps_count: int = 1
+    match_id: str = ""
+
+
+@dataclass
+class _RawPlayerMatchRow:
+    opponent: str
+    rating: Optional[float]
+    team: str = ""
+    date: str = ""
+    map_name: str = ""
+    is_best_of: bool = False
+    best_of_num: int = 1
+    series_maps_hint: Optional[int] = None
+    kills: Optional[int] = None
+    deaths: Optional[int] = None
+    group: str = ""
+    is_first: bool = False
+    match_id: str = ""
+
+
+def _extract_stats_table_team(cell: Optional[Node]) -> str:
+    if cell is None:
+        return ""
+    for sel in (
+        ".gtSmartphone-only a span",
+        ".gtSmartphone-only a",
+        "a[href*='/teams/'] span",
+        "a[href*='/teams/']",
+        "a[href*='/team/'] span",
+        "a[href*='/team/']",
+        "a span",
+        "a",
+    ):
+        node = cell.css_first(sel)
+        if node is not None:
+            text = re.sub(r"\s*\(\d+\)\s*$", "", _txt(node)).strip()
+            if text:
+                return text
+    container = cell.css_first(".gtSmartphone-only") or cell
+    text = _txt(container)
+    return re.sub(r"\s*\(\d+\)\s*$", "", text).strip()
+
+
+def _extract_stats_table_score(cell: Optional[Node]) -> Optional[int]:
+    if cell is None:
+        return None
+    score_node = (
+        cell.css_first(".gtSmartphone-only .statsMapPlayed")
+        or cell.css_first(".statsMapPlayed")
+        or cell.css_first(".gtSmartphone-only")
+        or cell
+    )
+    if match := re.search(r"\((\d+)\)", _txt(score_node)):
+        return int(match.group(1))
+    return None
+
+
+def _norm_team_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9一-鿿]+", "", (name or "").casefold())
+
+
+def _opponent_matches(a: str, b: str) -> bool:
+    na, nb = _norm_team_name(a), _norm_team_name(b)
+    if not na or not nb:
+        return False
+    return na == nb or na in nb or nb in na
+
+
+def parse_player_matches(matches_html: Html) -> list[PlayerMatchSeries]:
+    """解析 `/stats/players/matches/{playerId}/{nick}` 的 `table.stats-table`。
+
+    - 当行内 `.stats-match-map-result-mapname.dynamic-map-name-full` 为 `Best of 3/5` 时，
+      该行的 Rating 即为整场系列赛的全局总 Rating；
+    - 若某场系列赛仅包含多张单图行（无 `Best of N` 汇总行），则按场次分组求各图算术均值；
+    - BO1 单图行直接取该图 Rating。
+    """
+    t = tree(matches_html)
+    table = t.css_first("table.stats-table") or t.css_first(".stats-table")
+    if table is None:
+        return []
+
+    raw_rows: list[_RawPlayerMatchRow] = []
+    for row in table.css("tbody tr") or table.css("tr"):
+        if row.css_first("th") is not None:
+            continue
+        tds = row.css("td")
+        if len(tds) < 4:
+            continue
+        classes = set((row.attributes.get("class") or "").split())
+        group = "group-1" if "group-1" in classes else "group-2" if "group-2" in classes else ""
+        is_first = "first" in classes
+
+        time_cell = row.css_first("td.time") or tds[0]
+        date = _txt(time_cell)
+        match_id = ""
+        for a in row.css("a[href]"):
+            href = a.attributes.get("href") or ""
+            if m := re.search(r"/matches/(\d+)/", href):
+                match_id = m.group(1)
+                break
+
+        team = _extract_stats_table_team(tds[1])
+        opponent = _extract_stats_table_team(tds[2])
+        map_full_node = (
+            row.css_first(".stats-match-map-result-mapname.dynamic-map-name-full")
+            or row.css_first(".dynamic-map-name-full")
+            or row.css_first(".stats-match-map-result-mapname")
+            or row.css_first("td.statsMapPlayed")
+            or tds[3]
+        )
+        map_name = _txt(map_full_node)
+        bo_match = re.search(r"\bbest\s*of\s*(\d+)\b|^\s*bo\s*(\d+)\s*$", map_name, re.I)
+        is_best_of = bo_match is not None
+        best_of_num = int(bo_match.group(1) or bo_match.group(2)) if bo_match else 1
+
+        series_maps_hint = None
+        if is_best_of:
+            s1 = _extract_stats_table_score(tds[1])
+            s2 = _extract_stats_table_score(tds[2])
+            if s1 is not None and s2 is not None and 1 <= (s1 + s2) <= best_of_num:
+                series_maps_hint = s1 + s2
+
+        kd_cell = row.css_first("td.statsCenterText") or (tds[4] if len(tds) > 4 else None)
+        kills = deaths = None
+        if kd_cell is not None:
+            if kd_match := re.search(r"(\d+)\s*-\s*(\d+)", _txt(kd_cell)):
+                kills = int(kd_match.group(1))
+                deaths = int(kd_match.group(2))
+
+        rating_cell = (
+            row.css_first("td.ratingPositive")
+            or row.css_first("td.ratingNegative")
+            or row.css_first("td.ratingNeutral")
+            or tds[-1]
+        )
+        rating = _float_text(_txt(rating_cell))
+
+        raw_rows.append(
+            _RawPlayerMatchRow(
+                opponent=opponent,
+                rating=rating,
+                team=team,
+                date=date,
+                map_name=map_name,
+                is_best_of=is_best_of,
+                best_of_num=best_of_num,
+                series_maps_hint=series_maps_hint,
+                kills=kills,
+                deaths=deaths,
+                group=group,
+                is_first=is_first,
+                match_id=match_id,
+            )
+        )
+
+    if not raw_rows:
+        return []
+
+    grouped: list[list[_RawPlayerMatchRow]] = []
+    for r in raw_rows:
+        if not grouped:
+            grouped.append([r])
+            continue
+        cur = grouped[-1]
+        prev = cur[-1]
+        head = cur[0]
+
+        new_series = False
+        if r.is_first:
+            new_series = True
+        elif r.is_best_of:
+            # Best of 3/5 汇总行默认开启新场次；仅当同属一个显式 group（或紧随多张同对手同日单图后作为尾部汇总行）且当前组尚无 Best of 行时归入当前组
+            same_explicit_group = bool(r.group and r.group == prev.group)
+            footer_summary = (
+                not r.group
+                and not prev.group
+                and len(cur) >= 2
+                and _opponent_matches(r.opponent, prev.opponent)
+                and (not r.date or not prev.date or r.date == prev.date)
+            )
+            if any(x.is_best_of for x in cur) or not (same_explicit_group or footer_summary):
+                new_series = True
+        elif r.group and prev.group:
+            if r.group != prev.group or (
+                r.opponent and prev.opponent and not _opponent_matches(r.opponent, prev.opponent)
+            ):
+                new_series = True
+        else:
+            # 无 group-1/group-2 类名时，依据对手、match_id、日期与 Best of 子图数量上限判断
+            if r.match_id and prev.match_id and r.match_id != prev.match_id:
+                new_series = True
+            elif not _opponent_matches(r.opponent, prev.opponent):
+                new_series = True
+            elif r.date and prev.date and r.date != prev.date:
+                new_series = True
+            elif head.is_best_of:
+                max_child_maps = head.series_maps_hint or head.best_of_num
+                non_bo_count = sum(1 for x in cur if not x.is_best_of)
+                if non_bo_count >= max_child_maps:
+                    new_series = True
+
+        if new_series:
+            grouped.append([r])
+        else:
+            cur.append(r)
+
+    series_list: list[PlayerMatchSeries] = []
+    for s in grouped:
+        bo_rows = [r for r in s if r.is_best_of and r.rating is not None]
+        non_bo_rows = [r for r in s if not r.is_best_of]
+        if bo_rows:
+            bo = bo_rows[0]
+            rating = round(bo.rating, 2) if bo.rating is not None else None
+            kills = bo.kills
+            deaths = bo.deaths
+            if (kills is None or deaths is None) and non_bo_rows:
+                valid_kd = [
+                    (r.kills, r.deaths)
+                    for r in non_bo_rows
+                    if r.kills is not None and r.deaths is not None
+                ]
+                if valid_kd:
+                    kills = sum(k for k, _ in valid_kd)
+                    deaths = sum(d for _, d in valid_kd)
+            maps_count = len(non_bo_rows) or bo.series_maps_hint or 1
+            rep = bo
+        else:
+            valid_ratings = [r.rating for r in s if r.rating is not None]
+            rating = round(sum(valid_ratings) / len(valid_ratings), 2) if valid_ratings else None
+            valid_kd = [
+                (r.kills, r.deaths)
+                for r in s
+                if r.kills is not None and r.deaths is not None
+            ]
+            kills = sum(k for k, _ in valid_kd) if valid_kd else None
+            deaths = sum(d for _, d in valid_kd) if valid_kd else None
+            maps_count = len(s)
+            rep = s[0]
+
+        match_id = next((r.match_id for r in s if r.match_id), "")
+        series_list.append(
+            PlayerMatchSeries(
+                opponent=rep.opponent,
+                rating=rating,
+                team=rep.team,
+                date=rep.date,
+                map_name=rep.map_name,
+                is_best_of=bool(bo_rows),
+                kills=kills,
+                deaths=deaths,
+                maps_count=maps_count,
+                match_id=match_id,
+            )
+        )
+
+    return series_list
+
+
+def enrich_player_profile_matches(
+    profile: PlayerProfile, matches_html: Html
+) -> list[PlayerMatchSeries]:
+    """用 `/stats/players/matches/{playerId}/{nick}` 的单场数据回填 `PlayerProfile` 近 5 场 Rating 与近期 K/D。"""
+    series_list = parse_player_matches(matches_html)
+    if not series_list:
+        return []
+
+    cursor = 0
+    for match in profile.recent_matches:
+        if match.rating is not None:
+            continue
+        target_mid = _match_id(match.url) or "" if match.url else ""
+        for idx in range(cursor, min(len(series_list), cursor + 5)):
+            cand = series_list[idx]
+            if cand.rating is None:
+                continue
+            matched = False
+            if target_mid and cand.match_id and target_mid == cand.match_id:
+                matched = True
+            elif _opponent_matches(match.opponent, cand.opponent):
+                matched = True
+            elif (
+                cand.team
+                and not _opponent_matches(profile.team, cand.team)
+                and _opponent_matches(match.opponent, cand.team)
+            ):
+                matched = True
+            elif not match.opponent or not cand.opponent:
+                matched = True
+            if matched:
+                match.rating = round(cand.rating, 2)
+                cursor = idx + 1
+                break
+
+    valid_kd = [
+        (s.kills, s.deaths)
+        for s in series_list
+        if s.kills is not None and s.deaths is not None
+    ]
+    if valid_kd:
+        total_kills = sum(k for k, _ in valid_kd)
+        total_deaths = sum(d for _, d in valid_kd)
+        if total_deaths > 0:
+            profile.kills = total_kills
+            profile.deaths = total_deaths
+            profile.kd = round(total_kills / total_deaths, 2)
+            profile.kd_scope = "近期统计"
+    if profile.maps is None:
+        total_maps = sum(s.maps_count for s in series_list)
+        if total_maps > 0:
+            profile.maps = total_maps
+
+    return series_list
+
+
 def _profile_stat_node(t: HTMLParser, label: str) -> Optional[Node]:
     wanted = label.casefold()
     for node in t.css(".profile-team-stat"):
