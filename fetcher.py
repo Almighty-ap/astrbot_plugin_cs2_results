@@ -642,8 +642,19 @@ class Fetcher:
             or "sorry, you have been blocked" in sample
         )
 
+    @asynccontextmanager
+    async def _conditional_slot(
+        self, priority: FetchPriority, acquire: bool = True
+    ) -> AsyncIterator[None]:
+        """按需申请门禁 slot；若外层流程已持有 slot，则直接透传避免重复排队罚站。"""
+        if acquire:
+            async with self._gate.slot(priority):
+                yield
+        else:
+            yield
+
     async def _fetch_via_curl_cffi(
-        self, url: str, priority: FetchPriority
+        self, url: str, priority: FetchPriority, acquire_slot: bool = True
     ) -> Optional[str]:
         """用 curl_cffi 的 Chrome TLS 指纹抓取 HLTV 页面 HTML。"""
         if not self._curl_cffi_enabled():
@@ -683,7 +694,7 @@ class Fetcher:
                 "Accept-Language": "en-US,en;q=0.9",
                 "User-Agent": UA,
             }
-        async with self._gate.slot(priority):
+        async with self._conditional_slot(priority, acquire=acquire_slot):
             try:
                 async with AsyncSession(**session_kwargs) as session:
                     resp = await session.get(url, headers=headers)
@@ -722,7 +733,7 @@ class Fetcher:
         return html_text
 
     async def _fetch_via_nodriver(
-        self, url: str, priority: FetchPriority
+        self, url: str, priority: FetchPriority, acquire_slot: bool = True
     ) -> Optional[str]:
         """使用 nodriver 异步原生 CDP 直连抓取 HLTV 页面 (备选抗检测方案)。"""
         if self._backoff_blocks(priority):
@@ -734,7 +745,7 @@ class Fetcher:
             logger.debug("[cs2] nodriver 未安装,跳过 nodriver 通道")
             return None
 
-        async with self._gate.slot(priority):
+        async with self._conditional_slot(priority, acquire=acquire_slot):
             browser = None
             try:
                 headful = getattr(self.cfg, "cs2_headful", False)
@@ -862,7 +873,7 @@ class Fetcher:
         return body
 
     async def _fetch_search_via_curl_cffi(
-        self, term: str, priority: FetchPriority
+        self, term: str, priority: FetchPriority, acquire_slot: bool = True
     ) -> Optional[str]:
         """Fetch the HLTV typeahead JSON through the proxy-capable channel."""
         if not self._curl_cffi_enabled():
@@ -886,7 +897,7 @@ class Fetcher:
             "X-Requested-With": "XMLHttpRequest",
             "Referer": "https://www.hltv.org/matches",
         }
-        async with self._gate.slot(priority):
+        async with self._conditional_slot(priority, acquire=acquire_slot):
             try:
                 async with AsyncSession(**session_kwargs) as session:
                     resp = await session.get(url, headers=headers)
@@ -1938,24 +1949,25 @@ class Fetcher:
             )
             return None
         self._metrics["attempts"] += 1
-        if self._curl_cffi_enabled():
-            html = await self._fetch_via_curl_cffi(url, priority)
-            if html is not None:
-                await self._cache_html(url, html)
-                return html
-            logger.info(f"[cs2] curl_cffi 通道失败,回退浏览器管线: {url}")
-
-        if getattr(self.cfg, "cs2_browser_backend", "camoufox").lower() == "nodriver":
-            html = await self._fetch_via_nodriver(url, priority)
-            if html is not None:
-                await self._cache_html(url, html)
-                return html
-            logger.info("[cs2] nodriver 通道未放行,回退标准浏览器管线")
-
         async with self._navigation_slot(priority):
             cached = store.cache_get(url, 0)
             if cached:
                 return cached
+
+            if self._curl_cffi_enabled():
+                html = await self._fetch_via_curl_cffi(url, priority, acquire_slot=False)
+                if html is not None:
+                    await self._cache_html(url, html)
+                    return html
+                logger.info(f"[cs2] curl_cffi 通道失败,回退浏览器管线: {url}")
+
+            if getattr(self.cfg, "cs2_browser_backend", "camoufox").lower() == "nodriver":
+                html = await self._fetch_via_nodriver(url, priority, acquire_slot=False)
+                if html is not None:
+                    await self._cache_html(url, html)
+                    return html
+                logger.info("[cs2] nodriver 通道未放行,回退标准浏览器管线")
+
             async with self._browser_operation_lock:
                 await self.start()
                 self._browser_uses += 1
@@ -2011,13 +2023,15 @@ class Fetcher:
                 f"[cs2] Cloudflare 退避中,暂缓搜索({self._backoff_remaining():.0f}s): {term}"
             )
             return None
-        if self._curl_cffi_enabled():
-            result = await self._fetch_search_via_curl_cffi(term, normalized_priority)
-            if result is not None:
-                return result
-            logger.info("[cs2] curl_cffi 搜索通道失败,回退 Playwright")
-
         async with self._navigation_slot(normalized_priority):
+            if self._curl_cffi_enabled():
+                result = await self._fetch_search_via_curl_cffi(
+                    term, normalized_priority, acquire_slot=False
+                )
+                if result is not None:
+                    return result
+                logger.info("[cs2] curl_cffi 搜索通道失败,回退 Playwright")
+
             async with self._browser_operation_lock:
                 await self.start()
                 self._browser_uses += 1

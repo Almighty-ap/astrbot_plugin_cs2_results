@@ -332,6 +332,10 @@ def _follow_poll_interval(match_id: str) -> float:
     if pending or match_id in _over_since:
         return min(base, 60.0)
 
+    # 新开赛特权通道:未拉取过比分指纹或未推送开赛卡的场次,强制以最短间隔快速跟进发卡
+    if match_id not in _score_fp and not store.already_pushed(match_id, "start"):
+        return _FOLLOW_INTERVAL_MIN
+
     weight = _follow_weight(match_id)
     n = len(_followed)
     if n > 1:
@@ -1425,7 +1429,31 @@ async def _poll_once() -> float:
         _stat["last_poll"] = _now()
         return 0.0
 
-    # 补报独立于 /matches 扫描，降低 /results 请求频率；即使有直播也保证不会永久饿死。
+    # 优先跟进活跃直播/新开赛:若有到期的直播场次,必须优先执行,绝不让兜底补报截胡
+    if _followed:
+        due_matches = []
+        for candidate in _followed.values():
+            interval = _follow_poll_interval(candidate.match_id)
+            # 新开赛特权:从未抓取过比分指纹或未进 follow_last 的新比赛,立即到期优先执行
+            if candidate.match_id not in _follow_last or (
+                candidate.match_id not in _score_fp
+                and not store.already_pushed(candidate.match_id, "start")
+            ):
+                due_at = 0.0
+            else:
+                due_at = _follow_last[candidate.match_id] + interval
+            due_matches.append((due_at, candidate))
+        due_at, lm = min(due_matches, key=lambda item: item[0])
+        if due_at <= now:
+            _follow_last[lm.match_id] = now
+            await follow_match(lm, now)
+            if lm.match_id not in _followed:
+                _follow_last.pop(lm.match_id, None)
+            _stat["last_poll"] = _now()
+            return 0.0
+
+    # 补报独立于 /matches 扫描，降低 /results 请求频率。
+    # 优先级置于直播到期之后:优先服务当前开赛与小图战报,在直播空档期执行补报。
     backstop_every = max(cfg.cs2_cache_results_ttl, 10 * 60)
     if now >= _next_backstop_at:
         succeeded = False
@@ -1441,25 +1469,14 @@ async def _poll_once() -> float:
         _stat["last_poll"] = _now()
         return 0.0
 
-    if _followed:
-        due_matches = []
-        for candidate in _followed.values():
-            interval = _follow_poll_interval(candidate.match_id)
-            due_at = _follow_last.get(candidate.match_id, 0.0) + interval
-            due_matches.append((due_at, candidate))
-        due_at, lm = min(due_matches, key=lambda item: item[0])
-        if due_at <= now:
-            _follow_last[lm.match_id] = now
-            await follow_match(lm, now)
-            if lm.match_id not in _followed:
-                _follow_last.pop(lm.match_id, None)
-            _stat["last_poll"] = _now()
-            return 0.0
-
     due = [_next_scan_at, _next_backstop_at]
-    due.extend(
-        _follow_last.get(mid, 0.0) + _follow_poll_interval(mid) for mid in _followed
-    )
+    for mid in _followed:
+        if mid not in _follow_last or (
+            mid not in _score_fp and not store.already_pushed(mid, "start")
+        ):
+            due.append(0.0)
+        else:
+            due.append(_follow_last[mid] + _follow_poll_interval(mid))
     return max(1.0, min(30.0, min(due) - time.time()))
 
 
