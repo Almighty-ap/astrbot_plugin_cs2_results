@@ -1982,7 +1982,7 @@ async def _handle_player_detail(name: str) -> None:
 
     async def _fetch_optional_stats() -> str | None:
         try:
-            # stats 统计页是可选增强数据，设置 15 秒预算，遇盾或超时秒级跳过，不阻塞基础详情出图
+            # stats 统计页是可选增强数据，仅走轻量 curl_cffi 且设置 6 秒预算，遇盾或超时秒级跳过，不阻塞基础详情出图
             return await asyncio.wait_for(
                 fetcher.get_html(
                     stats_url,
@@ -1990,8 +1990,9 @@ async def _handle_player_detail(name: str) -> None:
                     max_age=cfg.cs2_cache_event_page_ttl,
                     stale_age=cfg.cs2_stale_event_page,
                     priority="user",
+                    allow_browser_fallback=False,
                 ),
-                timeout=15.0,
+                timeout=6.0,
             )
         except Exception:
             return None

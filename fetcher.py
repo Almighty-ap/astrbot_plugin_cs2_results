@@ -326,8 +326,12 @@ class _FairPriorityGate:
         self._waiters[:] = [w for w in self._waiters if not w.future.done()]
         if not self._waiters:
             return
+        waiter = min(
+            self._waiters,
+            key=lambda w: (self._effective_rank(w), w.sequence),
+        )
         now = time.monotonic()
-        delay = self._next_grant_at - now
+        delay = 0.0 if waiter.priority == PRIORITY_USER else self._next_grant_at - now
         if delay > 0:
             if self._dispatch_timer is None:
                 loop = asyncio.get_running_loop()
@@ -336,14 +340,10 @@ class _FairPriorityGate:
         if self._dispatch_timer is not None:
             self._dispatch_timer.cancel()
             self._dispatch_timer = None
-        waiter = min(
-            self._waiters,
-            key=lambda w: (self._effective_rank(w), w.sequence),
-        )
         self._waiters.remove(waiter)
         self._active = True
         self._grant_count += 1
-        self._next_grant_at = now + self._min_gap
+        self._next_grant_at = max(self._next_grant_at, now + self._min_gap)
         waiter.granted = True
         waiter.future.set_result(None)
 
@@ -1370,7 +1370,7 @@ class Fetcher:
         height: int = 900,
         dpr: float = 2.0,
         timeout: float = 45.0,  # noqa: ASYNC109 - 由内部 asyncio.timeout 消费
-        idle_close: float = 60.0,
+        idle_close: float | None = None,
     ) -> bytes:
         """Render local HTML to PNG on the shared browser stack.
 
@@ -1403,7 +1403,10 @@ class Fetcher:
                         finally:
                             await context.close()
                 finally:
-                    self._expire_browser_soon(idle_close)
+                    if idle_close is None:
+                        self._touch_browser_activity()
+                    else:
+                        self._expire_browser_soon(idle_close)
         if not png.startswith(b"\x89PNG\r\n\x1a\n"):
             raise RuntimeError("local render produced a non-PNG payload")
         return png
@@ -1884,6 +1887,8 @@ class Fetcher:
         max_age: float = 0,
         stale_age: float = 0,
         priority: FetchPriority = PRIORITY_USER,
+        *,
+        allow_browser_fallback: bool = True,
     ) -> Optional[str]:
         """Fetch an HLTV page, optionally serving a stale cache immediately.
 
@@ -1901,7 +1906,12 @@ class Fetcher:
             if stale:
                 self._spawn_refresh(url, wait_selector, normalized_priority)
                 return stale
-        return await self._fetch(url, wait_selector, normalized_priority)
+        return await self._fetch(
+            url,
+            wait_selector,
+            normalized_priority,
+            allow_browser_fallback=allow_browser_fallback,
+        )
 
     def _spawn_refresh(
         self,
@@ -1932,6 +1942,8 @@ class Fetcher:
         url: str,
         wait_selector: str,
         priority: FetchPriority,
+        *,
+        allow_browser_fallback: bool = True,
     ) -> Optional[str]:
         if self._backoff_blocks(priority):
             self._metrics["suppressed"] += 1
@@ -1959,7 +1971,12 @@ class Fetcher:
                 if html is not None:
                     await self._cache_html(url, html)
                     return html
+                if not allow_browser_fallback:
+                    logger.debug(f"[cs2] 可选页 curl_cffi 未放行,跳过浏览器回退: {url}")
+                    return None
                 logger.info(f"[cs2] curl_cffi 通道失败,回退浏览器管线: {url}")
+            elif not allow_browser_fallback:
+                return None
 
             if getattr(self.cfg, "cs2_browser_backend", "camoufox").lower() == "nodriver":
                 html = await self._fetch_via_nodriver(url, priority, acquire_slot=False)
