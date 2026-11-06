@@ -309,9 +309,11 @@ class _FairPriorityGate:
         self._closed = False
 
     def _effective_rank(self, waiter: _Waiter) -> int:
+        if waiter.priority == PRIORITY_USER:
+            return 0
         grants_waited = self._grant_count - waiter.grant_snapshot
         age_levels = grants_waited // self._AGE_GRANTS
-        return max(0, _PRIORITY_RANK[waiter.priority] - age_levels)
+        return max(1, _PRIORITY_RANK[waiter.priority] - age_levels)
 
     def _timer_dispatch(self) -> None:
         # Event-loop callbacks do not interleave with synchronous critical
@@ -326,11 +328,15 @@ class _FairPriorityGate:
         self._waiters[:] = [w for w in self._waiters if not w.future.done()]
         if not self._waiters:
             return
-        waiter = min(
-            self._waiters,
-            key=lambda w: (self._effective_rank(w), w.sequence),
-        )
         now = time.monotonic()
+        user_waiters = [w for w in self._waiters if w.priority == PRIORITY_USER]
+        if user_waiters:
+            waiter = min(user_waiters, key=lambda w: w.sequence)
+        else:
+            waiter = min(
+                self._waiters,
+                key=lambda w: (self._effective_rank(w), w.sequence),
+            )
         delay = 0.0 if waiter.priority == PRIORITY_USER else self._next_grant_at - now
         if delay > 0:
             if self._dispatch_timer is None:
@@ -1893,8 +1899,9 @@ class Fetcher:
         """Fetch an HLTV page, optionally serving a stale cache immediately.
 
         ``priority`` accepts ``live``, ``user``, ``scan``, or ``warm``.  Existing
-        callers default to ``user``.  A stale background refresh inherits the
-        caller's priority and is tracked for orderly shutdown.
+        callers default to ``user``.  A stale background refresh runs at ``warm``
+        priority so it never competes with foreground user requests, and is
+        tracked for orderly shutdown.
         """
         self._require_allowed_url(url, _PAGE_HOSTS)
         normalized_priority = self._priority(priority)
@@ -1904,7 +1911,12 @@ class Fetcher:
         if stale_age > max_age:
             stale = store.cache_get(url, stale_age)
             if stale:
-                self._spawn_refresh(url, wait_selector, normalized_priority)
+                refresh_priority: FetchPriority = (
+                    PRIORITY_WARM
+                    if normalized_priority == PRIORITY_USER
+                    else normalized_priority
+                )
+                self._spawn_refresh(url, wait_selector, refresh_priority)
                 return stale
         return await self._fetch(
             url,

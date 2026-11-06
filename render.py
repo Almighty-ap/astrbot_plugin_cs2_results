@@ -2750,6 +2750,9 @@ def _build_compare_role_rows(profiles: list[PlayerProfile]) -> str:
         vals = [rm.get(en.casefold()) for rm in role_maps]
         valid = [v for v in vals if v is not None]
         max_v = max(valid) if valid else None
+        has_distinct_winner = (
+            len(valid) >= 2 and max_v is not None and max_v > 0 and valid.count(max_v) < len(valid)
+        )
         mt = "margin-top:0;" if idx_d == 0 else "margin-top:13px;"
 
         if is_two:
@@ -2758,10 +2761,12 @@ def _build_compare_role_rows(profiles: list[PlayerProfile]) -> str:
             s1 = str(v1) if v1 is not None else "—"
             w0 = max(0, min(v0 or 0, 100))
             w1 = max(0, min(v1 or 0, 100))
-            c0 = _COMPARE_THEMES[0]["text"] if (v0 is not None and v0 == max_v) else SUB
-            c1 = _COMPARE_THEMES[1]["text"] if (v1 is not None and v1 == max_v) else SUB
-            fw0 = "800" if (v0 is not None and v0 == max_v) else "600"
-            fw1 = "800" if (v1 is not None and v1 == max_v) else "600"
+            best0 = has_distinct_winner and v0 is not None and v0 == max_v
+            best1 = has_distinct_winner and v1 is not None and v1 == max_v
+            c0 = _COMPARE_THEMES[0]["text"] if best0 else SUB
+            c1 = _COMPARE_THEMES[1]["text"] if best1 else SUB
+            fw0 = "800" if best0 else "600"
+            fw1 = "800" if best1 else "600"
             rows.append(
                 f'<div style="{mt}">'
                 f' <div style="display:flex;align-items:center;justify-content:space-between;font-size:13px;margin-bottom:5px;">'
@@ -2786,7 +2791,7 @@ def _build_compare_role_rows(profiles: list[PlayerProfile]) -> str:
             for p_idx, v in enumerate(vals):
                 th = _COMPARE_THEMES[p_idx % len(_COMPARE_THEMES)]
                 v_str = str(v) if v is not None else "—"
-                is_best = v is not None and max_v is not None and v == max_v
+                is_best = has_distinct_winner and v is not None and v == max_v
                 bg = th["bg"] if is_best else "transparent"
                 bd = f"1px solid {th['border']}" if is_best else "1px solid transparent"
                 fw = "800" if is_best else "600"
