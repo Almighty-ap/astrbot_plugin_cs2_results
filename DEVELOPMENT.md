@@ -274,6 +274,7 @@ Outbox 的关键语义：
 | `/cs2 赛事` | 未来三个月顶级赛事 |
 | `/cs2 日程` | 当前或下一个比赛日 |
 | `/cs2 战况 <战队>` | 按战队过滤日程结果 |
+| `/cs2 对比 <选手A> <选手B> [选手C]` | 2~3 名选手六维能力雷达图与 Rating / ADR / KAST 同屏对比 |
 | `/cs2 查询 选手 <名字>` | 选手近期 Rating/K/D、角色分和 Major 荣誉 |
 | `/cs2 查询 战队 <名字>` | 战队阵容、世界/VRS 排名和近期战绩 |
 | `/cs2 赛程 [赛事名]` | 进行中赛事的完整赛程 |
@@ -310,6 +311,7 @@ Outbox 的关键语义：
 | `query_cs2_ranking` | `排名 [source]` |
 | `query_cs2_h2h` | `交手 <team1> vs <team2>` |
 | `query_cs2_player` | `选手 <player>` |
+| `query_cs2_player_compare` | `对比 <player1> vs <player2> [vs <player3>]` |
 | `query_cs2_team` | `战队 <team>` |
 
 工作方式：

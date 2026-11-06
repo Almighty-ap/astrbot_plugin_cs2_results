@@ -24,6 +24,7 @@
 - 比赛开始时推送开赛卡,包含双方阵容、Major 冠军星标和 VRS 预测。
 - 支持 `/cs2 赛事`、`/cs2 日程`、`/cs2 赛程 [赛事名]`。
 - 支持 `/cs2 查询 选手 <名字>` 查询近期 Rating / K/D、角色评分、Major 荣誉和近期比赛。
+- 支持 `/cs2 对比 <选手A> <选手B> [选手C]` 同屏对比 2~3 名选手的六维能力雷达图（Firepower / Entrying / Trading / Opening / Closing / Sniping）、Rating 3.0、ADR、KAST、K/D 与近期赛果。
 - 支持 `/cs2 查询 战队 <名字>` 查询现役阵容、HLTV / VRS 世界排名和近期战绩。
 - `/cs2 日程` 在展示当前或下个比赛日时，会在顶部附带上一比赛日的已结束赛果。
 - 支持群订阅、战队订阅和选手订阅,个人订阅命中后会在群里 `@` 对应用户。
@@ -78,6 +79,8 @@ apt-get install -y xvfb
 | `/cs2 日程` | 查看当前或下一个比赛日的赛程与赛果，顶部附带上一比赛日赛果 |
 | `/cs2 战况 <战队>` | 查询指定战队近期比赛、当前比分与赛果 |
 | `/cs2 排名 [vrs/hltv]` | 查看战队世界排名 TOP 20 榜单（默认 Valve VRS 榜 / 可选 HLTV 积分榜） |
+| `/cs2 交手 <队A> <队B>` | 查看两支战队历史交手战绩 |
+| `/cs2 对比 <选手A> <选手B> [选手C]` | 同屏对比 2~3 名选手的六维雷达图与 Rating / ADR / KAST 正面数据 |
 | `/cs2 查询 选手 <名字>` | 查询选手近期 Rating / K/D、角色评分、Major 荣誉和近期比赛 |
 | `/cs2 查询 战队 <名字>` | 查询战队现役阵容、世界 / VRS 排名和近期战绩 |
 | `/cs2 赛程 [赛事名]` | 查看正在进行或即将开赛赛事的完整赛程 |
@@ -121,9 +124,10 @@ query_cs2_bracket       查询正在进行的赛事赛程
 query_cs2_news          查询最新 HLTV RSS 资讯
 query_cs2_match_status  查询指定战队近期比赛和比分
 query_cs2_ranking       查询 CS2 战队世界排名 TOP 20 榜单
-query_cs2_h2h           查询两支 CS2 战队历史交手战绩
-query_cs2_player        查询指定 CS2 选手近期数据、角色分与荣誉
-query_cs2_team          查询指定 CS2 战队当前阵容、排名与近期战绩
+query_cs2_h2h             查询两支 CS2 战队历史交手战绩
+query_cs2_player          查询指定 CS2 选手近期数据、角色分与荣誉
+query_cs2_player_compare  同屏对比 2~3 名 CS2 选手六维能力雷达与正面数据
+query_cs2_team            查询指定 CS2 战队当前阵容、排名与近期战绩
 ```
 
 当用户消息包含 `CS2`、`HLTV`、比赛、赛程、战况、比分、战队、选手或资讯等关键词时，

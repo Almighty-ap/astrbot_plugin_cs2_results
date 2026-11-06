@@ -1996,16 +1996,12 @@ async def _handle_player_detail(name: str) -> None:
             return None
 
     try:
-        profile_html, matches_html = await asyncio.gather(
-            fetcher.get_html(
-                profile_url,
-                wait_selector=".playerProfile",
-                max_age=cfg.cs2_cache_event_page_ttl,
-                stale_age=cfg.cs2_stale_event_page,
-                priority="user",
-            ),
-            _fetch_optional_matches(),
-            return_exceptions=True,
+        profile_html = await fetcher.get_html(
+            profile_url,
+            wait_selector=".playerProfile",
+            max_age=cfg.cs2_cache_event_page_ttl,
+            stale_age=cfg.cs2_stale_event_page,
+            priority="user",
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("[cs2] 选手详情抓取失败: %s", exc)
@@ -2015,21 +2011,265 @@ async def _handle_player_detail(name: str) -> None:
     profile = hltv.parse_player_profile(profile_html, player.id)
     if not profile.nick:
         profile.nick = player.nick
-    if isinstance(matches_html, str) and matches_html:
-        hltv.enrich_player_profile_matches(profile, matches_html)
-    avatar_bytes = None
-    if profile.avatar:
+
+    is_inactive_recent = (
+        profile.maps == 0 and profile.rating is None and not profile.role_stats
+    )
+
+    async def _fetch_optional_career_stats() -> str | None:
+        if not is_inactive_recent:
+            return None
+        career_url = (
+            profile.stats_url
+            if (profile.stats_url and "startDate=" not in profile.stats_url)
+            else f"{hltv.BASE}/stats/players/{player.id}/{slug}"
+        )
+        logger.info(
+            "[cs2] 选手 %s 近 3 个月 0 图,回退抓取生涯统计页: %s",
+            player.nick,
+            career_url,
+        )
         try:
-            avatar_bytes = await fetcher.fetch_impersonated_bytes(
+            return await asyncio.wait_for(
+                fetcher.get_html(
+                    career_url,
+                    wait_selector=".player-summary-stat-box, .stats-row, .summaryStatBreakdown",
+                    max_age=cfg.cs2_cache_event_page_ttl,
+                    stale_age=cfg.cs2_stale_event_page,
+                    priority="user",
+                    allow_browser_fallback=True,
+                ),
+                timeout=45.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[cs2] 选手生涯统计页抓取失败 %s (%s): %s",
+                player.nick,
+                career_url,
+                exc,
+            )
+            return None
+
+    async def _fetch_single_avatar() -> bytes | None:
+        if not profile.avatar:
+            return None
+        try:
+            return await fetcher.fetch_impersonated_bytes(
                 profile.avatar, priority="user"
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[cs2] 选手定妆照抓取失败 %s: %s", profile.avatar, exc)
+            return None
+
+    async def _fetch_sequential_stats_and_matches() -> tuple[str | None, str | None]:
+        career_html = await _fetch_optional_career_stats()
+        matches_res = await _fetch_optional_matches()
+        return career_html, matches_res
+
+    (career_stats_html, matches_html), avatar_bytes = await asyncio.gather(
+        _fetch_sequential_stats_and_matches(),
+        _fetch_single_avatar(),
+    )
+    if isinstance(career_stats_html, str) and career_stats_html:
+        hltv.enrich_player_profile_stats(
+            profile, career_stats_html, is_career_fallback=True
+        )
+    if isinstance(matches_html, str) and matches_html:
+        hltv.enrich_player_profile_matches(profile, matches_html)
     try:
         png = await card.render_player_profile_card(profile, _now(), avatar_bytes)
     except Exception as exc:  # noqa: BLE001
         logger.exception("[cs2] 选手详情卡渲染失败: %s", exc)
         await cs2.finish("选手详情卡渲染失败,请稍后再试")
+    await cs2.finish(png)
+
+
+def _parse_compare_player_queries(raw_args: str) -> list[str]:
+    raw_args = (raw_args or "").strip()
+    if not raw_args:
+        return []
+    if re.search(r"\s+vs\s+", raw_args, flags=re.IGNORECASE):
+        items = re.split(r"\s+vs\s+", raw_args, flags=re.IGNORECASE)
+    elif re.search(r"[、,，/]+", raw_args):
+        items = re.split(r"[、,，/]+", raw_args)
+    else:
+        items = raw_args.split()
+    return [x.strip() for x in items if x.strip()]
+
+
+async def _handle_player_compare(queries: list[str]) -> None:
+    if len(queries) < 2:
+        await cs2.finish(
+            "用法:/cs2 对比 <选手A> <选手B> [选手C]，例如 /cs2 对比 ZywOo donk"
+        )
+    if len(queries) > 3:
+        await cs2.finish(
+            "同屏对比最多支持 3 名选手，例如 /cs2 对比 ZywOo donk m0NESY"
+        )
+
+    players_index = store.all_index_players()
+    resolved: list[hltv.SearchPlayer] = []
+    for q in queries:
+        res = names.resolve_player_local(q, players_index)
+        if res.status not in ("ok", "ambiguous"):
+            res = await names.resolve_player(fetcher, q, players_index)
+        if res.status == "error":
+            await cs2.finish("HLTV 搜索暂时不可用,请稍后再试")
+        if res.status == "ambiguous":
+            lines = _detail_candidate_lines("player", res.candidates)
+            await cs2.finish(f"「{q}」匹配到多个选手,请用更精确的昵称重发:\n{lines}")
+        if res.status == "none" or res.player is None:
+            await cs2.finish(f"没有找到选手「{q}」")
+        if not res.player.id.isascii() or not res.player.id.isdecimal():
+            await cs2.finish(f"选手「{q}」ID 无效")
+        resolved.append(res.player)
+
+    if len({p.id for p in resolved}) < len(resolved):
+        await cs2.finish("对比的选手不能相同哦")
+
+    title_str = " vs ".join(p.nick for p in resolved)
+    await cs2.send(f"正在对比 {title_str} 的近期数据…")
+
+    async def _fetch_player_profile_only(
+        player: hltv.SearchPlayer,
+    ) -> hltv.PlayerProfile | None:
+        slug = (
+            re.sub(r"[^a-z0-9_-]+", "-", (player.nick or "").casefold()).strip("-")
+            or "x"
+        )
+        profile_url = f"{hltv.BASE}/player/{player.id}/{slug}"
+        try:
+            profile_html = await fetcher.get_html(
+                profile_url,
+                wait_selector=".playerProfile",
+                max_age=cfg.cs2_cache_event_page_ttl,
+                stale_age=cfg.cs2_stale_event_page,
+                priority="user",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[cs2] 对比选手主页抓取失败 %s: %s", player.nick, exc)
+            return None
+        if not profile_html:
+            return None
+
+        profile = hltv.parse_player_profile(profile_html, player.id)
+        if not profile.nick:
+            profile.nick = player.nick
+        return profile
+
+    raw_profiles = await asyncio.gather(
+        *(_fetch_player_profile_only(p) for p in resolved)
+    )
+    profiles: list[hltv.PlayerProfile] = []
+    for p, prof in zip(resolved, raw_profiles, strict=False):
+        if prof is None:
+            await cs2.finish(
+                f"HLTV 选手「{p.nick}」页面抓取失败(可能被 Cloudflare 挡),稍后再试"
+            )
+        profiles.append(prof)
+
+    # Fetcher.get_html 内部受单通道 _FairPriorityGate 串行门禁控制；
+    # 使用 stats_serial_lock 让每名选手在真正轮到自己执行时才启动 45s wait_for 计时，
+    # 彻底避免前一名选手的浏览器抓取/回收耗时挤占后一名选手的超时窗口。
+    stats_serial_lock = asyncio.Lock()
+
+    async def _enrich_one_player(
+        player: hltv.SearchPlayer,
+        profile: hltv.PlayerProfile,
+    ) -> bytes | None:
+        slug = (
+            re.sub(r"[^a-z0-9_-]+", "-", (player.nick or "").casefold()).strip("-")
+            or "x"
+        )
+        is_career_fallback = (
+            profile.maps == 0 and profile.rating is None and not profile.role_stats
+        )
+
+        async def _fetch_optional_stats() -> tuple[str | None, bool]:
+            if (
+                not is_career_fallback
+                and profile.adr is not None
+                and profile.kast is not None
+            ):
+                return None, False
+            if is_career_fallback:
+                stats_url = (
+                    profile.stats_url
+                    if (profile.stats_url and "startDate=" not in profile.stats_url)
+                    else f"{hltv.BASE}/stats/players/{player.id}/{slug}"
+                )
+                logger.info(
+                    "[cs2] 对比选手 %s 近 3 个月 0 图,跳过 90 天统计页并回退生涯统计: %s",
+                    player.nick,
+                    stats_url,
+                )
+            elif profile.stats_url and "startDate=" in profile.stats_url:
+                stats_url = profile.stats_url
+            else:
+                end_d = datetime.now(CN).date()
+                start_d = end_d - timedelta(days=90)
+                stats_url = (
+                    f"{hltv.BASE}/stats/players/{player.id}/{slug}"
+                    f"?startDate={start_d.isoformat()}&endDate={end_d.isoformat()}"
+                )
+            async with stats_serial_lock:
+                try:
+                    html = await asyncio.wait_for(
+                        fetcher.get_html(
+                            stats_url,
+                            wait_selector=".player-summary-stat-box, .stats-row, .summaryStatBreakdown",
+                            max_age=cfg.cs2_cache_event_page_ttl,
+                            stale_age=cfg.cs2_stale_event_page,
+                            priority="user",
+                            allow_browser_fallback=True,
+                        ),
+                        timeout=45.0,
+                    )
+                    return html, is_career_fallback
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[cs2] 对比选手统计页抓取失败 %s (%s): %s",
+                        player.nick,
+                        stats_url,
+                        exc,
+                    )
+                    return None, is_career_fallback
+
+        async def _fetch_optional_avatar() -> bytes | None:
+            if not profile.avatar:
+                return None
+            try:
+                return await fetcher.fetch_impersonated_bytes(
+                    profile.avatar, priority="user"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[cs2] 选手定妆照抓取失败 %s: %s", profile.avatar, exc)
+                return None
+
+        (stats_html, career_mode), avatar_bytes = await asyncio.gather(
+            _fetch_optional_stats(),
+            _fetch_optional_avatar(),
+        )
+        if isinstance(stats_html, str) and stats_html:
+            hltv.enrich_player_profile_stats(
+                profile, stats_html, is_career_fallback=career_mode
+            )
+        return avatar_bytes
+
+    avatars = list(
+        await asyncio.gather(
+            *(
+                _enrich_one_player(p, prof)
+                for p, prof in zip(resolved, profiles, strict=False)
+            )
+        )
+    )
+
+    try:
+        png = await card.render_player_compare_card(profiles, _now(), avatars)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[cs2] 选手对比卡渲染失败: %s", exc)
+        await cs2.finish("选手对比卡渲染失败,请稍后再试")
     await cs2.finish(png)
 
 
@@ -2303,6 +2543,10 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
             t1, t2 = parts[1].strip(), " ".join(parts[2:]).strip()
         await _handle_h2h(t1, t2)
 
+    if sub in ("对比", "pk", "PK", "compare", "选手对比", "比一比"):
+        raw_args = " ".join(parts[1:]).strip()
+        await _handle_player_compare(_parse_compare_player_queries(raw_args))
+
     if sub in ("查询", "query", "查"):
         kind = parts[1] if len(parts) > 1 else ""
         name = " ".join(parts[2:]).strip()
@@ -2313,6 +2557,8 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
         if kind in ("排名", "rank", "ranking", "排行榜", "榜单"):
             source = name.lower() if name else "vrs"
             await _handle_ranking(source)
+        if kind in ("对比", "pk", "PK", "compare", "选手对比", "比一比"):
+            await _handle_player_compare(_parse_compare_player_queries(name))
         if kind in ("交手", "h2h", "H2H", "对阵历史"):
             raw_args = name
             t1, t2 = "", ""
@@ -2323,7 +2569,7 @@ async def handle_cs2(event: MessageEvent, raw: str) -> None:
                 t1, t2 = parts[2].strip(), " ".join(parts[3:]).strip()
             await _handle_h2h(t1, t2)
         await cs2.finish(
-            "用法:/cs2 查询 选手 <名字> 或 /cs2 查询 战队 <名字> 或 /cs2 排名 [vrs|hltv] 或 /cs2 交手 <队A> <队B>"
+            "用法:/cs2 查询 选手 <名字> 或 /cs2 查询 战队 <名字> 或 /cs2 对比 <选手A> <选手B> 或 /cs2 排名 [vrs|hltv] 或 /cs2 交手 <队A> <队B>"
         )
 
     # 兼容旧版直接以实体类型开头的查询写法。
@@ -3580,6 +3826,47 @@ class Cs2ResultsPlugin(Star):
             f"已发送选手 {player} 的详情卡片。",
         )
 
+    @filter.llm_tool(name="query_cs2_player_compare")
+    async def query_cs2_player_compare(
+        self,
+        event: AstrMessageEvent,
+        player1: str = "",
+        player2: str = "",
+        player3: str = "",
+        **_kwargs: Any,
+    ) -> str:
+        """同屏对比 2~3 名 CS2 选手的六维能力雷达图（Firepower/Entrying/Trading/Opening/Closing/Sniping）、Rating 3.0、ADR、KAST、K/D、大赛荣誉与近期战绩。当用户询问多名选手谁更强、对比两名或三名选手数据或能力 PK 时优先调用。
+
+        Args:
+            player1(string): 选手A昵称或常用外号，例如 ZywOo、载物、donk、m0NESY、s1mple。
+            player2(string): 选手B昵称或常用外号，例如 donk、m0NESY、小孩、NiKo。
+            player3(string): 可选，选手C昵称或常用外号（当用户同时对比 3 名选手如“ZywOo、donk、m0NESY 谁更强”时传入，仅对比 2 人时留空）。
+        """
+        p1 = (
+            player1
+            or str(_kwargs.get("player_a") or _kwargs.get("p1") or "")
+        ).strip()
+        p2 = (
+            player2
+            or str(_kwargs.get("player_b") or _kwargs.get("p2") or "")
+        ).strip()
+        p3 = (
+            player3
+            or str(_kwargs.get("player_c") or _kwargs.get("p3") or "")
+        ).strip()
+        raw_players = [x for x in (p1, p2, p3) if x]
+        if len(raw_players) < 2 and isinstance(_kwargs.get("players"), (list, tuple)):
+            raw_players = [str(x).strip() for x in _kwargs["players"] if str(x).strip()]
+        if len(raw_players) < 2:
+            return "请至少提供两名要对比的 CS2 选手名称。"
+        raw_players = raw_players[:3]
+        joined = " vs ".join(raw_players)
+        return await self._run_llm_tool_command(
+            event,
+            f"对比 {joined}".strip(),
+            f"已发送 {joined} 的选手数据对比卡片。",
+        )
+
     @filter.llm_tool(name="query_cs2_team")
     async def query_cs2_team(
         self,
@@ -3610,12 +3897,12 @@ class Cs2ResultsPlugin(Star):
         if not text:
             return False
         if re.search(
-            r"cs2|hltv|vrs|major|rating|adr|kast|比赛|赛程|战况|赛况|比分|赛果|战队|选手|阵容|资讯|排名|排行|rank|交手|h2h|晨报",
+            r"cs2|hltv|vrs|major|rating|adr|kast|比赛|赛程|战况|赛况|比分|赛果|战队|选手|阵容|资讯|排名|排行|rank|交手|h2h|晨报|六维",
             text,
         ):
             return True
         if not re.search(
-            r"数据|战绩|状态|名单|队员|教练|荣誉|mvp|top|k/?d|近期|最近|现在|目前|哪个队|哪支队|什么队|查|看",
+            r"数据|战绩|状态|名单|队员|教练|荣誉|mvp|top|k/?d|近期|最近|现在|目前|哪个队|哪支队|什么队|查|看|对比|比较|pk|vs|谁更强|谁强|谁厉害|哪个强|哪个更强|谁猛|差距",
             text,
         ):
             return False
@@ -3636,7 +3923,7 @@ class Cs2ResultsPlugin(Star):
         if not self._matches_cs2_llm_intent(event.message_str or ""):
             return
         req.system_prompt = (getattr(req, "system_prompt", "") or "") + (
-            "\n用户在询问 CS2/HLTV 赛事、战况、赛程、排名、交手历史、选手详情、战队阵容或资讯。"
+            "\n用户在询问 CS2/HLTV 赛事、战况、赛程、排名、交手历史、选手详情、选手对比、战队阵容或资讯。"
             "请优先调用 query_cs2_* 工具获取实时数据，不要凭记忆回答。"
         )
 

@@ -2112,10 +2112,16 @@ class PlayerProfile:
     rating: Optional[float] = None
     kd: Optional[float] = None
     kd_scope: str = ""
+    adr: Optional[float] = None
+    kast: Optional[float] = None
+    impact: Optional[float] = None
+    kpr: Optional[float] = None
+    dpr: Optional[float] = None
     kills: Optional[int] = None
     deaths: Optional[int] = None
     maps: Optional[int] = None
     stats_period: str = ""
+    stats_url: str = ""
     role_stats: list[tuple[str, int]] = field(default_factory=list)
     recent_matches: list[RecentMatch] = field(default_factory=list)
     major_wins: int = 0
@@ -2261,6 +2267,12 @@ def parse_player_profile(player_html: Html, player_id: str = "") -> PlayerProfil
         avatar = avatar_img.attributes.get("data-cookieblock-src") or avatar_img.attributes.get("src")
 
     rating = None
+    adr = None
+    kast = None
+    impact = None
+    kpr = None
+    dpr = None
+    kd_recent = None
     role_stats: list[tuple[str, int]] = []
     attrs = t.css_first(".playerpage-container-attributes")
     if attrs:
@@ -2270,12 +2282,44 @@ def parse_player_profile(player_html: Html, player_id: str = "") -> PlayerProfil
             value_text = _stat_value(stat)
             if not label:
                 continue
-            if label.casefold().startswith("rating"):
+            label_cf = label.casefold()
+            if label_cf.startswith("rating"):
                 rating = _float_text(value_text)
+                continue
+            if label_cf in ("adr", "damage / round"):
+                adr = _float_text(value_text)
+                continue
+            if label_cf == "kast":
+                kast = _float_text(value_text)
+                continue
+            if label_cf == "impact":
+                impact = _float_text(value_text)
+                continue
+            if label_cf in ("kpr", "kills / round"):
+                kpr = _float_text(value_text)
+                continue
+            if label_cf in ("dpr", "deaths / round"):
+                dpr = _float_text(value_text)
+                continue
+            if label_cf in ("k/d", "kd", "k/d ratio", "kd ratio"):
+                kd_recent = _float_text(value_text)
                 continue
             value = _int_text(value_text)
             if value is not None:
                 role_stats.append((label, value))
+
+    stats_url = ""
+    for a_node in t.css("a[href*='/stats/players/']"):
+        href = (a_node.attributes.get("href", "") or "").strip()
+        if re.search(r"/stats/players/\d+/[^/?#]+(?:\?.*)?$", href):
+            if "event=" in href and "startDate=" not in href:
+                continue
+            candidate = f"{BASE}{href}" if href.startswith("/") else href
+            if "startDate=" in candidate:
+                stats_url = candidate
+                break
+            if not stats_url:
+                stats_url = candidate
 
     recent_matches: list[RecentMatch] = []
     for box in t.css(".playerpage-matchbox"):
@@ -2321,10 +2365,10 @@ def parse_player_profile(player_html: Html, player_id: str = "") -> PlayerProfil
     maps = None
     if match := re.search(r"(\d+)\s*maps\b", stats_period, re.I):
         maps = int(match.group(1))
-    kd = None
-    kd_scope = ""
+    kd = kd_recent
+    kd_scope = "近期统计" if kd_recent is not None else ""
     all_time_text = " ".join(_txt(node) for node in t.css(".all-time-stat"))
-    if match := re.search(r"(\d+(?:\.\d+)?)\s*Average KDR", all_time_text, re.I):
+    if kd is None and (match := re.search(r"(\d+(?:\.\d+)?)\s*Average KDR", all_time_text, re.I)):
         kd = float(match.group(1))
         kd_scope = "生涯统计"
     return PlayerProfile(
@@ -2340,8 +2384,14 @@ def parse_player_profile(player_html: Html, player_id: str = "") -> PlayerProfil
         rating=rating,
         kd=kd,
         kd_scope=kd_scope,
+        adr=adr,
+        kast=kast,
+        impact=impact,
+        kpr=kpr,
+        dpr=dpr,
         maps=maps,
         stats_period=stats_period,
+        stats_url=stats_url,
         role_stats=role_stats,
         recent_matches=recent_matches,
         major_wins=major_wins,
@@ -2352,13 +2402,67 @@ def parse_player_profile(player_html: Html, player_id: str = "") -> PlayerProfil
 
 
 def parse_player_stats(player_stats_html: Html) -> dict[str, float | int | None]:
-    """从 `/stats/players/individual/...` 提取近期 K/D、击杀、死亡和地图数。
+    """从 `/stats/players/...` 提取近期 Rating、ADR、KAST、K/D、击杀、死亡和地图数。
 
-    兼容 HLTV 的 `.stats-row`/`.stats-name`/`.stats-val` 结构；页面改版时再退回
-    对整页文本做标签匹配，保证至少能取到 K/D Ratio。
+    兼容 HLTV Rating 3.0 的 `.player-summary-stat-box` / `.player-summary-stat-box-data-wrapper`、
+    旧版 `.summaryStatBreakdown` 卡片与 `.stats-row`/`.stats-name`/`.stats-val` 结构；
+    页面改版时再退回对整页文本做标签匹配，保证至少能取到核心统计指标。
     """
     t = tree(player_stats_html)
     pairs: list[tuple[str, str]] = []
+
+    rating_node = t.css_first(".player-summary-stat-box-rating-data-text")
+    if rating_node:
+        rating_val = _txt(rating_node)
+        if rating_val:
+            pairs.append(("Rating 3.0", rating_val))
+
+    map_count_node = t.css_first(".player-summary-stat-box-right-map-count")
+    if map_count_node:
+        map_text = _txt(map_count_node)
+        if m := re.search(r"(\d+)\s*maps\b", map_text, re.I):
+            pairs.append(("Maps played", m.group(1)))
+
+    for wrapper in t.css(".player-summary-stat-box-data-wrapper"):
+        val_node = (
+            wrapper.css_first(".player-summary-stat-box-data.traditionalData")
+            or wrapper.css_first(".player-summary-stat-box-data:not(.hidden)")
+            or wrapper.css_first(".player-summary-stat-box-data")
+        )
+        label_node = (
+            wrapper.css_first(
+                ".player-summary-stat-box-data-text.traditionalData .player-summary-tooltip b"
+            )
+            or wrapper.css_first(
+                ".player-summary-stat-box-data-text:not(.hidden) .player-summary-tooltip b"
+            )
+            or wrapper.css_first(".player-summary-tooltip b")
+        )
+        label = _txt(label_node)
+        if not label:
+            txt_node = (
+                wrapper.css_first(".player-summary-stat-box-data-text.traditionalData")
+                or wrapper.css_first(".player-summary-stat-box-data-text:not(.hidden)")
+                or wrapper.css_first(".player-summary-stat-box-data-text")
+            )
+            if txt_node:
+                tooltip_txt = _txt(txt_node.css_first(".player-summary-tooltip"))
+                raw_txt = _txt(txt_node)
+                if tooltip_txt and raw_txt.endswith(tooltip_txt):
+                    raw_txt = raw_txt[: -len(tooltip_txt)].strip()
+                label = raw_txt
+        value = _txt(val_node)
+        if label and value:
+            pairs.append((label, value))
+
+    for box in t.css(".summaryStatBreakdown"):
+        label = _txt(
+            box.css_first(".summaryStatBreakdownSubHeader b")
+            or box.css_first(".summaryStatBreakdownSubHeader")
+        )
+        value = _txt(box.css_first(".summaryStatBreakdownDataValue"))
+        if label and value:
+            pairs.append((label, value))
     for row in t.css(".stats-row"):
         label = _txt(
             row.css_first(".stats-name")
@@ -2373,11 +2477,19 @@ def parse_player_stats(player_stats_html: Html) -> dict[str, float | int | None]
         if label and value:
             pairs.append((label, value))
 
+    has_modern_summary = t.css_first(".player-summary-stat-box") is not None
+
     def find(*labels: str) -> str:
         wanted = {label.casefold() for label in labels}
         for label, value in pairs:
             if label.casefold() in wanted:
                 return value
+        for label, value in pairs:
+            label_cf = label.casefold()
+            if any(label_cf.startswith(w) for w in wanted):
+                return value
+        if has_modern_summary and t.css_first(".stats-rows") is None:
+            return ""
         body_text = _txt(t.css_first(".stats-rows") or t.body or t.root)
         for label in labels:
             match = re.search(
@@ -2394,7 +2506,99 @@ def parse_player_stats(player_stats_html: Html) -> dict[str, float | int | None]
         "kills": _int_text(find("Total kills", "Kills")),
         "deaths": _int_text(find("Total deaths", "Deaths")),
         "maps": _int_text(find("Maps played", "Total maps")),
+        "adr": _float_text(find("ADR", "Damage / round")),
+        "kast": _float_text(find("KAST")),
+        "impact": _float_text(find("Impact", "Round swing")),
+        "kpr": _float_text(find("KPR", "Kills / round")),
+        "dpr": _float_text(find("DPR", "Deaths / round")),
+        "rating": _float_text(
+            find("Rating 3.0", "Rating 2.1", "Rating 2.0", "Rating 1.0", "Rating")
+        ),
     }
+
+
+def parse_player_stats_roles(player_stats_html: Html) -> list[tuple[str, int]]:
+    """从 `/stats/players/...` 提取七维能力角色分（Firepower/Entrying/Trading/Opening/Closing/Sniping/Utility）。"""
+    t = tree(player_stats_html)
+    role_stats: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    wrappers = t.css(".role-stats-section-title-wrapper.stats-side-combined")
+    if not wrappers:
+        wrappers = t.css(".role-stats-section-title-wrapper")
+    for wrapper in wrappers:
+        score_node = wrapper.css_first(".role-stats-section-score-value")
+        score = _int_text(_txt(score_node))
+        if score is None:
+            continue
+        label = _txt(wrapper.css_first(".tooltip-attributes b")).rstrip(": ").strip()
+        if not label:
+            title_node = wrapper.css_first(".role-stats-section-title")
+            if title_node is not None:
+                m = re.match(r"([A-Za-z]+)", _txt(title_node))
+                if m:
+                    label = m.group(1)
+        key = label.casefold()
+        if label and key not in seen:
+            seen.add(key)
+            role_stats.append((label, score))
+    return role_stats
+
+
+def enrich_player_profile_stats(
+    profile: PlayerProfile,
+    player_stats_html: Html,
+    *,
+    is_career_fallback: bool = False,
+) -> dict[str, float | int | None]:
+    """用 `/stats/players/...` 的统计页数据回填 `PlayerProfile` 的 ADR、KAST、近期 K/D 与角色评分。"""
+    was_empty_recent = (
+        is_career_fallback
+        or (profile.maps in (None, 0) and profile.rating is None and not profile.role_stats)
+    )
+    scope_label = "生涯统计" if was_empty_recent else "近期统计"
+    stats = parse_player_stats(player_stats_html)
+    if stats.get("adr") is not None:
+        profile.adr = float(stats["adr"])  # type: ignore[arg-type]
+    if stats.get("kast") is not None:
+        profile.kast = float(stats["kast"])  # type: ignore[arg-type]
+    if stats.get("impact") is not None:
+        profile.impact = float(stats["impact"])  # type: ignore[arg-type]
+    if stats.get("kpr") is not None:
+        profile.kpr = float(stats["kpr"])  # type: ignore[arg-type]
+    if stats.get("dpr") is not None:
+        profile.dpr = float(stats["dpr"])  # type: ignore[arg-type]
+    if stats.get("kd") is not None:
+        profile.kd = float(stats["kd"])  # type: ignore[arg-type]
+        profile.kd_scope = scope_label
+    elif (
+        (
+            profile.kd is None
+            or (not was_empty_recent and profile.kd_scope == "生涯统计")
+        )
+        and stats.get("kpr") is not None
+        and stats.get("dpr") is not None
+        and float(stats["dpr"]) > 0  # type: ignore[arg-type]
+    ):
+        profile.kd = round(float(stats["kpr"]) / float(stats["dpr"]), 2)  # type: ignore[arg-type]
+        profile.kd_scope = scope_label
+    if stats.get("kills") is not None and profile.kills is None:
+        profile.kills = int(stats["kills"])  # type: ignore[arg-type]
+    if stats.get("deaths") is not None and profile.deaths is None:
+        profile.deaths = int(stats["deaths"])  # type: ignore[arg-type]
+    if stats.get("maps") is not None and (
+        profile.maps is None
+        or (profile.maps == 0 and int(stats["maps"]) > 0)  # type: ignore[arg-type]
+    ):
+        profile.maps = int(stats["maps"])  # type: ignore[arg-type]
+        if was_empty_recent and profile.maps > 0:
+            profile.stats_period = f"(Career • {profile.maps} maps)"
+    if stats.get("rating") is not None and profile.rating is None:
+        profile.rating = float(stats["rating"])  # type: ignore[arg-type]
+    if not profile.role_stats:
+        stats_roles = parse_player_stats_roles(player_stats_html)
+        if stats_roles:
+            profile.role_stats = stats_roles
+    return stats
 
 
 @dataclass

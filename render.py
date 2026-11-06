@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import html as _html
+import math
 import re
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
@@ -217,13 +218,13 @@ def _shell(body: str, pad: str, min_width: str = "") -> str:
     card_min = f"min-width:{min_width};" if min_width else ""
     return f"""<style>{_font_face()}
 *{{margin:0;padding:0;box-sizing:border-box;}}
-html,body{{background:{PAGE};min-width:fit-content;width:100%;display:flex;justify-content:center;}}
+html,body{{background:{PAGE};min-width:fit-content;min-height:fit-content;height:auto;width:100%;display:flex;justify-content:center;align-items:flex-start;}}
 body{{font-family:{FONT};}}
 </style>
 <div style="background:{PAGE};padding:clamp(28px,7vw,56px) clamp(24px,5vw,60px);
-     display:flex;justify-content:center;width:100%;{wrap_min}
+     display:flex;justify-content:center;width:100%;align-items:flex-start;min-height:fit-content;{wrap_min}
      color:{INK};-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;">
- <div style="width:100%;max-width:1200px;{card_min}background:{CARD};border:1px solid {BORDER};
+ <div style="width:100%;max-width:1200px;height:fit-content;{card_min}background:{CARD};border:1px solid {BORDER};
       border-radius:24px;
       box-shadow:{_SHADOW};padding:{pad};">
 {body}
@@ -2584,6 +2585,667 @@ async def render_player_profile_card(
     return await _render_png(build_player_profile_html(profile, when_text, avatar_bytes))
 
 
+# ———————————————————— 选手六维雷达与正面数据对比 (2~3 人) ————————————————————
+_COMPARE_THEMES: tuple[dict[str, str], ...] = (
+    {
+        "stroke": ACCENT,
+        "text": ACCENT_D,
+        "bg": ACCENT_BG,
+        "fill": "rgba(196,112,78,0.22)",
+        "border": "rgba(196,112,78,0.34)",
+    },
+    {
+        "stroke": "#4A6984",
+        "text": "#355068",
+        "bg": "#E7EFF5",
+        "fill": "rgba(74,105,132,0.22)",
+        "border": "rgba(74,105,132,0.34)",
+    },
+    {
+        "stroke": GOOD,
+        "text": "#45543B",
+        "bg": "#E9EFE6",
+        "fill": "rgba(94,112,82,0.22)",
+        "border": "rgba(94,112,82,0.34)",
+    },
+)
+
+_RADAR_DIMENSIONS: tuple[tuple[str, str], ...] = (
+    ("Firepower", "火力"),
+    ("Entrying", "突破"),
+    ("Trading", "补枪"),
+    ("Opening", "首杀"),
+    ("Closing", "残局"),
+    ("Sniping", "狙击"),
+)
+
+
+def _player_role_map(profile: PlayerProfile) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for label, val in profile.role_stats:
+        key = (label or "").strip().casefold()
+        if key and val is not None:
+            score = max(0, min(int(val), 100))
+            out[key] = score
+            if key == "clutching" and "closing" not in out:
+                out["closing"] = score
+            elif key == "closing" and "clutching" not in out:
+                out["clutching"] = score
+    return out
+
+
+def _build_player_radar_svg(profiles: list[PlayerProfile]) -> str:
+    """构造内联双色/三色重叠 SVG 正六边形雷达图。"""
+    cx, cy = 210.0, 172.0
+    radius = 104.0
+    role_maps = [_player_role_map(p) for p in profiles[:3]]
+
+    angles = [-90.0 + i * 60.0 for i in range(6)]
+    unit_vecs = [(math.cos(math.radians(a)), math.sin(math.radians(a))) for a in angles]
+
+    grid_polys: list[str] = []
+    for level in (100, 80, 60, 40, 20):
+        r = radius * (level / 100.0)
+        pts = " ".join(f"{cx + r * ux:.1f},{cy + r * uy:.1f}" for ux, uy in unit_vecs)
+        if level == 100:
+            grid_polys.append(
+                f'<polygon points="{pts}" fill="rgba(255,255,255,0.65)" '
+                f'stroke="rgba(31,28,23,0.14)" stroke-width="1.3"/>'
+            )
+        else:
+            grid_polys.append(
+                f'<polygon points="{pts}" fill="none" '
+                f'stroke="rgba(31,28,23,0.08)" stroke-width="1" stroke-dasharray="3 3"/>'
+            )
+
+    axis_lines = "".join(
+        f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{cx + radius * ux:.1f}" '
+        f'y2="{cy + radius * uy:.1f}" stroke="rgba(31,28,23,0.10)" stroke-width="1"/>'
+        for ux, uy in unit_vecs
+    )
+
+    scale_ticks = "".join(
+        f'<text x="{cx + 4:.1f}" y="{cy - radius * (lvl / 100.0) + 9:.1f}" '
+        f'font-size="9.5" font-weight="600" fill="{FAINT}">{lvl}</text>'
+        for lvl in (40, 80)
+    )
+
+    player_layers: list[str] = []
+    for idx, rmap in enumerate(role_maps):
+        th = _COMPARE_THEMES[idx % len(_COMPARE_THEMES)]
+        vals = [rmap.get(en.casefold(), 0) for en, _ in _RADAR_DIMENSIONS]
+        has_any = any(v > 0 for v in vals)
+        coords: list[tuple[float, float]] = []
+        for (ux, uy), v in zip(unit_vecs, vals, strict=False):
+            r_val = radius * (max(v, 4) / 100.0) if has_any else 0.0
+            coords.append((cx + r_val * ux, cy + r_val * uy))
+        if has_any:
+            pts = " ".join(f"{vx:.1f},{vy:.1f}" for vx, vy in coords)
+            player_layers.append(
+                f'<polygon points="{pts}" fill="{th["fill"]}" '
+                f'stroke="{th["stroke"]}" stroke-width="2.6" stroke-linejoin="round"/>'
+            )
+            for vx, vy in coords:
+                player_layers.append(
+                    f'<circle cx="{vx:.1f}" cy="{vy:.1f}" r="4.0" '
+                    f'fill="{th["stroke"]}" stroke="{CARD}" stroke-width="1.5"/>'
+                )
+
+    vertex_labels: list[str] = []
+    for i, ((en, cn), (ux, uy)) in enumerate(
+        zip(_RADAR_DIMENSIONS, unit_vecs, strict=False)
+    ):
+        if i == 0:
+            lx, ly1, ly2, anchor = cx, cy - radius - 25.0, cy - radius - 10.0, "middle"
+        elif i == 3:
+            lx, ly1, ly2, anchor = cx, cy + radius + 17.0, cy + radius + 33.0, "middle"
+        elif i in (1, 2):
+            lx = cx + radius * ux + 12.0
+            ly1 = cy + radius * uy - 4.0
+            ly2 = cy + radius * uy + 12.0
+            anchor = "start"
+        else:
+            lx = cx + radius * ux - 12.0
+            ly1 = cy + radius * uy - 4.0
+            ly2 = cy + radius * uy + 12.0
+            anchor = "end"
+
+        raw_vals = [rmap.get(en.casefold()) for rmap in role_maps]
+        valid_vals = [v for v in raw_vals if v is not None]
+        max_v = max(valid_vals) if valid_vals else None
+        tspans: list[str] = []
+        for idx, v in enumerate(raw_vals):
+            if idx > 0:
+                tspans.append(f'<tspan fill="{FAINT}" font-weight="600"> / </tspan>')
+            th = _COMPARE_THEMES[idx % len(_COMPARE_THEMES)]
+            v_str = str(v) if v is not None else "—"
+            weight = "800" if (v is not None and max_v is not None and v == max_v) else "600"
+            tspans.append(f'<tspan fill="{th["text"]}" font-weight="{weight}">{v_str}</tspan>')
+
+        vertex_labels.append(
+            f'<text x="{lx:.1f}" y="{ly1:.1f}" text-anchor="{anchor}" '
+            f'font-size="12" font-weight="700" fill="{INK}">{_esc(cn)} {_esc(en)}</text>'
+            f'<text x="{lx:.1f}" y="{ly2:.1f}" text-anchor="{anchor}" '
+            f'font-size="12">{"".join(tspans)}</text>'
+        )
+
+    return (
+        '<svg viewBox="0 0 420 340" width="100%" height="auto" '
+        'style="display:block;max-width:420px;margin:0 auto;overflow:visible;">'
+        f'{"".join(grid_polys)}{axis_lines}{scale_ticks}'
+        f'{"".join(player_layers)}{"".join(vertex_labels)}</svg>'
+    )
+
+
+def _build_compare_role_rows(profiles: list[PlayerProfile]) -> str:
+    """构造右侧六维（及可选 Utility）能力分项对比条。"""
+    role_maps = [_player_role_map(p) for p in profiles[:3]]
+    dims = list(_RADAR_DIMENSIONS)
+    if any("utility" in rm for rm in role_maps):
+        dims.append(("Utility", "道具"))
+
+    rows: list[str] = []
+    is_two = len(profiles) == 2
+    for idx_d, (en, cn) in enumerate(dims):
+        vals = [rm.get(en.casefold()) for rm in role_maps]
+        valid = [v for v in vals if v is not None]
+        max_v = max(valid) if valid else None
+        mt = "margin-top:0;" if idx_d == 0 else "margin-top:13px;"
+
+        if is_two:
+            v0, v1 = vals[0], vals[1]
+            s0 = str(v0) if v0 is not None else "—"
+            s1 = str(v1) if v1 is not None else "—"
+            w0 = max(0, min(v0 or 0, 100))
+            w1 = max(0, min(v1 or 0, 100))
+            c0 = _COMPARE_THEMES[0]["text"] if (v0 is not None and v0 == max_v) else SUB
+            c1 = _COMPARE_THEMES[1]["text"] if (v1 is not None and v1 == max_v) else SUB
+            fw0 = "800" if (v0 is not None and v0 == max_v) else "600"
+            fw1 = "800" if (v1 is not None and v1 == max_v) else "600"
+            rows.append(
+                f'<div style="{mt}">'
+                f' <div style="display:flex;align-items:center;justify-content:space-between;font-size:13px;margin-bottom:5px;">'
+                f'  <span style="width:42px;font-weight:{fw0};color:{c0};font-variant-numeric:tabular-nums;">{s0}</span>'
+                f'  <span style="font-weight:700;color:{ROW};">{_esc(cn)} · {_esc(en)}</span>'
+                f'  <span style="width:42px;text-align:right;font-weight:{fw1};color:{c1};font-variant-numeric:tabular-nums;">{s1}</span>'
+                f' </div>'
+                f' <div style="display:flex;align-items:center;gap:6px;">'
+                f'  <div style="flex:1;height:8px;background:{PANEL};border-radius:999px;overflow:hidden;display:flex;justify-content:flex-end;">'
+                f'   <div style="width:{w0}%;height:100%;background:{_COMPARE_THEMES[0]["stroke"]};border-radius:999px;"></div>'
+                f'  </div>'
+                f'  <div style="width:2px;height:10px;background:{BORDER};flex:none;"></div>'
+                f'  <div style="flex:1;height:8px;background:{PANEL};border-radius:999px;overflow:hidden;">'
+                f'   <div style="width:{w1}%;height:100%;background:{_COMPARE_THEMES[1]["stroke"]};border-radius:999px;"></div>'
+                f'  </div>'
+                f' </div>'
+                f'</div>'
+            )
+        else:
+            score_pills: list[str] = []
+            bar_tracks: list[str] = []
+            for p_idx, v in enumerate(vals):
+                th = _COMPARE_THEMES[p_idx % len(_COMPARE_THEMES)]
+                v_str = str(v) if v is not None else "—"
+                is_best = v is not None and max_v is not None and v == max_v
+                bg = th["bg"] if is_best else "transparent"
+                bd = f"1px solid {th['border']}" if is_best else "1px solid transparent"
+                fw = "800" if is_best else "600"
+                col = th["text"] if is_best else SUB
+                score_pills.append(
+                    f'<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 7px;'
+                    f'border-radius:999px;background:{bg};border:{bd};font-size:12.5px;'
+                    f'font-weight:{fw};color:{col};font-variant-numeric:tabular-nums;">'
+                    f'<span style="width:6px;height:6px;border-radius:50%;background:{th["stroke"]};"></span>'
+                    f'{v_str}</span>'
+                )
+                w_pct = max(0, min(v or 0, 100))
+                bar_tracks.append(
+                    f'<div style="flex:1;height:7px;background:{PANEL};border-radius:999px;overflow:hidden;">'
+                    f'<div style="width:{w_pct}%;height:100%;background:{th["stroke"]};border-radius:999px;"></div>'
+                    f'</div>'
+                )
+            rows.append(
+                f'<div style="{mt}">'
+                f' <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">'
+                f'  <span style="font-size:13px;font-weight:700;color:{ROW};">{_esc(cn)} · {_esc(en)}</span>'
+                f'  <div style="display:flex;align-items:center;gap:6px;">{"".join(score_pills)}</div>'
+                f' </div>'
+                f' <div style="display:flex;align-items:center;gap:6px;">{"".join(bar_tracks)}</div>'
+                f'</div>'
+            )
+    return "".join(rows)
+
+
+def _build_compare_metric_cards(profiles: list[PlayerProfile]) -> str:
+    """构造正面核心指标对比卡片网格（Rating / ADR / KAST / K/D / Maps / Major）。"""
+    metrics_spec = [
+        (
+            "Rating 3.0",
+            "综合评分",
+            [p.rating for p in profiles],
+            [f"{p.rating:.2f}" if p.rating is not None else "—" for p in profiles],
+        ),
+        (
+            "ADR",
+            "局均伤害",
+            [p.adr for p in profiles],
+            [f"{p.adr:.1f}" if p.adr is not None else "—" for p in profiles],
+        ),
+        (
+            "KAST",
+            "参战贡献率",
+            [p.kast for p in profiles],
+            [f"{p.kast:.1f}%" if p.kast is not None else "—" for p in profiles],
+        ),
+        (
+            "K/D Ratio",
+            "击杀死亡比",
+            [p.kd for p in profiles],
+            [f"{p.kd:.2f}" if p.kd is not None else "—" for p in profiles],
+        ),
+        (
+            "Maps",
+            "统计样本图数",
+            [float(p.maps) if p.maps is not None else None for p in profiles],
+            [
+                f"{p.maps} (生涯)"
+                if p.maps is not None
+                and any(
+                    kw in (p.stats_period or "").casefold()
+                    for kw in ("career", "生涯")
+                )
+                else (str(p.maps) if p.maps is not None else "—")
+                for p in profiles
+            ],
+        ),
+        (
+            "Major 荣誉",
+            "冠军 / MVP",
+            [
+                float(max(p.major_wins, majors.player_titles(p.nick)) * 100 + p.major_mvps)
+                for p in profiles
+            ],
+            [
+                f"{max(p.major_wins, majors.player_titles(p.nick))} 冠 / {p.major_mvps} MVP"
+                for p in profiles
+            ],
+        ),
+    ]
+
+    cards: list[str] = []
+    is_two = len(profiles) == 2
+    for label, sub_label, raw_vals, disp_vals in metrics_spec:
+        valid = [v for v in raw_vals if v is not None]
+        max_v = max(valid) if valid else None
+        has_distinct_winner = len(valid) >= 2 and max_v is not None and valid.count(max_v) < len(valid)
+
+        if is_two:
+            v0, v1 = raw_vals[0], raw_vals[1]
+            d0, d1 = disp_vals[0], disp_vals[1]
+            win0 = has_distinct_winner and v0 is not None and v0 == max_v
+            win1 = has_distinct_winner and v1 is not None and v1 == max_v
+            c0 = _COMPARE_THEMES[0]["text"] if win0 else INK
+            c1 = _COMPARE_THEMES[1]["text"] if win1 else INK
+            bg0 = _COMPARE_THEMES[0]["bg"] if win0 else "transparent"
+            bg1 = _COMPARE_THEMES[1]["bg"] if win1 else "transparent"
+            bd0 = f"1px solid {_COMPARE_THEMES[0]['border']}" if win0 else "1px solid transparent"
+            bd1 = f"1px solid {_COMPARE_THEMES[1]['border']}" if win1 else "1px solid transparent"
+
+            if v0 is not None and v1 is not None and (v0 + v1) > 0:
+                pct0 = max(12, min(88, round(v0 / (v0 + v1) * 100)))
+                pct1 = 100 - pct0
+            else:
+                pct0, pct1 = 50, 50
+
+            cards.append(
+                f'<div style="background:{INNER};border:1px solid {BORDER};border-radius:16px;padding:14px 16px;">'
+                f' <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">'
+                f'  <div style="padding:4px 10px;border-radius:10px;background:{bg0};border:{bd0};'
+                f'       font-size:20px;font-weight:800;color:{c0};font-variant-numeric:tabular-nums;white-space:nowrap;">{_esc(d0)}</div>'
+                f'  <div style="text-align:center;min-width:0;">'
+                f'   <div style="font-size:13px;font-weight:800;color:{INK};text-transform:uppercase;">{_esc(label)}</div>'
+                f'   <div style="font-size:11.5px;color:{MUTE};margin-top:2px;">{_esc(sub_label)}</div>'
+                f'  </div>'
+                f'  <div style="padding:4px 10px;border-radius:10px;background:{bg1};border:{bd1};'
+                f'       font-size:20px;font-weight:800;color:{c1};font-variant-numeric:tabular-nums;white-space:nowrap;">{_esc(d1)}</div>'
+                f' </div>'
+                f' <div style="margin-top:10px;height:6px;background:{PANEL};border-radius:999px;overflow:hidden;display:flex;">'
+                f'  <div style="width:{pct0}%;height:100%;background:{_COMPARE_THEMES[0]["stroke"]};"></div>'
+                f'  <div style="width:{pct1}%;height:100%;background:{_COMPARE_THEMES[1]["stroke"]};"></div>'
+                f' </div>'
+                f'</div>'
+            )
+        else:
+            cells: list[str] = []
+            for p_idx, (p, v, d) in enumerate(
+                zip(profiles, raw_vals, disp_vals, strict=False)
+            ):
+                th = _COMPARE_THEMES[p_idx % len(_COMPARE_THEMES)]
+                is_win = has_distinct_winner and v is not None and v == max_v
+                bg = th["bg"] if is_win else PANEL
+                bd = f"1px solid {th['border']}" if is_win else f"1px solid {BORDER_S}"
+                col = th["text"] if is_win else INK
+                cells.append(
+                    f'<div style="flex:1;min-width:0;background:{bg};border:{bd};border-radius:12px;'
+                    f'padding:8px 10px;text-align:center;">'
+                    f' <div style="font-size:11.5px;font-weight:700;color:{MUTE};white-space:nowrap;'
+                    f'      overflow:hidden;text-overflow:ellipsis;">{_esc(p.nick)}</div>'
+                    f' <div style="font-size:17px;font-weight:800;color:{col};margin-top:4px;'
+                    f'      font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;'
+                    f'      text-overflow:ellipsis;">{_esc(d)}</div>'
+                    f'</div>'
+                )
+            cards.append(
+                f'<div style="background:{INNER};border:1px solid {BORDER};border-radius:16px;padding:14px 16px;">'
+                f' <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px;">'
+                f'  <span style="font-size:14px;font-weight:800;color:{INK};text-transform:uppercase;">{_esc(label)}</span>'
+                f'  <span style="font-size:12px;color:{MUTE};">{_esc(sub_label)}</span>'
+                f' </div>'
+                f' <div style="display:flex;gap:8px;">{"".join(cells)}</div>'
+                f'</div>'
+            )
+
+    return (
+        '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;">'
+        + "".join(cards)
+        + "</div>"
+    )
+
+
+def _build_compare_hero(
+    profiles: list[PlayerProfile], avatars: list[Optional[bytes]]
+) -> str:
+    """构造顶部选手对称头卡（2 人左右镜像对称 / 3 人三列并排）。"""
+    if len(profiles) == 2:
+        p0, p1 = profiles[0], profiles[1]
+        av0 = _player_photo(avatars[0] if len(avatars) > 0 else None, p0.nick, 76, 94)
+        av1 = _player_photo(avatars[1] if len(avatars) > 1 else None, p1.nick, 76, 94)
+        id0 = " · ".join(x for x in (p0.realname, p0.country, p0.age_text) if x) or "HLTV Player"
+        id1 = " · ".join(x for x in (p1.realname, p1.country, p1.age_text) if x) or "HLTV Player"
+        t0 = p0.team or "无现役战队"
+        t1 = p1.team or "无现役战队"
+        st0 = _stars(max(p0.major_wins, majors.player_titles(p0.nick)), 14, "right")
+        st1 = _stars(max(p1.major_wins, majors.player_titles(p1.nick)), 14, "left")
+        th0, th1 = _COMPARE_THEMES[0], _COMPARE_THEMES[1]
+
+        return f"""
+  <div style="margin-top:22px;background:{PANEL};border:1px solid {BORDER};border-radius:20px;padding:22px 24px;
+       display:flex;align-items:center;justify-content:space-between;gap:16px;">
+   <!-- 左选手 -->
+   <div style="flex:1;min-width:0;display:flex;align-items:center;gap:16px;">
+    <div style="width:5px;height:88px;border-radius:999px;background:{th0['stroke']};flex:none;"></div>
+    {av0}
+    <div style="flex:1;min-width:0;">
+     <div style="display:flex;align-items:center;gap:6px;font-size:26px;font-weight:800;color:{INK};
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+      <span>{_esc(p0.nick)}</span>{st0}
+     </div>
+     <div style="font-size:13.5px;color:{SUB};margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+      {_esc(id0)}
+     </div>
+     <div style="display:inline-flex;align-items:center;gap:8px;margin-top:10px;background:{INNER};
+          border:1px solid {BORDER};border-radius:12px;padding:5px 11px;max-width:100%;">
+      {_badge(p0.team_logo, t0, 22, DARK2, CARD)}
+      <span style="font-size:13.5px;font-weight:700;color:{INK};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+       {_esc(t0)}
+      </span>
+     </div>
+    </div>
+   </div>
+
+   <!-- VS 徽章 -->
+   <div style="flex:none;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 6px;">
+    <div style="width:48px;height:48px;border-radius:50%;background:{INNER};border:1px solid {BORDER};
+         display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:900;color:{ACCENT_D};
+         box-shadow:0 6px 16px -8px rgba(31,28,23,0.22);">VS</div>
+   </div>
+
+   <!-- 右选手 (镜像对称) -->
+   <div style="flex:1;min-width:0;display:flex;align-items:center;justify-content:flex-end;gap:16px;">
+    <div style="flex:1;min-width:0;text-align:right;display:flex;flex-direction:column;align-items:flex-end;">
+     <div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;font-size:26px;font-weight:800;
+          color:{INK};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;">
+      {st1}<span>{_esc(p1.nick)}</span>
+     </div>
+     <div style="font-size:13.5px;color:{SUB};margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;">
+      {_esc(id1)}
+     </div>
+     <div style="display:inline-flex;align-items:center;gap:8px;margin-top:10px;background:{INNER};
+          border:1px solid {BORDER};border-radius:12px;padding:5px 11px;max-width:100%;">
+      <span style="font-size:13.5px;font-weight:700;color:{INK};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+       {_esc(t1)}
+      </span>
+      {_badge(p1.team_logo, t1, 22, DARK2, CARD)}
+     </div>
+    </div>
+    {av1}
+    <div style="width:5px;height:88px;border-radius:999px;background:{th1['stroke']};flex:none;"></div>
+   </div>
+  </div>"""
+
+    cols: list[str] = []
+    for idx, p in enumerate(profiles[:3]):
+        th = _COMPARE_THEMES[idx % len(_COMPARE_THEMES)]
+        av = _player_photo(avatars[idx] if idx < len(avatars) else None, p.nick, 64, 80)
+        ident = " · ".join(x for x in (p.country, p.age_text) if x) or p.realname or "HLTV Player"
+        team = p.team or "无现役战队"
+        st = _stars(max(p.major_wins, majors.player_titles(p.nick)), 13, "right")
+        cols.append(
+            f'<div style="background:{PANEL};border:1px solid {BORDER};border-top:4px solid {th["stroke"]};'
+            f'border-radius:18px;padding:16px 16px;display:flex;align-items:center;gap:13px;min-width:0;">'
+            f' {av}'
+            f' <div style="flex:1;min-width:0;">'
+            f'  <div style="display:flex;align-items:center;gap:5px;font-size:21px;font-weight:800;color:{INK};'
+            f'       white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+            f'   <span>{_esc(p.nick)}</span>{st}'
+            f'  </div>'
+            f'  <div style="font-size:12.5px;color:{SUB};margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+            f'   {_esc(ident)}'
+            f'  </div>'
+            f'  <div style="display:inline-flex;align-items:center;gap:6px;margin-top:8px;background:{INNER};'
+            f'       border:1px solid {BORDER};border-radius:10px;padding:4px 9px;max-width:100%;">'
+            f'   {_badge(p.team_logo, team, 20, DARK2, CARD)}'
+            f'   <span style="font-size:12.5px;font-weight:700;color:{INK};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+            f'    {_esc(team)}'
+            f'   </span>'
+            f'  </div>'
+            f' </div>'
+            f'</div>'
+        )
+    return (
+        f'<div style="margin-top:22px;display:grid;grid-template-columns:repeat({len(cols)},minmax(0,1fr));gap:14px;">'
+        + "".join(cols)
+        + "</div>"
+    )
+
+
+def _build_compare_recent_columns(profiles: list[PlayerProfile]) -> str:
+    """构造底部 2~3 列近期 5 场比赛状态对比面板。"""
+    cols: list[str] = []
+    for idx, p in enumerate(profiles[:3]):
+        th = _COMPARE_THEMES[idx % len(_COMPARE_THEMES)]
+        matches = p.recent_matches[:5]
+        wins = sum(1 for m in matches if m.result == "win")
+        losses = sum(1 for m in matches if m.result == "loss")
+        rec_tag = f"{wins}胜 {losses}负" if matches else "暂无记录"
+
+        if not matches:
+            rows_html = f'<div style="padding:14px 4px;font-size:13.5px;color:{MUTE};">暂无近期比赛记录</div>'
+        else:
+            row_items: list[str] = []
+            for m_idx, m in enumerate(matches):
+                bt = "" if m_idx == 0 else f"border-top:1px solid {BORDER_R};"
+                r_badge = ""
+                if m.rating is not None:
+                    r_col = _rating_color(m.rating)
+                    r_badge = (
+                        f'<span style="font-size:13px;font-weight:800;color:{r_col};'
+                        f'margin-left:6px;font-variant-numeric:tabular-nums;">{m.rating:.2f}</span>'
+                    )
+                row_items.append(
+                    f'<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 2px;{bt}">'
+                    f' <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">'
+                    f'  <span style="width:24px;flex:none;text-align:center;font-size:13.5px;">{_profile_result_pill(m.result)}</span>'
+                    f'  <span style="font-size:14px;font-weight:700;color:{ROW};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                    f'   vs {_esc(m.opponent or "TBD")}'
+                    f'  </span>'
+                    f' </div>'
+                    f' <div style="display:flex;align-items:center;flex:none;font-size:13.5px;font-weight:800;color:{INK};font-variant-numeric:tabular-nums;">'
+                    f'  <span>{_esc(m.score or "—")}</span>{r_badge}'
+                    f' </div>'
+                    f'</div>'
+                )
+            rows_html = "".join(row_items)
+
+        cols.append(
+            f'<div style="background:{INNER};border:1px solid {BORDER};border-radius:16px;padding:14px 16px;min-width:0;">'
+            f' <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid {BORDER_S};">'
+            f'  <div style="display:flex;align-items:center;gap:7px;min-width:0;">'
+            f'   <span style="width:8px;height:8px;border-radius:50%;background:{th["stroke"]};flex:none;"></span>'
+            f'   <span style="font-size:14.5px;font-weight:800;color:{INK};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{_esc(p.nick)}</span>'
+            f'  </div>'
+            f'  <span style="font-size:12px;font-weight:700;color:{th["text"]};background:{th["bg"]};padding:2px 8px;border-radius:999px;white-space:nowrap;">'
+            f'   近 {len(matches)} 场 · {rec_tag}'
+            f'  </span>'
+            f' </div>'
+            f' {rows_html}'
+            f'</div>'
+        )
+
+    return (
+        f'<div style="display:grid;grid-template-columns:repeat({len(cols)},minmax(0,1fr));gap:14px;margin-top:12px;">'
+        + "".join(cols)
+        + "</div>"
+    )
+
+
+def build_player_compare_html(
+    profiles: list[PlayerProfile],
+    when_text: str,
+    avatars: Optional[list[Optional[bytes]]] = None,
+) -> str:
+    """构造 2~3 名选手的六维雷达与正面数据同屏对比卡 HTML。"""
+    if len(profiles) < 2:
+        raise ValueError("build_player_compare_html requires at least 2 PlayerProfile items")
+    profiles = profiles[:3]
+    avatar_list = list(avatars or [])
+    while len(avatar_list) < len(profiles):
+        avatar_list.append(None)
+
+    career_flags = [
+        any(kw in (p.stats_period or "").casefold() for kw in ("career", "生涯"))
+        for p in profiles
+    ]
+    if all(career_flags):
+        period_text = "生涯统计窗口（近 3 个月无比赛）"
+    elif any(career_flags):
+        recent_period = next(
+            (
+                p.stats_period
+                for p, is_c in zip(profiles, career_flags, strict=False)
+                if p.stats_period and not is_c
+            ),
+            "近 3 个月统计",
+        )
+        period_text = f"{recent_period} · 0 图休赛选手自动回退生涯数据"
+    else:
+        period_text = (
+            next((p.stats_period for p in profiles if p.stats_period), "")
+            or "近 3 个月统计窗口"
+        )
+    top_badge = "三人同屏 · 巅峰对决" if len(profiles) == 3 else "六维雷达 · 正面PK"
+
+    legend_pills = "".join(
+        f'<span style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;'
+        f'border-radius:999px;background:{_COMPARE_THEMES[idx]["bg"]};'
+        f'border:1px solid {_COMPARE_THEMES[idx]["border"]};font-size:12.5px;'
+        f'font-weight:800;color:{_COMPARE_THEMES[idx]["text"]};">'
+        f'<span style="width:8px;height:8px;border-radius:50%;background:{_COMPARE_THEMES[idx]["stroke"]};"></span>'
+        f'{_esc(p.nick)}</span>'
+        for idx, p in enumerate(profiles)
+    )
+
+    hero_html = _build_compare_hero(profiles, avatar_list)
+    metrics_html = _build_compare_metric_cards(profiles)
+    radar_svg = _build_player_radar_svg(profiles)
+    role_rows = _build_compare_role_rows(profiles)
+    recent_cols = _build_compare_recent_columns(profiles)
+
+    body = f"""
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:18px;">
+   <div>
+    <div style="font-size:27px;letter-spacing:-0.4px;color:{INK};">
+     <span style="font-weight:800;">选手数据对比</span>
+     <span style="font-weight:500;color:{SUB};">· PLAYER COMPARISON</span>
+    </div>
+    <div style="font-size:14.5px;color:{FAINT};margin-top:5px;">
+     {_esc(period_text)} · 数据来源 HLTV
+    </div>
+   </div>
+   <div style="background:{ACCENT_BG};color:{ACCENT_D};border:1px solid rgba(196,112,78,0.22);
+        font-size:14px;font-weight:700;padding:7px 15px;border-radius:999px;white-space:nowrap;">
+    {top_badge}
+   </div>
+  </div>
+
+  {hero_html}
+
+  <div style="margin-top:22px;">
+   <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px;">
+    <div style="font-size:17px;font-weight:800;color:{INK};">正面核心数据 · HEAD-TO-HEAD METRICS</div>
+    <div style="font-size:12.5px;color:{MUTE};">占优指标高亮显示</div>
+   </div>
+   {metrics_html}
+  </div>
+
+  <div style="display:flex;gap:16px;margin-top:20px;align-items:stretch;">
+   <!-- 左侧：重叠 SVG 六维雷达图 -->
+   <div style="flex:0 0 430px;background:{INNER};border:1px solid {BORDER};border-radius:18px;
+        padding:18px 18px 14px;display:flex;flex-direction:column;justify-content:space-between;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+     <div style="font-size:15.5px;font-weight:800;color:{INK};">六维角色雷达</div>
+     <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">{legend_pills}</div>
+    </div>
+    {radar_svg}
+   </div>
+
+   <!-- 右侧：六维分项对称条 -->
+   <div style="flex:1;min-width:0;background:{INNER};border:1px solid {BORDER};border-radius:18px;
+        padding:18px 20px;display:flex;flex-direction:column;justify-content:space-between;">
+    <div>
+     <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px;">
+      <div style="font-size:15.5px;font-weight:800;color:{INK};">六维能力分拆</div>
+      <div style="font-size:12px;color:{MUTE};">0–100 角色评分</div>
+     </div>
+     {role_rows}
+    </div>
+   </div>
+  </div>
+
+  <div style="margin-top:22px;border-top:1px solid {LINE};padding-top:18px;">
+   <div style="display:flex;align-items:baseline;justify-content:space-between;">
+    <div style="font-size:17px;font-weight:800;color:{INK};">近期比赛状态 · RECENT 5 MATCHES</div>
+    <div style="font-size:12.5px;color:{MUTE};">最近 5 场完赛记录</div>
+   </div>
+   {recent_cols}
+  </div>
+
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-top:24px;
+       padding-top:16px;border-top:1px solid {BORDER};font-size:14px;color:{FAINT};">
+   <span>{_esc(when_text)}</span>
+   <span>数据 · <span style="color:{ACCENT};font-weight:700;">hltv.org/player</span></span>
+  </div>"""
+    return _shell(body, "40px 44px 36px")
+
+
+async def render_player_compare_card(
+    profiles: list[PlayerProfile],
+    when_text: str,
+    avatars: Optional[list[Optional[bytes]]] = None,
+) -> bytes:
+    return await _render_png(build_player_compare_html(profiles, when_text, avatars))
+
+
 def build_team_profile_html(profile: TeamProfile, when_text: str) -> str:
     """Build the warm team detail card with rankings, roster and recent results."""
     world_rank = f"#{profile.world_rank}" if profile.world_rank else "—"
@@ -2924,6 +3586,7 @@ def build_help_html(admin: bool, when_text: str) -> str:
         + _cmd_row("/cs2 战况 <战队>", "查询指定战队近期比赛、当前比分与赛果", False)
         + _cmd_row("/cs2 排名 [vrs|hltv]", "查看战队世界排名 TOP 20 榜单 (Valve VRS / HLTV)", False)
         + _cmd_row("/cs2 交手 <队A> <队B>", "两队历史交手战绩 (CS2 时代战绩与历史全战绩)", False)
+        + _cmd_row("/cs2 对比 <选手A> <选手B> [选手C]", "2~3 名选手六维雷达与 Rating / ADR / KAST 同屏对比", False)
         + _cmd_row("/cs2 查询 选手 <名字>", "查看选手近期 Rating / K/D、角色分和 Major 荣誉", False)
         + _cmd_row("/cs2 查询 战队 <名字>", "查看阵容、世界 / VRS 排名和近期战绩", False)
         + _cmd_row("/cs2 赛程", "正在进行 / 即将开赛赛事的完整对阵 · 小组赛 / 淘汰赛,可指定其一", True)
