@@ -273,8 +273,14 @@
   "cs2_news_max_push_per_poll": {
     "description": "单次轮询最多推送的新闻数",
     "type": "int",
-    "default": 10,
+    "default": 2,
     "hint": "防止首次补抓或长时间离线后刷屏"
+  },
+  "cs2_news_max_age_hours": {
+    "description": "积压新闻最大有效时长(小时)",
+    "type": "float",
+    "default": 2.0,
+    "hint": "出现多条积压未读新闻时，超过此时长的旧闻仅标记已读不推送(至少保留最新 1 条); 0=不限制"
   },
   "cs2_news_mention_subscriptions": {
     "description": "新闻命中个人订阅时自动 @ 订阅者",

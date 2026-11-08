@@ -10,9 +10,71 @@ from . import names
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'._-]*")
 
+# 中文俗称/输入法纠错产出的英文常见词、数字梗或过短缩写，仅用于命令输入解析，
+# 严禁进入 HLTV 英文资讯全文词元索引（避免 "a"、"on X"、"Major"、"a bit" 等高频误 @）。
+_NEWS_AMBIGUOUS_SINGLE_TOKENS = frozenset(
+    {
+        "a",
+        "b",
+        "p",
+        "x",
+        "s1",
+        "k3",
+        "4k",
+        "ee",
+        "mo",
+        "pm",
+        "pm2.5",
+        "pdf",
+        "pee",
+        "259",
+        "911",
+        "bit",
+        "bot",
+        "simple",
+        "wonderful",
+        "exercise",
+        "exercice",
+        "ex3",
+        "major",
+    }
+)
+
+
+def _normalize_token(raw_token: str) -> str:
+    tok = (raw_token or "").casefold().strip("._'-")
+    if tok.endswith("'s") and len(tok) > 3:
+        tok = tok[:-2].rstrip("._'-")
+    return tok
+
 
 def _tokens(text: str) -> tuple[str, ...]:
-    return tuple(token.casefold() for token in _TOKEN_RE.findall(text or ""))
+    normalized_text = (text or "").replace("’", "'").replace("‘", "'")
+    out: list[str] = []
+    for raw in _TOKEN_RE.findall(normalized_text):
+        tok = _normalize_token(raw)
+        if tok:
+            out.append(tok)
+    return tuple(out)
+
+
+def _indexable_variant_tokens(variant: str, official_display: str) -> tuple[str, ...]:
+    """仅允许纯 ASCII 且无英语高频歧义的变体词元进入资讯实体索引。"""
+    raw = (variant or "").strip()
+    if not raw or not raw.isascii():
+        return ()
+    key = _tokens(raw)
+    if not key:
+        return ()
+    if len(key) == 1:
+        tok = key[0]
+        if len(tok) < 2:
+            return ()
+        official_tokens = _tokens(official_display)
+        is_official = len(official_tokens) == 1 and tok == official_tokens[0]
+        if not is_official and tok in _NEWS_AMBIGUOUS_SINGLE_TOKENS:
+            return ()
+    return key
 
 
 @dataclass
@@ -32,15 +94,18 @@ class NewsEntityMatcher:
             if kind == "team":
                 variants = {display}
                 variants.update(names.team_alias_variants(display))
+                for variant in list(variants):
+                    if any(sep in variant for sep in (".", "-", "_")):
+                        variants.add(re.sub(r"[._-]+", " ", variant))
                 for variant in variants:
-                    key = _tokens(variant)
+                    key = _indexable_variant_tokens(variant, display)
                     if key:
                         matcher.team_index.setdefault(key, set()).add(target_key)
             elif kind == "player":
                 variants = {display, names.deleet(display)}
                 variants.update(names.player_alias_variants(display))
                 for variant in variants:
-                    key = _tokens(variant)
+                    key = _indexable_variant_tokens(variant, display)
                     if key:
                         matcher.player_index.setdefault(key, set()).add(target_key)
         return matcher

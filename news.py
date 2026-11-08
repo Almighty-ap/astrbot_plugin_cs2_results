@@ -185,6 +185,47 @@ class NewsService:
             key=lambda item: item.pub_time or datetime.min.replace(tzinfo=timezone.utc),
         )
 
+    def _filter_backlog_items(self, new_items: list[NewsItem]) -> list[NewsItem]:
+        """Filter out stale backlog items and cap batch size to prevent burst flooding."""
+        if not new_items:
+            return []
+        candidates = list(new_items)
+        max_age_hours = float(getattr(self.cfg, "cs2_news_max_age_hours", 2.0) or 0)
+        if len(candidates) > 1 and max_age_hours > 0:
+            pub_times = [
+                item.pub_time if item.pub_time.tzinfo else item.pub_time.replace(tzinfo=timezone.utc)
+                for item in candidates
+                if item.pub_time is not None
+            ]
+            if pub_times:
+                latest_pub = max(pub_times)
+                max_age = timedelta(hours=max_age_hours)
+                fresh = [
+                    item
+                    for item in candidates
+                    if item.pub_time is None
+                    or (
+                        latest_pub
+                        - (
+                            item.pub_time
+                            if item.pub_time.tzinfo
+                            else item.pub_time.replace(tzinfo=timezone.utc)
+                        )
+                    )
+                    <= max_age
+                ]
+                candidates = fresh if fresh else candidates[-1:]
+        max_push = max(1, int(getattr(self.cfg, "cs2_news_max_push_per_poll", 2) or 2))
+        to_push = candidates[-max_push:]
+        if len(to_push) < len(new_items):
+            logger.info(
+                "[cs2.news] 发现 %s 条未读资讯,防刷屏过滤后推送最新 %s 条(跳过 %s 条历史积压)",
+                len(new_items),
+                len(to_push),
+                len(new_items) - len(to_push),
+            )
+        return to_push
+
     async def check_once(self) -> list[NewsItem]:
         """Poll once, mark new GUIDs, render and push cards to subscribers."""
         items = await self.fetch_items()
@@ -219,7 +260,7 @@ class NewsService:
             logger.info("[cs2.news] 发现 %s 条新资讯,但没有订阅会话", len(new_items))
             return new_items
 
-        to_push = new_items[-self.cfg.cs2_news_max_push_per_poll :]
+        to_push = self._filter_backlog_items(new_items)
         matcher = self._build_matcher() if self._mention_enabled() else None
         for item in to_push:
             await self.enqueue_item(item, subscribers, matcher=matcher)

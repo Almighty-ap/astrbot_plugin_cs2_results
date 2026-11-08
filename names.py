@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -318,6 +319,13 @@ _TEAM_ALIASES: dict[str, str] = {
     "saw": "SAW",
     # B8
     "b8": "B8",
+    # 100 Thieves
+    "100t": "100 Thieves",
+    "100 thieves": "100 Thieves",
+    # BC.Game
+    "bcg": "BC.Game",
+    "bcgame": "BC.Game",
+    "bc.game": "BC.Game",
 }
 
 # 选手外号/中文俗称 → HLTV 正式选手昵称
@@ -643,6 +651,11 @@ _PLAYER_ALIASES: dict[str, str] = {
     # JT
     "jt": "JT",
     "南非常规大师": "JT",
+    # HooXi
+    "呼吸": "HooXi",
+    "呼吸哥": "HooXi",
+    "丹麦呼吸": "HooXi",
+    "hooxi": "HooXi",
 }
 
 # 确保所有 key 均经 cf 归一
@@ -685,6 +698,10 @@ def target_matches(query: str, display: str, kind: str = "team") -> bool:
             return True
         variants = player_alias_variants(display)
         if q in variants:
+            return True
+    if len(q) >= 2 and q.isascii():
+        tokens = [tok for tok in re.split(r"[\s._-]+", disp) if tok]
+        if disp.startswith(q) or q in tokens:
             return True
     return False
 

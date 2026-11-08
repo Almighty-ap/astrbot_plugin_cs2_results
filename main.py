@@ -216,6 +216,11 @@ _poll_task: asyncio.Task | None = None
 # 个人订阅命令里「战队 / 选手」两类的同义词
 _TEAM_WORDS = {"战队", "队", "team", "队伍"}
 _PLAYER_WORDS = {"选手", "队员", "player", "选⼿"}
+_SUB_WORDS = {"订阅", "sub", "subscribe"}
+_UNSUB_WORDS = {"退订", "取消订阅", "取消", "unsub", "unsubscribe"}
+_CLEAR_SUB_WORDS = {"清空订阅", "全部退订", "退订全部", "取消全部订阅"}
+_ALL_TARGET_WORDS = {"全部", "所有", "all", "清空", "*"}
+_MY_SUBS_WORDS = {"我的订阅", "我的", "订阅列表", "个人订阅", "mysubs", "mine"}
 
 
 _WEEKDAYS_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -1728,19 +1733,97 @@ def _admin_ctx(event: MessageEvent) -> bool:
 
 
 # ————————————————————————— 个人订阅命令 —————————————————————————
+def _format_user_targets_inline(targets: list[store.Target]) -> str:
+    teams = [t.display for t in targets if t.kind == "team"]
+    players = [t.display for t in targets if t.kind == "player"]
+    segs: list[str] = []
+    if teams:
+        segs.append("战队[" + "、".join(teams) + "]")
+    if players:
+        segs.append("选手[" + "、".join(players) + "]")
+    return "；".join(segs) if segs else "无"
+
+
+def _target_item_matches(query: str, t: store.Target) -> bool:
+    if names.target_matches(query, t.display, t.kind):
+        return True
+    if t.kind == "team":
+        return (
+            names.team_key(query) == t.target_key
+            or names.team_key(names.canonical_team(query)) == t.target_key
+        )
+    return False
+
+
+async def _handle_target_clear(event: MessageEvent, kind: str | None = None) -> None:
+    """一键清空本人在当前群的全部（或指定类别）个人订阅。"""
+    if not event.is_group:
+        await cs2.finish("请在群里发这个命令")
+    gid = event.group_id
+    label = "战队" if kind == "team" else ("选手" if kind == "player" else "战队/选手")
+    try:
+        removed = store.clear_user_targets(gid, event.user_id, kind=kind)
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"[cs2] 清空个人订阅失败: {e}")
+        await cs2.finish("清空订阅失败,请稍后再试")
+    if not removed:
+        await cs2.finish(f"你在本群当前没有订阅任何{label}")
+    shown = _format_user_targets_inline(removed)
+    await cs2.finish(f"已清空你在本群的 {len(removed)} 项{label}订阅({shown}) ✅ 后续战报与资讯将不再 @ 你")
+
+
+async def _handle_target_unsub_any(event: MessageEvent, name: str) -> None:
+    """免填「战队/选手」直接按名字或别名在本人已订阅的战队+选手中匹配并退订。"""
+    if not event.is_group:
+        await cs2.finish("请在群里发这个命令,订阅会绑定到「你 + 本群」")
+    gid = event.group_id
+    query = (name or "").strip()
+    if not query:
+        await cs2.finish("用法:/cs2 退订 <战队或选手名> 或 /cs2 退订 全部")
+    if query.lower() in _ALL_TARGET_WORDS:
+        await _handle_target_clear(event, kind=None)
+    mine = store.list_targets(gid, event.user_id)
+    if not mine:
+        await cs2.finish("你在本群当前没有任何个人订阅(战队/选手)")
+    hits = [t for t in mine if _target_item_matches(query, t)]
+    if len(hits) > 1:
+        exact = [t for t in hits if names.cf(t.display) == names.cf(query)]
+        if exact:
+            hits = exact
+    if not hits:
+        await cs2.finish(
+            f"你没有订阅「{query}」。你当前订阅了:{_format_user_targets_inline(mine)}\n"
+            "💡 可直接发 /cs2 退订 <名字> 退订对应项,或发 /cs2 退订 全部 一键清空"
+        )
+    removed_labels: list[str] = []
+    try:
+        for hit in hits:
+            if store.remove_target(gid, event.user_id, hit.kind, hit.target_key):
+                lbl = "战队" if hit.kind == "team" else "选手"
+                removed_labels.append(f"{lbl}「{hit.display}」")
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"[cs2] 退订失败: {e}")
+        await cs2.finish("退订失败,请稍后再试")
+    if not removed_labels:
+        await cs2.finish(f"你没有订阅「{query}」")
+    await cs2.finish("已退订" + "、".join(removed_labels))
+
+
 async def _handle_target_sub(event: MessageEvent, kind: str, name: str, add: bool) -> None:
     """/cs2 订阅|退订 战队|选手 <名字>。任何群成员可自助;门槛:本群已开启 /cs2 订阅。"""
     label = "战队" if kind == "team" else "选手"
     if not event.is_group:
         await cs2.finish("请在群里发这个命令,订阅会绑定到「你 + 本群」,比赛时在群里 @ 你")
     gid = event.group_id
-    if gid not in target_groups():
+    if add and gid not in target_groups():
         await cs2.finish(
             "本群还没开启 CS2 推送。请群主/管理员先发 /cs2 订阅,之后群成员才能订阅具体战队/选手"
         )
     if not name:
         eg = "Vitality" if kind == "team" else "ZywOo"
         await cs2.finish(f"用法:/cs2 {'订阅' if add else '退订'} {label} <名字>,例如 /cs2 {'订阅' if add else '退订'} {label} {eg}")
+    if not add and name.strip().lower() in _ALL_TARGET_WORDS:
+        await _handle_target_clear(event, kind=kind)
     if add:
         await _target_add(event, gid, kind, label, name)
     else:
@@ -1824,19 +1907,21 @@ async def _target_remove(
     mine = [t for t in store.list_targets(gid, event.user_id) if t.kind == kind]
     hit = None
     for t in mine:
-        if (
-            names.target_matches(name, t.display, kind)
-            or (
-                kind == "team"
-                and (
-                    names.team_key(name) == t.target_key
-                    or names.team_key(names.canonical_team(name)) == t.target_key
-                )
-            )
-        ):
+        if _target_item_matches(name, t):
             hit = t
             break
     if not hit:
+        all_mine = store.list_targets(gid, event.user_id)
+        cross_hit = next((t for t in all_mine if t.kind != kind and _target_item_matches(name, t)), None)
+        if cross_hit:
+            other_label = "战队" if cross_hit.kind == "team" else "选手"
+            try:
+                ok = store.remove_target(gid, event.user_id, cross_hit.kind, cross_hit.target_key)
+            except Exception as e:  # noqa: BLE001
+                logger.exception(f"[cs2] 退订失败: {e}")
+                await cs2.finish("退订失败,请稍后再试")
+            if ok:
+                await cs2.finish(f"已退订{other_label}「{cross_hit.display}」")
         tail = ("。你订阅的" + label + ":" + "、".join(t.display for t in mine)) if mine else ""
         await cs2.finish(f"你没有订阅{label}「{name}」{tail}")
     try:
@@ -1860,6 +1945,7 @@ async def _handle_my_subs(event: MessageEvent) -> None:
         lines.append("战队:" + "、".join(teams))
     if players:
         lines.append("选手:" + "、".join(players))
+    lines.append("💡 退订可用:/cs2 退订 <名字> 或 /cs2 退订 全部")
     await cs2.finish("\n".join(lines))
 
 
@@ -1876,12 +1962,22 @@ async def _handle_news(event: MessageEvent, action: str, admin: bool) -> None:
         await cs2.finish("资讯服务尚未初始化,请稍后再试")
 
     if action in ("订阅", "sub", "subscribe"):
+        if event.is_group and not _can_manage_sub(event):
+            await cs2.finish("只有群主或群管理员能开启本群 HLTV 资讯自动推送哦")
         added = store.news_subscribe(event.unified_msg_origin)
         await cs2.finish(
             "已订阅 HLTV RSS 资讯自动推送" if added else "当前会话已经订阅过 HLTV 资讯"
         )
 
-    if action in ("退订", "unsub", "unsubscribe"):
+    if action in ("退订", "unsub", "unsubscribe", "取消", "取消订阅"):
+        if event.is_group and not _can_manage_sub(event):
+            mine = store.list_targets(event.group_id, event.user_id)
+            hint = (
+                f"你在本群订阅了:{_format_user_targets_inline(mine)}；如需取消个人 @ 提醒请发 /cs2 退订 <名字> 或 /cs2 退订 全部"
+                if mine
+                else "你在本群没有个人订阅,不会被资讯 @ 提及"
+            )
+            await cs2.finish(f"只有群主或群管理员能关闭本群 HLTV 资讯自动推送哦。{hint}")
         removed = store.news_unsubscribe(event.unified_msg_origin)
         await cs2.finish(
             "已取消 HLTV RSS 资讯自动推送" if removed else "当前会话没有订阅 HLTV 资讯"
@@ -1933,11 +2029,10 @@ async def _handle_news(event: MessageEvent, action: str, admin: bool) -> None:
         if item is None:
             await cs2.finish("RSS 抓取失败或当前没有 HLTV 资讯")
         png = await service.render_item(item)
-        mentions = service.mentions_for_item(item, event.group_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("[cs2.news] 最新资讯渲染失败: %s", exc)
         await cs2.finish("资讯卡片渲染失败,请稍后再试")
-    await cs2.finish([*[Comp.At(qq=qq) for qq in mentions], png])
+    await cs2.finish(png)
 
 
 def _detail_candidate_lines(kind: str, candidates: list) -> str:
@@ -2478,23 +2573,52 @@ async def _handle_group_settings(event: MessageEvent) -> None:
 
 async def handle_cs2(event: MessageEvent, raw: str) -> None:
     parts = raw.split()
+    if len(parts) >= 2 and parts[0] == "取消" and parts[1] == "订阅":
+        parts = ["取消订阅", *parts[2:]]
     sub = parts[0] if parts else ""
     admin = _admin_ctx(event)  # 调试群 / 超管私聊:才放行管理命令、才给管理版帮助
 
-    if sub not in ("订阅", "sub", "subscribe", "退订", "unsub", "unsubscribe"):
+    if sub not in (_SUB_WORDS | _UNSUB_WORDS | _CLEAR_SUB_WORDS | _MY_SUBS_WORDS):
         if left := _cooldown_left(event):
             await cs2.finish(f"请求有点密，请 {left} 秒后再试")
 
-    if sub in ("订阅", "sub", "subscribe", "退订", "unsub", "unsubscribe"):
-        add = sub in ("订阅", "sub", "subscribe")
+    if sub in _CLEAR_SUB_WORDS:
+        await _handle_target_clear(event, kind=None)
+
+    if sub in _MY_SUBS_WORDS:
+        await _handle_my_subs(event)
+
+    if sub in (_SUB_WORDS | _UNSUB_WORDS):
+        add = sub in _SUB_WORDS
         # 个人级:/cs2 订阅|退订 战队|选手 <名字> —— 任何群成员可自助订阅并被 @。
         if len(parts) >= 2 and parts[1] in _TEAM_WORDS | _PLAYER_WORDS:
             kind = "team" if parts[1] in _TEAM_WORDS else "player"
             name = " ".join(parts[2:]).strip()
             await _handle_target_sub(event, kind, name, add)
+        # 个人级快捷扩展:/cs2 订阅 列表 | /cs2 退订 <名字> | /cs2 退订 全部
+        if len(parts) >= 2:
+            if add:
+                if parts[1].lower() in ("列表", "list", "我的", "查看"):
+                    await _handle_my_subs(event)
+                await cs2.finish(
+                    "用法:/cs2 订阅 战队 <队名> 或 /cs2 订阅 选手 <选手名>(例如:/cs2 订阅 战队 Vitality)"
+                )
+            await _handle_target_unsub_any(event, " ".join(parts[1:]).strip())
         # 群级:/cs2 订阅|退订 —— 群主/管理员/超管开关整个群的顶级赛事播报。
         if not event.is_group:
             await cs2.finish("请在群里发这个命令")
+        if not add and (sub in ("取消订阅", "取消") or not _can_manage_sub(event)):
+            mine = store.list_targets(event.group_id, event.user_id)
+            if mine:
+                await cs2.finish(
+                    f"你在本群订阅了:{_format_user_targets_inline(mine)}\n"
+                    "请指定要退订的目标:/cs2 退订 <名字> 或发 /cs2 退订 全部 一键清空"
+                    "(直接发 /cs2 退订 为群管理员关闭全群推送命令)"
+                )
+            if sub in ("取消订阅", "取消"):
+                await cs2.finish(
+                    "你在本群当前没有任何个人订阅。如需退订指定目标请发:/cs2 退订 <名字>"
+                )
         if not _can_manage_sub(event):
             await cs2.finish("只有群主或群管理员能" + ("订阅" if add else "退订") + "哦")
         try:

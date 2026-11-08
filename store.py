@@ -149,9 +149,15 @@ _CONN_TLS = threading.local()
 
 def _thread_conn() -> sqlite3.Connection:
     conn = getattr(_CONN_TLS, "conn", None)
+    if conn is not None and getattr(_CONN_TLS, "db_path", None) != _DB:
+        _drop_thread_conn()
+        conn = None
     if conn is None:
+        if not Path(_DB).exists():
+            _initialize_database()
         conn = _connect()
         _CONN_TLS.conn = conn
+        _CONN_TLS.db_path = _DB
     return conn
 
 
@@ -159,6 +165,7 @@ def _drop_thread_conn() -> None:
     """连接出错后丢弃,下次重开(别让一条坏连接粘住整个线程)。"""
     conn = getattr(_CONN_TLS, "conn", None)
     _CONN_TLS.conn = None
+    _CONN_TLS.db_path = None
     if conn is not None:
         try:
             conn.close()
@@ -1076,15 +1083,95 @@ def add_target(
         return "added"
 
 
+def _strip_user_from_pending_mentions(
+    conn: sqlite3.Connection, group_id: int, qq_user_id: int
+) -> int:
+    """从指定群处于 pending/retry 状态的战报与资讯投递队列中移除该 QQ 的 @ 提及。"""
+    uid = int(qq_user_id)
+    now = time.time()
+    updated = 0
+    d_rows = conn.execute(
+        """SELECT match_id, map_key, mentions FROM deliveries
+           WHERE group_id=? AND status IN ('pending', 'retry') AND mentions IS NOT NULL""",
+        (group_id,),
+    ).fetchall()
+    for row in d_rows:
+        old_mentions = _parse_mentions(row["mentions"])
+        if uid not in old_mentions:
+            continue
+        new_blob = _mentions_blob([q for q in old_mentions if q != uid])
+        conn.execute(
+            """UPDATE deliveries SET mentions=?, updated_at=?
+               WHERE match_id=? AND map_key=? AND group_id=?""",
+            (new_blob, now, row["match_id"], row["map_key"], group_id),
+        )
+        updated += 1
+
+    n_rows = conn.execute(
+        """SELECT guid, unified_msg_origin, mentions FROM news_deliveries
+           WHERE group_id=? AND status IN ('pending', 'retry') AND mentions IS NOT NULL""",
+        (group_id,),
+    ).fetchall()
+    for row in n_rows:
+        old_mentions = _parse_mentions(row["mentions"])
+        if uid not in old_mentions:
+            continue
+        new_blob = _mentions_blob([q for q in old_mentions if q != uid])
+        conn.execute(
+            """UPDATE news_deliveries SET mentions=?, updated_at=?
+               WHERE guid=? AND unified_msg_origin=?""",
+            (new_blob, now, row["guid"], row["unified_msg_origin"]),
+        )
+        updated += 1
+    return updated
+
+
 def remove_target(group_id: int, qq_user_id: int, kind: str, target_key: str) -> bool:
     group_id = _normalize_group_ids([group_id])[0]
+    uid = int(qq_user_id)
     with _transaction(write=True) as conn:
         cur = conn.execute(
             """DELETE FROM subscription_targets
                WHERE group_id=? AND qq_user_id=? AND kind=? AND target_key=?""",
-            (group_id, int(qq_user_id), kind, str(target_key).strip()),
+            (group_id, uid, kind, str(target_key).strip()),
         )
-        return cur.rowcount > 0
+        removed = cur.rowcount > 0
+        if removed:
+            _strip_user_from_pending_mentions(conn, group_id, uid)
+        return removed
+
+
+def clear_user_targets(group_id: int, qq_user_id: int, kind: Optional[str] = None) -> list[Target]:
+    """清空用户在指定群的全部（或指定 kind）个人订阅，并同步剥离待发队列中的 @ 提及。"""
+    group_id = _normalize_group_ids([group_id])[0]
+    uid = int(qq_user_id)
+    with _transaction(write=True) as conn:
+        if kind in ("team", "player"):
+            rows = conn.execute(
+                """SELECT * FROM subscription_targets
+                   WHERE group_id=? AND qq_user_id=? AND kind=?
+                   ORDER BY kind, display""",
+                (group_id, uid, kind),
+            ).fetchall()
+            if rows:
+                conn.execute(
+                    "DELETE FROM subscription_targets WHERE group_id=? AND qq_user_id=? AND kind=?",
+                    (group_id, uid, kind),
+                )
+        else:
+            rows = conn.execute(
+                """SELECT * FROM subscription_targets
+                   WHERE group_id=? AND qq_user_id=?
+                   ORDER BY kind, display""",
+                (group_id, uid),
+            ).fetchall()
+            if rows:
+                conn.execute(
+                    "DELETE FROM subscription_targets WHERE group_id=? AND qq_user_id=?",
+                    (group_id, uid),
+                )
+        _strip_user_from_pending_mentions(conn, group_id, uid)
+    return [_target_from_row(r) for r in rows]
 
 
 def list_targets(group_id: int, qq_user_id: Optional[int] = None) -> list[Target]:
@@ -1151,13 +1238,15 @@ def recipients_for(
 
 
 def prune_user_targets(group_id: int, qq_user_id: int) -> int:
-    """成员退群:清掉其在该群的全部个人订阅。"""
+    """成员退群:清掉其在该群的全部个人订阅,并移除待发队列中的 @ 提及。"""
     group_id = _normalize_group_ids([group_id])[0]
+    uid = int(qq_user_id)
     with _transaction(write=True) as conn:
         cur = conn.execute(
             "DELETE FROM subscription_targets WHERE group_id=? AND qq_user_id=?",
-            (group_id, int(qq_user_id)),
+            (group_id, uid),
         )
+        _strip_user_from_pending_mentions(conn, group_id, uid)
         return cur.rowcount
 
 

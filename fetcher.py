@@ -951,13 +951,14 @@ class Fetcher:
         etag: str = "",
         last_modified: str = "",
         priority: FetchPriority = PRIORITY_SCAN,
+        allow_browser_fallback: bool = True,
     ) -> ConditionalTextResult:
         """Fetch XML/JSON with optional ETag and Last-Modified validators.
 
         A 304 response is a successful no-op and avoids downloading or parsing
-        the unchanged RSS body.  The fallback chain remains the same as the
-        normal text fetcher so a challenged fingerprint does not poison the
-        conditional path.
+        the unchanged RSS body.  All curl_cffi attempts and optional browser
+        fallback share a single gate slot so an HTTP 403 never burns 5 slots
+        (4 * min_gap) waiting on the rate limiter.
         """
         self._require_allowed_url(url, _PAGE_HOSTS)
         normalized_priority = self._priority(priority)
@@ -976,19 +977,22 @@ class Fetcher:
             headers["If-Modified-Since"] = last_modified
         last_error: Exception | None = None
         saw_challenge = False
-        for profile in self._impersonate_candidates():
-            try:
-                from curl_cffi.requests import AsyncSession
+        async with self._gate.slot(normalized_priority):
+            for profile in self._impersonate_candidates():
+                try:
+                    from curl_cffi.requests import AsyncSession
 
-                session_kwargs: dict[str, object] = {
-                    "impersonate": profile,
-                    "proxy": proxy,
-                    "timeout": self._curl_cffi_timeout(),
-                }
-                if cookies:
-                    session_kwargs["cookies"] = cookies
+                    session_kwargs: dict[str, object] = {
+                        "impersonate": profile,
+                        "proxy": proxy,
+                        "timeout": self._curl_cffi_timeout(),
+                    }
+                    # storage_state cookies (especially cf_clearance) are bound to
+                    # Camoufox's Firefox TLS/UA; attaching them to Chrome/Safari
+                    # fingerprints triggers immediate Cloudflare 403 rejections.
+                    if cookies and profile == "firefox":
+                        session_kwargs["cookies"] = cookies
 
-                async with self._gate.slot(normalized_priority):
                     async with AsyncSession(**session_kwargs) as session:
                         resp = await session.get(url, headers=headers)
                         if resp.status_code == 304:
@@ -1000,39 +1004,173 @@ class Fetcher:
                                 last_modified=last_modified,
                                 not_modified=True,
                             )
+                        body_text = resp.text or ""
                         if resp.status_code >= 400:
+                            if self._is_cloudflare_challenge_html(body_text):
+                                saw_challenge = True
                             last_error = RuntimeError(
                                 f"HTTP {resp.status_code} (impersonate={profile})"
                             )
                             continue
-                        text = resp.text
+                        text = body_text
                         response_etag = str(resp.headers.get("etag", "") or "").strip()
                         response_modified = str(
                             resp.headers.get("last-modified", "") or ""
                         ).strip()
-                if self._is_cloudflare_challenge_html(text):
-                    saw_challenge = True
-                    last_error = RuntimeError(f"Cloudflare challenge (impersonate={profile})")
-                    continue
-                if profile != self._working_impersonate:
-                    self._working_impersonate = profile
-                    logger.info(f"[cs2] 文本抓取使用指纹 {profile}: {url}")
-                self._record_fetch_success()
-                return ConditionalTextResult(
-                    text=text,
-                    etag=response_etag,
-                    last_modified=response_modified,
+                    if self._is_cloudflare_challenge_html(text):
+                        saw_challenge = True
+                        last_error = RuntimeError(
+                            f"Cloudflare challenge (impersonate={profile})"
+                        )
+                        continue
+                    if profile != self._working_impersonate:
+                        self._working_impersonate = profile
+                        logger.info(f"[cs2] 文本抓取使用指纹 {profile}: {url}")
+                    self._record_fetch_success()
+                    return ConditionalTextResult(
+                        text=text,
+                        etag=response_etag,
+                        last_modified=response_modified,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    last_error = exc
+                    logger.info(f"[cs2] 指纹 {profile} 文本抓取失败 {url}: {exc}")
+
+            if allow_browser_fallback:
+                logger.info(
+                    f"[cs2] 文本抓取 curl_cffi 通道未放行({last_error}),回退浏览器管线: {url}"
                 )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                last_error = exc
-                logger.info(f"[cs2] 指纹 {profile} 文本抓取失败 {url}: {exc}")
+                browser_result = await self._fetch_text_via_browser(
+                    url,
+                    accept=accept,
+                    etag=etag,
+                    last_modified=last_modified,
+                )
+                if browser_result.not_modified or browser_result.text:
+                    return browser_result
+
         if last_error is not None:
             logger.warning(f"[cs2] 所有指纹均无法抓取文本 {url}: {last_error}")
-        if saw_challenge:
+        if saw_challenge and not allow_browser_fallback:
             self._record_challenge(arm_backoff=True)
         return ConditionalTextResult()
+
+    async def _fetch_text_via_browser(
+        self,
+        url: str,
+        *,
+        accept: str = "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+        etag: str = "",
+        last_modified: str = "",
+    ) -> ConditionalTextResult:
+        """Fallback to Camoufox/Playwright browser when curl_cffi text fetch gets 403."""
+        attempts = max(1, self.cfg.cs2_challenge_retries)
+        budget = self.cfg.cs2_fetch_budget_seconds
+        started = time.monotonic()
+        async with self._browser_operation_lock:
+            await self.start()
+            self._browser_uses += 1
+            page = None
+            try:
+                ctx = await self._new_context()
+                page = await ctx.new_page()
+                await self._guard_top_level_navigation(page, _PAGE_HOSTS)
+                extra_headers: dict[str, str] = {"Accept": accept}
+                if etag:
+                    extra_headers["If-None-Match"] = etag
+                if last_modified:
+                    extra_headers["If-Modified-Since"] = last_modified
+                await page.set_extra_http_headers(extra_headers)
+
+                for attempt in range(attempts):
+                    try:
+                        response = await (
+                            page.goto(
+                                url,
+                                wait_until="domcontentloaded",
+                                timeout=self.cfg.cs2_nav_timeout,
+                            )
+                            if attempt == 0
+                            else page.reload(
+                                wait_until="domcontentloaded",
+                                timeout=self.cfg.cs2_nav_timeout,
+                            )
+                        )
+                        if response is not None and response.status == 304:
+                            self._record_fetch_success()
+                            return ConditionalTextResult(
+                                etag=etag,
+                                last_modified=last_modified,
+                                not_modified=True,
+                            )
+                        title = await page.title()
+                        was_challenge = self._is_challenge(title)
+                        if was_challenge:
+                            grace_ms = min(3000, max(500, self.cfg.cs2_challenge_grace_ms))
+                            await page.wait_for_timeout(grace_ms)
+                            if self._is_challenge(await page.title()):
+                                if getattr(self.cfg, "cs2_turnstile_auto_solve", True):
+                                    solved = await TurnstileAutoSolver.solve(
+                                        page,
+                                        timeout=getattr(self.cfg, "cs2_turnstile_timeout", 30),
+                                    )
+                                    if solved:
+                                        await self._save_storage_state()
+                            if self._is_challenge(await page.title()):
+                                if attempt + 1 < attempts and time.monotonic() - started < budget:
+                                    continue
+                                self._record_challenge(arm_backoff=True)
+                                logger.warning(f"[cs2] 浏览器文本抓取 Cloudflare 挑战未通过: {url}")
+                                return ConditionalTextResult()
+                            response = await page.reload(
+                                wait_until="domcontentloaded",
+                                timeout=self.cfg.cs2_nav_timeout,
+                            )
+
+                        final_url = page.url
+                        if not self._allowed_url(final_url, _PAGE_HOSTS):
+                            logger.warning(f"[cs2] 文本抓取重定向到非白名单地址: {final_url}")
+                            return ConditionalTextResult()
+
+                        raw_text = ""
+                        resp_etag = ""
+                        resp_modified = ""
+                        if response is not None and 200 <= response.status < 300:
+                            raw_text = await response.text()
+                            resp_headers = getattr(response, "headers", None) or {}
+                            if isinstance(resp_headers, dict):
+                                resp_etag = str(resp_headers.get("etag", "") or "").strip()
+                                resp_modified = str(
+                                    resp_headers.get("last-modified", "") or ""
+                                ).strip()
+                        if not raw_text:
+                            raw_text = await page.content()
+                        if self._is_cloudflare_challenge_html(raw_text):
+                            if attempt + 1 < attempts and time.monotonic() - started < budget:
+                                continue
+                            self._record_challenge(arm_backoff=True)
+                            return ConditionalTextResult()
+                        if was_challenge and await self._has_cf_clearance():
+                            await self._save_storage_state()
+                        self._record_fetch_success()
+                        return ConditionalTextResult(
+                            text=raw_text,
+                            etag=resp_etag,
+                            last_modified=resp_modified,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(f"[cs2] 浏览器文本抓取异常 {url}: {exc}")
+                        return ConditionalTextResult()
+                return ConditionalTextResult()
+            finally:
+                if page is not None:
+                    await self._close_page(page)
+                await self._recycle_browser_if_needed()
+                self._touch_browser_activity()
 
     async def fetch_impersonated_bytes(
         self,

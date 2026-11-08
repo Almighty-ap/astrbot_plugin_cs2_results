@@ -183,7 +183,8 @@ class Config(BaseModel):
     cs2_news_include_image: bool = True
     cs2_news_include_link: bool = True
     cs2_news_max_seen: int = Field(default=500, ge=10, le=5000)
-    cs2_news_max_push_per_poll: int = Field(default=10, ge=1, le=100)
+    cs2_news_max_push_per_poll: int = Field(default=2, ge=1, le=100)
+    cs2_news_max_age_hours: float = Field(default=2.0, ge=0, le=168)
     cs2_news_mention_subscriptions: bool = True
     cs2_news_mention_teams: bool = True
     cs2_news_mention_players: bool = True
