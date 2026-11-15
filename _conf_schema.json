@@ -533,5 +533,23 @@
     "type": "list",
     "default": [],
     "hint": "JSON 字符串数组"
+  },
+  "cs2_event_finale_enabled": {
+    "description": "开启赛事收官卡自动推送",
+    "type": "bool",
+    "default": true,
+    "hint": "赛事在 HLTV 标为结束后自动推送冠军、Top 8 名次、MVP 与最佳阵容收官卡"
+  },
+  "cs2_event_finale_grace_retries": {
+    "description": "赛事结束缺 MVP/最佳阵容时的短宽限重抓次数",
+    "type": "int",
+    "default": 2,
+    "hint": "0~5 次;每次间隔 cs2_event_finale_grace_interval_min 分钟,满次数仍缺则降级推送"
+  },
+  "cs2_event_finale_grace_interval_min": {
+    "description": "赛事收官卡短宽限重抓间隔(分钟)",
+    "type": "int",
+    "default": 30,
+    "hint": "1~240 分钟"
   }
 }

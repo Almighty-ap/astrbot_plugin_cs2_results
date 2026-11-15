@@ -51,7 +51,7 @@ _NEWS_STATE = DATA_DIR / "news_state.json"
 _DB = DATA_DIR / "state.sqlite3"
 
 _JSON_LOCK = threading.RLock()
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 
 
 class PersistenceError(RuntimeError):
@@ -130,6 +130,7 @@ class DeliveryBatch:
     payload_size: Optional[int]
     payload_updated_at: Optional[float]
     payload_kind: str = "image"
+    caption: Optional[str] = None
 
 
 def _connect() -> sqlite3.Connection:
@@ -496,6 +497,37 @@ def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v8_to_v9(conn: sqlite3.Connection) -> None:
+    """v9: 赛事收官卡永久去重表、宽限重试追踪表与随图文本 caption 列。"""
+    conn.executescript(
+        """
+        BEGIN IMMEDIATE;
+        ALTER TABLE delivery_batches ADD COLUMN caption TEXT;
+        CREATE TABLE IF NOT EXISTS event_finale_pushes (
+            event_id   TEXT NOT NULL,
+            group_id   INTEGER NOT NULL,
+            pushed_at  REAL NOT NULL,
+            PRIMARY KEY (event_id, group_id)
+        );
+        CREATE TABLE IF NOT EXISTS event_finale_state (
+            event_id        TEXT PRIMARY KEY,
+            slug            TEXT NOT NULL DEFAULT '',
+            name            TEXT NOT NULL DEFAULT '',
+            end_unix        INTEGER NOT NULL DEFAULT 0,
+            first_ended_at  REAL,
+            retry_count     INTEGER NOT NULL DEFAULT 0,
+            next_check_at   REAL NOT NULL DEFAULT 0,
+            finalized_at    REAL,
+            updated_at      REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_event_finale_due
+            ON event_finale_state(finalized_at, next_check_at);
+        UPDATE metadata SET value = '9' WHERE key = 'schema_version' AND value = '8';
+        COMMIT;
+        """
+    )
+
+
 def _initialize_database() -> None:
     conn = _connect()
     try:
@@ -514,6 +546,7 @@ def _initialize_database() -> None:
             _migrate_v5_to_v6(conn)
             _migrate_v6_to_v7(conn)
             _migrate_v7_to_v8(conn)
+            _migrate_v8_to_v9(conn)
         elif version == 1:
             _migrate_v1_to_v2(conn)
             _migrate_v2_to_v3(conn)
@@ -522,6 +555,7 @@ def _initialize_database() -> None:
             _migrate_v5_to_v6(conn)
             _migrate_v6_to_v7(conn)
             _migrate_v7_to_v8(conn)
+            _migrate_v8_to_v9(conn)
         elif version == 2:
             _migrate_v2_to_v3(conn)
             _migrate_v3_to_v4(conn)
@@ -529,26 +563,34 @@ def _initialize_database() -> None:
             _migrate_v5_to_v6(conn)
             _migrate_v6_to_v7(conn)
             _migrate_v7_to_v8(conn)
+            _migrate_v8_to_v9(conn)
         elif version == 3:
             _migrate_v3_to_v4(conn)
             _migrate_v4_to_v5(conn)
             _migrate_v5_to_v6(conn)
             _migrate_v6_to_v7(conn)
             _migrate_v7_to_v8(conn)
+            _migrate_v8_to_v9(conn)
         elif version == 4:
             _migrate_v4_to_v5(conn)
             _migrate_v5_to_v6(conn)
             _migrate_v6_to_v7(conn)
             _migrate_v7_to_v8(conn)
+            _migrate_v8_to_v9(conn)
         elif version == 5:
             _migrate_v5_to_v6(conn)
             _migrate_v6_to_v7(conn)
             _migrate_v7_to_v8(conn)
+            _migrate_v8_to_v9(conn)
         elif version == 6:
             _migrate_v6_to_v7(conn)
             _migrate_v7_to_v8(conn)
+            _migrate_v8_to_v9(conn)
         elif version == 7:
             _migrate_v7_to_v8(conn)
+            _migrate_v8_to_v9(conn)
+        elif version == 8:
+            _migrate_v8_to_v9(conn)
         elif version != _SCHEMA_VERSION:
             raise PersistenceError(f"不支持的状态库版本: {version}")
         final_version = _database_version(conn)
@@ -984,17 +1026,33 @@ def set_group_morning_report(group_id: int, enabled: bool) -> bool:
 
 def is_group_muted_now(group_id: int, now_ts: Optional[float] = None) -> bool:
     """检查指定群当前时刻是否处于免打扰静音时段内（按北京时间）。"""
+    return group_mute_end_ts(group_id, now_ts=now_ts) is not None
+
+
+def group_mute_end_ts(group_id: int, now_ts: Optional[float] = None) -> Optional[float]:
+    """若指定群当前处于静音时段，返回本段静音结束的 epoch 秒；否则返回 None。"""
     sub = get_group_subscription(group_id)
     if not sub or not sub.get("mute_enabled"):
-        return False
+        return None
     start_str = sub.get("mute_start") or "23:00"
     end_str = sub.get("mute_end") or "08:00"
     ts = now_ts or time.time()
     dt = datetime.fromtimestamp(ts, CN_TZ)
     cur_str = f"{dt.hour:02d}:{dt.minute:02d}"
     if start_str <= end_str:
-        return start_str <= cur_str <= end_str
-    return cur_str >= start_str or cur_str <= end_str
+        in_mute = start_str <= cur_str <= end_str
+    else:
+        in_mute = cur_str >= start_str or cur_str <= end_str
+    if not in_mute:
+        return None
+    try:
+        eh, em = (int(x) for x in end_str.split(":", 1))
+    except (ValueError, TypeError):
+        return ts + 3600.0
+    end_dt = dt.replace(hour=eh, minute=em, second=5, microsecond=0)
+    if end_dt <= dt:
+        end_dt += timedelta(days=1)
+    return end_dt.timestamp()
 
 
 def get_morning_report_groups() -> list[int]:
@@ -1026,6 +1084,177 @@ def record_morning_report_pushed(report_date: str, groups_count: int = 0) -> Non
             VALUES (?, ?, ?)
             """,
             (report_date, now, groups_count),
+        )
+
+
+# —————————— 赛事收官卡永久去重 & 宽限状态 ——————————
+def has_event_finale_pushed(event_id: str, group_id: int) -> bool:
+    """检查指定赛事是否已向指定群推送过收官卡（永久去重）。"""
+    eid = str(event_id or "").strip()
+    gid = _normalize_group_ids([group_id])[0]
+    if not eid:
+        return False
+    with _transaction() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM event_finale_pushes WHERE event_id = ? AND group_id = ?",
+            (eid, gid),
+        ).fetchone()
+    return bool(row)
+
+
+def filter_unpushed_finale_groups(event_id: str, group_ids: Iterable[int]) -> list[int]:
+    """从候选群中过滤掉已经推送过该赛事收官卡的群，保持稳定顺序。"""
+    eid = str(event_id or "").strip()
+    gids = _normalize_group_ids(group_ids)
+    if not eid or not gids:
+        return []
+    ph = ",".join("?" * len(gids))
+    with _transaction() as conn:
+        rows = conn.execute(
+            f"SELECT group_id FROM event_finale_pushes WHERE event_id = ? AND group_id IN ({ph})",
+            [eid, *gids],
+        ).fetchall()
+    pushed = {int(r["group_id"]) for r in rows}
+    return [g for g in gids if g not in pushed]
+
+
+def record_event_finale_pushed(event_id: str, group_ids: Iterable[int]) -> None:
+    """永久记录指定赛事已向对应群推入收官卡。"""
+    eid = str(event_id or "").strip()
+    gids = _normalize_group_ids(group_ids)
+    if not eid or not gids:
+        return
+    now = time.time()
+    with _transaction(write=True) as conn:
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO event_finale_pushes(event_id, group_id, pushed_at)
+            VALUES (?, ?, ?)
+            """,
+            ((eid, gid, now) for gid in gids),
+        )
+
+
+def note_watched_event(
+    event_id: str,
+    *,
+    slug: str = "",
+    name: str = "",
+    end_unix: int = 0,
+    next_check_at: Optional[float] = None,
+) -> None:
+    """登记/更新需要关注收官状态的赛事；已 finalized 的赛事不重置。"""
+    eid = str(event_id or "").strip()
+    if not eid:
+        return
+    now = time.time()
+    slug_s = str(slug or "").strip()
+    name_s = str(name or "").strip()
+    eu = int(end_unix or 0)
+    with _transaction(write=True) as conn:
+        row = conn.execute(
+            "SELECT slug, name, end_unix, next_check_at, finalized_at FROM event_finale_state WHERE event_id = ?",
+            (eid,),
+        ).fetchone()
+        if row is None:
+            chk = float(next_check_at) if next_check_at is not None else now
+            conn.execute(
+                """
+                INSERT INTO event_finale_state(
+                    event_id, slug, name, end_unix, retry_count, next_check_at, updated_at
+                ) VALUES (?, ?, ?, ?, 0, ?, ?)
+                """,
+                (eid, slug_s, name_s, eu, chk, now),
+            )
+            return
+        if row["finalized_at"] is not None:
+            return
+        new_slug = slug_s or str(row["slug"] or "")
+        new_name = name_s or str(row["name"] or "")
+        new_eu = eu or int(row["end_unix"] or 0)
+        new_chk = float(row["next_check_at"] or 0)
+        if next_check_at is not None:
+            new_chk = min(new_chk, float(next_check_at)) if new_chk > 0 else float(next_check_at)
+        conn.execute(
+            """
+            UPDATE event_finale_state
+            SET slug = ?, name = ?, end_unix = ?, next_check_at = ?, updated_at = ?
+            WHERE event_id = ?
+            """,
+            (new_slug, new_name, new_eu, new_chk, now, eid),
+        )
+
+
+def get_finale_state(event_id: str) -> Optional[dict]:
+    eid = str(event_id or "").strip()
+    if not eid:
+        return None
+    with _transaction() as conn:
+        row = conn.execute(
+            "SELECT * FROM event_finale_state WHERE event_id = ?", (eid,)
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_due_finale_events(now: Optional[float] = None, limit: int = 20) -> list[dict]:
+    """列出尚未 finalized 且已到达检查时间的赛事。"""
+    ts = time.time() if now is None else float(now)
+    with _transaction() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM event_finale_state
+            WHERE finalized_at IS NULL AND next_check_at <= ?
+            ORDER BY next_check_at ASC, updated_at ASC
+            LIMIT ?
+            """,
+            (ts, int(limit)),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_finale_state(
+    event_id: str,
+    *,
+    slug: Optional[str] = None,
+    name: Optional[str] = None,
+    end_unix: Optional[int] = None,
+    first_ended_at: Optional[float] = None,
+    retry_count: Optional[int] = None,
+    next_check_at: Optional[float] = None,
+    finalized_at: Optional[float] = None,
+) -> None:
+    eid = str(event_id or "").strip()
+    if not eid:
+        return
+    now = time.time()
+    fields: list[str] = ["updated_at = ?"]
+    params: list[object] = [now]
+    if slug is not None:
+        fields.append("slug = ?")
+        params.append(str(slug))
+    if name is not None:
+        fields.append("name = ?")
+        params.append(str(name))
+    if end_unix is not None:
+        fields.append("end_unix = ?")
+        params.append(int(end_unix))
+    if first_ended_at is not None:
+        fields.append("first_ended_at = ?")
+        params.append(float(first_ended_at))
+    if retry_count is not None:
+        fields.append("retry_count = ?")
+        params.append(int(retry_count))
+    if next_check_at is not None:
+        fields.append("next_check_at = ?")
+        params.append(float(next_check_at))
+    if finalized_at is not None:
+        fields.append("finalized_at = ?")
+        params.append(float(finalized_at))
+    params.append(eid)
+    with _transaction(write=True) as conn:
+        conn.execute(
+            f"UPDATE event_finale_state SET {', '.join(fields)} WHERE event_id = ?",
+            params,
         )
 
 
@@ -1981,6 +2210,7 @@ def _delivery_from_row(row: sqlite3.Row) -> Delivery:
 
 
 def _batch_from_row(row: sqlite3.Row) -> DeliveryBatch:
+    keys = row.keys()
     return DeliveryBatch(
         match_id=str(row["match_id"]),
         map_key=str(row["map_key"]),
@@ -1991,6 +2221,7 @@ def _batch_from_row(row: sqlite3.Row) -> DeliveryBatch:
         payload_size=row["payload_size"],
         payload_updated_at=row["payload_updated_at"],
         payload_kind=str(row["payload_kind"] or "image"),
+        caption=row["caption"] if "caption" in keys else None,
     )
 
 
@@ -2132,10 +2363,13 @@ def set_delivery_payload(
     payload: bytes,
     *,
     kind: str = "image",
+    caption: Optional[str] = None,
 ) -> DeliveryBatch:
     """线程安全地为已 prepare 的批次持久化 payload。"""
     with _JSON_LOCK:
-        return _set_delivery_payload_locked(match_id, map_key, payload, kind=kind)
+        return _set_delivery_payload_locked(
+            match_id, map_key, payload, kind=kind, caption=caption
+        )
 
 
 def _set_delivery_payload_locked(
@@ -2144,6 +2378,7 @@ def _set_delivery_payload_locked(
     payload: bytes,
     *,
     kind: str = "image",
+    caption: Optional[str] = None,
 ) -> DeliveryBatch:
     """为已 prepare 的批次持久化可重试 payload，返回新批次元数据。
 
@@ -2181,10 +2416,11 @@ def _set_delivery_payload_locked(
                 """
                 UPDATE delivery_batches
                 SET payload_path = ?, payload_sha256 = ?, payload_size = ?,
-                    payload_updated_at = ?, payload_kind = ?, updated_at = ?
+                    payload_updated_at = ?, payload_kind = ?, caption = COALESCE(?, caption),
+                    updated_at = ?
                 WHERE match_id = ? AND map_key = ?
                 """,
-                (relative, digest, len(payload), now, kind, now, match_id, map_key),
+                (relative, digest, len(payload), now, kind, caption, now, match_id, map_key),
             )
             if cursor.rowcount != 1:
                 raise KeyError(f"投递批次不存在: {match_id}/{map_key}")

@@ -281,6 +281,8 @@ class MatchDetail:
     event_logo: Optional[str]
     maps: list[MapResult]
     vrs: Optional[VrsForecast] = None
+    start_unix: int = 0
+    countdown: str = ""
 
     @property
     def series1(self) -> int:
@@ -938,10 +940,17 @@ def parse_match(match_html: Html, url: str) -> MatchDetail:
     team1 = team_name(".team1-gradient") or "Team 1"
     team2 = team_name(".team2-gradient") or "Team 2"
 
-    # 赛事
+    # 赛事 + 开赛时间/倒计时
     ev = t.css_first(".timeAndEvent .event a") or t.css_first(".event a[href*='/events/']")
     event_name = _txt(ev) if ev else ""
     event_id = _event_id(ev.attributes.get("href", "") or "") if ev else None
+    time_el = t.css_first(".timeAndEvent .time[data-unix]") or t.css_first(
+        ".timeAndEvent [data-unix]"
+    )
+    unix_raw = (time_el.attributes.get("data-unix") or "") if time_el else ""
+    start_unix = int(unix_raw) if unix_raw.isdigit() else 0
+    cd_el = t.css_first(".timeAndEvent .countdown") or t.css_first(".countdown")
+    countdown = _txt(cd_el)
 
     # 每图选边(BO3/5 的 veto pick;BO1 无)
     picks = _parse_veto_picks(t, team1, team2)
@@ -1003,6 +1012,8 @@ def parse_match(match_html: Html, url: str) -> MatchDetail:
         event_logo=_pick_logo(t, "eventlogo", event_name, allow_fallback=True),
         maps=maps,
         vrs=parse_vrs(t),
+        start_unix=start_unix,
+        countdown=countdown,
     )
 
 

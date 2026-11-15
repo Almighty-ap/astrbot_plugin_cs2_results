@@ -3950,3 +3950,329 @@ async def render_morning_report_card(
 ) -> bytes:
     return await _render_png(build_morning_report_html(date_str, yesterday_matches, today_matches, when_text))
 
+
+# ———————————————————— 赛事收官卡 (Event Finale) ————————————————————
+_FINALE_MISSING_LABELS = {
+    "champion": "冠军信息",
+    "placements": "最终名次表 (Top 8)",
+    "mvp": "赛事 MVP",
+    "team_of_the_event": "赛事最佳阵容",
+}
+
+_FINALE_TOTE_SUBTITLES = {
+    "team_of_the_event": "Team of the Event",
+    "stats_top_players": "HLTV Event Stats · Top 5",
+    "evp": "HLTV EVP 精选五人",
+}
+
+
+def _finale_avatar(data: Optional[bytes], text: str, size: int = 40) -> str:
+    uri = _image_data_uri(data)
+    if uri:
+        return (
+            f'<div style="width:{size}px;height:{size}px;flex:none;background:{DARK};'
+            f'border-radius:12px;overflow:hidden;display:flex;align-items:flex-end;'
+            f'justify-content:center;">'
+            f'<img src="{uri}" style="display:block;width:100%;height:100%;'
+            f'object-fit:cover;object-position:center top;" alt=""></div>'
+        )
+    return _circle(text, size, DARK2, CARD)
+
+
+def _finale_rank_pill(rank: str, rank_num: int) -> str:
+    if rank_num == 1:
+        bg, fg = ACCENT_BG, ACCENT_D
+    elif rank_num == 2:
+        bg, fg = PANEL, INK
+    else:
+        bg, fg = "rgba(31,28,23,0.05)", SUB
+    return (
+        f'<span style="display:inline-flex;align-items:center;justify-content:center;'
+        f'min-width:52px;padding:3px 8px;border-radius:8px;background:{bg};color:{fg};'
+        f'font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums;flex:none;">'
+        f'{_esc(rank)}</span>'
+    )
+
+
+def build_event_finale_html(
+    finale: dict[str, Any],
+    when_text: str,
+    *,
+    mvp_avatar_bytes: Optional[bytes] = None,
+    tote_avatars: Optional[dict[str, bytes]] = None,
+) -> str:
+    """构造赛事收官卡纯 HTML，严格复用暖米色 CSS 主题变量并支持逐区块降级。"""
+    ev = finale.get("event") or {}
+    ev_name = str(ev.get("name") or finale.get("event_id") or "CS2 赛事")
+    ev_url = str(ev.get("url") or finale.get("event_url") or "https://www.hltv.org/events")
+    meta_parts = [p for p in (ev.get("date_text"), ev.get("location"), ev.get("prize")) if p]
+    meta_line = " · ".join(str(p) for p in meta_parts) or "HLTV 赛事收官战报"
+    ev_badge = _badge(ev.get("logo_url"), ev_name, 56, ACCENT, CARD)
+
+    champion = finale.get("champion")
+    placements = list(finale.get("placements") or [])
+    mvp = finale.get("mvp")
+    tote = list(finale.get("team_of_the_event") or [])
+    tote_src = str(finale.get("team_of_the_event_source") or "")
+    missing = list(finale.get("missing_sections") or [])
+
+    # 1) 冠军区（缺失时也保留标题或以最小结构呈现）
+    if champion:
+        cname = str(champion.get("team_name") or "TBD")
+        cprize = str(champion.get("prize") or "")
+        cbadge = _badge(champion.get("logo_url"), cname, 58, DARK, CARD)
+        cstars = _stars(majors.team_titles(cname), size=14)
+        prize_chip = (
+            f'<div style="font-size:20px;font-weight:800;color:{ACCENT_D};'
+            f'font-variant-numeric:tabular-nums;">{_esc(cprize)}</div>'
+            if cprize
+            else ""
+        )
+        champ_html = f"""
+  <div style="margin-top:24px;background:linear-gradient(135deg,{ACCENT_BG} 0%,{INNER} 100%);
+       border:1px solid rgba(196,112,78,0.28);border-radius:18px;padding:22px 24px;
+       display:flex;align-items:center;justify-content:space-between;gap:18px;">
+   <div style="display:flex;align-items:center;gap:18px;min-width:0;">
+    {cbadge}
+    <div style="min-width:0;">
+     <div style="font-size:12px;font-weight:800;color:{ACCENT_D};letter-spacing:0.7px;text-transform:uppercase;">
+      Champion · 本届冠军
+     </div>
+     <div style="display:flex;align-items:center;margin-top:4px;min-width:0;">
+      <span style="font-size:30px;font-weight:800;color:{INK};letter-spacing:-0.4px;
+            white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{_esc(cname)}</span>
+      {cstars}
+     </div>
+    </div>
+   </div>
+   <div style="text-align:right;flex:none;">
+    {prize_chip}
+    <div style="margin-top:4px;display:inline-block;background:{CARD};border:1px solid rgba(196,112,78,0.22);
+         color:{ACCENT_D};font-size:12px;font-weight:700;padding:3px 10px;border-radius:999px;">
+     1st Place
+    </div>
+   </div>
+  </div>"""
+    else:
+        champ_html = f"""
+  <div style="margin-top:24px;background:{PANEL};border:1px solid {BORDER};border-radius:16px;
+       padding:18px 22px;font-size:15px;color:{MUTE};text-align:center;">
+   冠军信息暂未公布
+  </div>"""
+
+    # 2) MVP 与最佳阵容区块（缺失某区块时不留空白占位，另一区块自动拉宽）
+    mvp_html = ""
+    if mvp:
+        mnick = str(mvp.get("nick") or "MVP")
+        mteam = str(mvp.get("team_name") or "")
+        mrating = mvp.get("rating")
+        mr_txt = f"{float(mrating):.2f}" if mrating is not None else "—"
+        mr_col = _rating_color(float(mrating)) if mrating is not None else MUTE
+        mr_label = str(mvp.get("rating_label") or "Rating")
+        mcoin = "金牌 MVP" if mvp.get("coin_type") == "gold" else "HLTV MVP"
+        mvp_uri = _image_data_uri(mvp_avatar_bytes)
+        mvp_flex = "flex:0 0 330px;" if tote else "flex:1;"
+        if mvp_uri and tote:
+            # 赛事 MVP 图通常为横向摄影照片，铺满顶部裁切框避免黑边与留白空洞
+            photo_block = (
+                f'<div style="margin-top:14px;width:100%;height:158px;border-radius:14px;'
+                f'overflow:hidden;background:{DARK};border:1px solid {BORDER};">'
+                f'<img src="{mvp_uri}" style="display:block;width:100%;height:100%;'
+                f'object-fit:cover;object-position:center 22%;" alt=""></div>'
+            )
+            info_block = f"""
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;">
+     <div style="min-width:0;">
+      <div style="font-size:24px;font-weight:800;color:{INK};line-height:1.15;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{_esc(mnick)}</div>
+      <div style="font-size:14px;color:{SUB};font-weight:600;margin-top:4px;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{_esc(mteam or 'HLTV MVP')}</div>
+     </div>
+     <div style="display:inline-flex;flex-direction:column;align-items:flex-end;
+          background:{PANEL};border-radius:12px;padding:7px 12px;flex:none;">
+      <span style="font-size:20px;font-weight:800;color:{mr_col};line-height:1.1;font-variant-numeric:tabular-nums;">{mr_txt}</span>
+      <span style="font-size:11.5px;color:{MUTE};font-weight:600;margin-top:2px;">{_esc(mr_label)}</span>
+     </div>
+    </div>"""
+        else:
+            mphoto = (
+                f'<div style="width:92px;height:92px;flex:none;background:{DARK};'
+                f'border-radius:16px;overflow:hidden;border:1px solid {BORDER};">'
+                f'<img src="{mvp_uri}" style="display:block;width:100%;height:100%;'
+                f'object-fit:cover;object-position:center 22%;" alt=""></div>'
+                if mvp_uri
+                else _circle(mnick, 76, DARK, CARD)
+            )
+            photo_block = ""
+            info_block = f"""
+    <div style="display:flex;align-items:center;gap:16px;margin-top:16px;flex:1;">
+     {mphoto}
+     <div style="flex:1;min-width:0;">
+      <div style="font-size:24px;font-weight:800;color:{INK};line-height:1.15;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{_esc(mnick)}</div>
+      <div style="font-size:14px;color:{SUB};font-weight:600;margin-top:4px;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{_esc(mteam or 'HLTV MVP')}</div>
+      <div style="margin-top:10px;display:inline-flex;align-items:baseline;gap:6px;
+           background:{PANEL};border-radius:10px;padding:5px 10px;">
+       <span style="font-size:18px;font-weight:800;color:{mr_col};font-variant-numeric:tabular-nums;">{mr_txt}</span>
+       <span style="font-size:12px;color:{MUTE};font-weight:600;">{_esc(mr_label)}</span>
+      </div>
+     </div>
+    </div>"""
+        mvp_html = f"""
+   <div style="{mvp_flex}min-width:0;background:{INNER};border:1px solid {BORDER};
+        border-radius:18px;padding:18px 20px;display:flex;flex-direction:column;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+     <div style="font-size:15px;font-weight:800;color:{INK};">赛事 MVP</div>
+     <span style="background:{ACCENT_BG};color:{ACCENT_D};font-size:11.5px;font-weight:700;
+           padding:3px 9px;border-radius:999px;">{_esc(mcoin)}</span>
+    </div>
+    {photo_block}
+    {info_block}
+   </div>"""
+
+    tote_html = ""
+    if tote:
+        avatars = tote_avatars or {}
+        tote_sub = _FINALE_TOTE_SUBTITLES.get(tote_src, "Team of the Event")
+        tote_rows = ""
+        for idx, p in enumerate(tote[:5]):
+            pnick = str(p.get("nick") or "")
+            pid = str(p.get("player_id") or "")
+            pteam = str(p.get("team_name") or "")
+            prole = str(p.get("role") or "")
+            prating = p.get("rating")
+            pr_txt = f"{float(prating):.2f}" if prating is not None else "—"
+            pr_col = _rating_color(float(prating)) if prating is not None else MUTE
+            sub_info = " · ".join(x for x in (pteam, prole) if x)
+            p_img = _finale_avatar(avatars.get(pid) or avatars.get(pnick), pnick, size=36)
+            bb = "" if idx == min(len(tote), 5) - 1 else f"border-bottom:1px solid {BORDER_R};"
+            tote_rows += (
+                f'<div style="display:flex;align-items:center;justify-content:space-between;'
+                f'gap:10px;padding:8px 2px;{bb}">'
+                f' <div style="display:flex;align-items:center;gap:10px;min-width:0;">'
+                f'  {p_img}'
+                f'  <div style="min-width:0;">'
+                f'   <div style="font-size:15px;font-weight:700;color:{INK};white-space:nowrap;'
+                f'        overflow:hidden;text-overflow:ellipsis;">{_esc(pnick)}</div>'
+                + (
+                    f'<div style="font-size:12px;color:{MUTE};white-space:nowrap;'
+                    f'     overflow:hidden;text-overflow:ellipsis;">{_esc(sub_info)}</div>'
+                    if sub_info
+                    else ""
+                )
+                + f'  </div>'
+                f' </div>'
+                f' <div style="font-size:15.5px;font-weight:800;color:{pr_col};'
+                f'      font-variant-numeric:tabular-nums;flex:none;">{pr_txt}</div>'
+                f'</div>'
+            )
+        tote_html = f"""
+   <div style="flex:1;min-width:0;background:{INNER};border:1px solid {BORDER};
+        border-radius:18px;padding:18px 20px;">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:8px;">
+     <div style="font-size:15px;font-weight:800;color:{INK};">赛事最佳阵容</div>
+     <div style="font-size:12px;color:{MUTE};font-weight:600;">{_esc(tote_sub)}</div>
+    </div>
+    {tote_rows}
+   </div>"""
+
+    awards_section = ""
+    if mvp_html or tote_html:
+        awards_section = f"""
+  <div style="display:flex;gap:18px;margin-top:18px;align-items:stretch;">
+   {mvp_html}
+   {tote_html}
+  </div>"""
+
+    # 3) Top 8 最终名次表（缺名次时进入极简版，不渲染空名次表）
+    placements_section = ""
+    if "placements" not in missing and placements:
+        cells = ""
+        for row in placements[:8]:
+            tname = str(row.get("team_name") or "")
+            rank_str = str(row.get("rank") or "")
+            rank_num = int(row.get("rank_num") or 99)
+            prize = str(row.get("prize") or "")
+            tbadge = _badge(row.get("logo_url"), tname, 26, DARK2, CARD)
+            rpill = _finale_rank_pill(rank_str, rank_num)
+            fw = "700" if rank_num <= 2 else "600"
+            cells += (
+                f'<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;'
+                f'background:{INNER};border:1px solid {BORDER};border-radius:12px;padding:10px 12px;min-width:0;">'
+                f' <div style="display:flex;align-items:center;gap:9px;min-width:0;">'
+                f'  {rpill}{tbadge}'
+                f'  <span style="font-size:14.5px;font-weight:{fw};color:{INK};white-space:nowrap;'
+                f'        overflow:hidden;text-overflow:ellipsis;">{_esc(tname)}</span>'
+                f' </div>'
+                f' <span style="font-size:13px;font-weight:600;color:{SUB};font-variant-numeric:tabular-nums;'
+                f'       white-space:nowrap;flex:none;">{_esc(prize)}</span>'
+                f'</div>'
+            )
+        cols = 2 if len(placements) > 4 else 1
+        placements_section = f"""
+  <div style="margin-top:22px;">
+   <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px;">
+    <div style="font-size:16px;font-weight:800;color:{INK};">最终名次</div>
+    <div style="font-size:12.5px;color:{MUTE};font-weight:500;">Final Placements · Top 8</div>
+   </div>
+   <div style="background:{PANEL};border:1px solid {BORDER};border-radius:16px;padding:12px;
+        display:grid;grid-template-columns:repeat({cols},minmax(0,1fr));gap:10px;">
+    {cells}
+   </div>
+  </div>"""
+
+    # 4) 降级提示行（只要任一区块暂缺，卡尾明确告知“部分数据暂缺”）
+    degrade_notice = ""
+    if missing:
+        labels = "、".join(_FINALE_MISSING_LABELS.get(k, k) for k in missing)
+        degrade_notice = f"""
+  <div style="margin-top:20px;background:{ACCENT_BG};border:1px solid rgba(196,112,78,0.22);
+       border-radius:12px;padding:10px 14px;font-size:13px;color:{ACCENT_D};font-weight:600;">
+   部分数据暂缺（{_esc(labels)}暂未公布或未解析到，已按现有数据生成）
+  </div>"""
+
+    body = f"""
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:18px;">
+   <div style="display:flex;align-items:center;gap:16px;min-width:0;">
+    {ev_badge}
+    <div style="min-width:0;">
+     <div style="font-size:26px;font-weight:800;color:{INK};letter-spacing:-0.4px;line-height:1.15;
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{_esc(ev_name)}</div>
+     <div style="font-size:14.5px;color:{SUB};margin-top:5px;white-space:nowrap;
+          overflow:hidden;text-overflow:ellipsis;">{_esc(meta_line)}</div>
+    </div>
+   </div>
+   <div style="background:{ACCENT_BG};border:1px solid rgba(196,112,78,0.22);color:{ACCENT_D};
+        font-size:13.5px;font-weight:700;padding:7px 15px;border-radius:999px;white-space:nowrap;flex:none;">
+    赛事收官 · Finale
+   </div>
+  </div>
+  {champ_html}
+  {awards_section}
+  {placements_section}
+  {degrade_notice}
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:24px;
+       padding-top:16px;border-top:1px solid {BORDER};font-size:13.5px;color:{FAINT};">
+   <span style="white-space:nowrap;">{_esc(when_text)}</span>
+   <span style="color:{ACCENT};font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_esc(ev_url)}</span>
+  </div>"""
+    return _shell(body, "40px 46px 34px")
+
+
+async def render_event_finale_card(
+    finale: dict[str, Any],
+    when_text: str,
+    *,
+    mvp_avatar_bytes: Optional[bytes] = None,
+    tote_avatars: Optional[dict[str, bytes]] = None,
+) -> bytes:
+    return await _render_png(
+        build_event_finale_html(
+            finale,
+            when_text,
+            mvp_avatar_bytes=mvp_avatar_bytes,
+            tote_avatars=tote_avatars,
+        )
+    )
+

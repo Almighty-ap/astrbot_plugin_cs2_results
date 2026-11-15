@@ -51,7 +51,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star
 
-from . import hltv, names, store
+from . import event_finale, hltv, names, store
 from . import render as card
 from .config import Config
 from .delivery import DeliveryWorker, drop_unreachable_subscription
@@ -191,6 +191,8 @@ _followed_since: dict[str, float] = {}  # match_id → 首次纳入追踪
 _last_seen_live: dict[str, float] = {}  # match_id → 上次在 /matches 直播区见到
 _score_fp: dict[str, tuple] = {}  # match_id → 最近一次解析的比分指纹
 _score_stable: set[str] = set()  # 连续两次指纹相同 → 中盘可略退避
+_pre_veto: set[str] = set()  # match_id → 页面正常但尚未选图(0 张真实地图)
+_pre_veto_start_unix: dict[str, int] = {}  # match_id → 赛前页上未来开赛时间(ms)
 # 非顶级赛事、且经比赛页确认无任何订阅命中(如被订阅选手替补下场)→ 记下,scan 不再反复追
 _no_recipient_matches: set[str] = set()
 # 名录顺路收集去重:每场比赛只把队名/首发写一次本地名录
@@ -284,6 +286,8 @@ def _live_map_phase(match_id: str) -> str:
     那张图的比分是 scorebot 注入的**实时回合比分**(见 hltv 里的坑注)。这里只拿它
     **定轮询节奏**,不参与完赛判定 —— 判错顶多多抓/少抓一次,不会误报赛果。
     """
+    if match_id in _pre_veto:
+        return "pre_veto"
     fp = _score_fp.get(match_id)
     if not fp:
         return "unknown"
@@ -300,31 +304,36 @@ def _live_map_phase(match_id: str) -> str:
 
 # 各局势分到的抓取权重(越大越勤)。权重只在**并发直播之间瓜分同一份额度**,
 # 不改变总请求率 —— 见 _follow_poll_interval。
-_PHASE_WEIGHT = {"endgame": 2.0, "mid": 1.0, "unknown": 1.0, "early": 0.6}
+_PHASE_WEIGHT = {"endgame": 2.0, "mid": 1.0, "unknown": 1.0, "early": 0.6, "pre_veto": 0.5}
 _STABLE_WEIGHT = 0.8  # 比分连续未变(中盘拉锯)略退避
 _FOLLOW_INTERVAL_MIN = 60.0
+
+
+def _follow_fail_streak(match_id: str) -> int:
+    """Return the active fetch/parse failure streak for a followed match."""
+    sources: dict = _stat.get("sources", {})
+    return max(
+        int((sources.get(f"match:{match_id}") or {}).get("fail_streak", 0)),
+        int((sources.get(f"match:{match_id}:parse") or {}).get("fail_streak", 0)),
+    )
 
 
 def _follow_weight(match_id: str) -> float:
     phase = _live_map_phase(match_id)
     weight = _PHASE_WEIGHT.get(phase, 1.0)
-    if phase not in ("endgame", "early") and match_id in _score_stable:
+    if phase not in ("endgame", "early", "pre_veto") and match_id in _score_stable:
         weight = min(weight, _STABLE_WEIGHT)
     return weight
 
 
-def _follow_poll_interval(match_id: str) -> float:
+def _follow_poll_interval(match_id: str, now: float | None = None) -> float:
     """单场追踪的自适应轮询间隔(秒)。
 
     - 等评分 / 系列赛已结束仍有 pending 卡 → 压到约 60s,尽快出图
-    - 生成持续失败 → 至少 10 分钟低频重试
+    - 生成持续失败 / 抓取或解析连续失败 → 指数退避,避免抢占活跃比赛额度
     - **按局势加权瓜分额度**:当前小图有一方 ≥11 回合(随时可能完场)权重加倍,刚开图
-      (≤5 回合)权重减到 0.6。多场并发时总请求率与原来「每场 ``min_gap*(n+1)``」
-      **完全一致**,只是把额度从「再怎么快也要二十分钟才打得完」的场次,挪给
-      「随时可能出结果」的场次 —— 这才是真正减少播报延迟的地方。
-
-    额度公式:令权重 w_i、并发数 n,取 ``interval_i = Σw · min_gap · (n+1) / (n · w_i)``。
-    全部 w=1 时退化成原来的 ``min_gap·(n+1)``,可验算总速率 ``Σ 1/interval_i`` 不变。
+      (≤5 回合)和赛前未选图(pre_veto)权重调低。多场并发时总请求率与原来「每场
+      ``min_gap*(n+1)``」**完全一致**,只是把额度挪给「随时可能出结果」的场次。
 
     上限 ``max(600s, base)`` 是防「退避把局势看丢」:刚开图退太久,等回头再看时图
     可能已经打完,反而更慢。轮询循环是串行的(``_poll_once`` 每轮只提交一次抓取),
@@ -337,8 +346,18 @@ def _follow_poll_interval(match_id: str) -> float:
     if pending or match_id in _over_since:
         return min(base, 60.0)
 
-    # 新开赛特权通道:未拉取过比分指纹或未推送开赛卡的场次,强制以最短间隔快速跟进发卡
-    if match_id not in _score_fp and not store.already_pushed(match_id, "start"):
+    fail_streak = _follow_fail_streak(match_id)
+    if fail_streak > 0:
+        backoff = max(base, float(cfg.cs2_request_min_gap)) * (2 ** min(fail_streak - 1, 3))
+        return min(max(600.0, base), backoff)
+
+    # 新开赛特权通道:仅对尚未尝试抓取的新比赛保留最短间隔,避免失败或赛前 0 图长期霸占额度
+    if (
+        match_id not in _follow_last
+        and match_id not in _score_fp
+        and match_id not in _pre_veto
+        and not store.already_pushed(match_id, "start")
+    ):
         return _FOLLOW_INTERVAL_MIN
 
     weight = _follow_weight(match_id)
@@ -348,7 +367,22 @@ def _follow_poll_interval(match_id: str) -> float:
         want = total * cfg.cs2_request_min_gap * (n + 1) / (n * weight)
     else:
         want = base / weight
-    return max(_FOLLOW_INTERVAL_MIN, min(want, max(600.0, base)))
+    interval = max(_FOLLOW_INTERVAL_MIN, min(want, max(600.0, base)))
+    if match_id in _pre_veto:
+        future_ms = _pre_veto_start_unix.get(match_id, 0)
+        if future_ms:
+            cur = time.time() if now is None else now
+            secs_until = (future_ms - int(cur * 1000)) / 1000.0
+            if secs_until > 180.0:
+                interval = max(interval, min(max(600.0, base), secs_until - 120.0))
+    return interval
+
+
+def _follow_due_at(match_id: str, now: float | None = None) -> float:
+    """Return the next eligible poll timestamp (0.0 only before the first attempt)."""
+    if match_id not in _follow_last:
+        return 0.0
+    return _follow_last[match_id] + _follow_poll_interval(match_id, now=now)
 
 
 def _match_score_fp(match: hltv.MatchDetail) -> tuple:
@@ -370,6 +404,8 @@ def _drop_follow(match_id: str, *, reason: str) -> None:
     _last_seen_live.pop(match_id, None)
     _score_fp.pop(match_id, None)
     _score_stable.discard(match_id)
+    _pre_veto.discard(match_id)
+    _pre_veto_start_unix.pop(match_id, None)
     _over_since.pop(match_id, None)
     _generation_alerted.discard(match_id)
     _stat["sources"].pop(f"match:{match_id}", None)
@@ -528,7 +564,8 @@ async def refresh_whitelist() -> None:
         await _fail("events", "抓取失败")
         return
     _ok("events")
-    events = hltv.parse_whitelist(html)
+    etree = hltv.tree(html)
+    events = hltv.parse_whitelist(etree)
     if not events:
         await _fail("events:parse", "页面存在但未解析出任何 featured/big event")
         return
@@ -541,6 +578,35 @@ async def refresh_whitelist() -> None:
             tuples.append((eid, "", f"event {eid}"))
     store.update_whitelist(tuples)
     store.prune_whitelist(cfg.cs2_featured_sticky_days)
+    # 登记白名单赛事的结束时间窗口，便于赛事收官后自动触发收官卡检查
+    featured_ids = hltv.featured_event_ids(etree)
+    event_details = {e.id: e for e in hltv.parse_events(etree)}
+    now_ts = time.time()
+    for eid, slug, ename in tuples:
+        det = event_details.get(eid)
+        end_unix = det.end_unix if det else 0
+        if eid in featured_ids:
+            chk = (end_unix / 1000.0) if end_unix > 0 else (now_ts + 3600.0)
+        elif end_unix > 0 and end_unix <= now_ts * 1000:
+            chk = now_ts
+        elif end_unix > 0:
+            chk = end_unix / 1000.0
+        else:
+            chk = now_ts + 3600.0
+        store.note_watched_event(
+            eid, slug=slug, name=ename, end_unix=end_unix, next_check_at=chk
+        )
+    for eid, info in store.whitelist_view().items():
+        if eid not in excl and eid not in featured_ids:
+            det = event_details.get(eid)
+            if det is None or (det.end_unix and det.end_unix <= now_ts * 1000):
+                store.note_watched_event(
+                    eid,
+                    slug=info.get("slug", ""),
+                    name=info.get("name", ""),
+                    end_unix=det.end_unix if det else 0,
+                    next_check_at=now_ts,
+                )
     _stat["last_featured"] = _now()
     logger.info(f"[cs2] 白名单刷新完成,共 {len(store.whitelist_event_ids())} 个赛事")
 
@@ -710,19 +776,30 @@ async def scan_live() -> bool:
     # 个人订阅关注的队(显式战队 ∪ 被订阅选手当前所属队);cs2_sub_any_tier=False 时不扩展。
     watch_teams = _watch_team_keys() if cfg.cs2_sub_any_tier else set()
     now = time.time()
-    for lm in hltv.parse_live_matches(html):
+    mtree = hltv.tree(html)
+    for lm in hltv.parse_live_matches(mtree):
         top = bool(lm.event_id) and lm.event_id in wl and lm.event_id not in excl
         subbed = (
             bool(_match_team_keys(lm.team1, lm.team2) & watch_teams)
             and lm.match_id not in _no_recipient_matches
         )
         if top or subbed:
+            if lm.event_id:
+                store.note_watched_event(
+                    lm.event_id, name=lm.event_name, next_check_at=now + 1800
+                )
             if lm.match_id not in _followed:
                 tag = "" if top else " (个人订阅)"
                 logger.info(f"[cs2] 开始追踪直播:{lm.event_name} · {lm.url}{tag}")
                 _followed_since[lm.match_id] = now
             _followed[lm.match_id] = lm
             _last_seen_live[lm.match_id] = now
+    if watch_teams:
+        for um in hltv.parse_upcoming_matches(mtree):
+            if um.event_id and (_match_team_keys(um.team1, um.team2) & watch_teams):
+                store.note_watched_event(
+                    um.event_id, name=um.event_name, next_check_at=now + 3600
+                )
     _prune_stuck_follows(now)
     followed_count = len(_followed)
     if followed_count > cfg.cs2_max_followed and _stat["capacity_followed"] != followed_count:
@@ -763,6 +840,9 @@ async def scan_backstop(now: float) -> bool:
     start_ms = now * 1000 - window_min * 60 * 1000
     added = 0
     for rm in _finished_schedule_rows(rhtml, start_ms):
+        eid = rm.event_id or _wl_id_for_result(rm)
+        if eid:
+            store.note_watched_event(eid, name=rm.event_name, next_check_at=now + 120)
         mid = rm.match_id
         if mid in _followed or store.is_done(mid):
             continue
@@ -781,7 +861,11 @@ async def scan_backstop(now: float) -> bool:
 
 
 async def follow_match(lm: hltv.LiveMatch, now: float) -> None:
-    html = await fetcher.get_html(lm.url, wait_selector=".mapholder", priority="live")
+    html = await fetcher.get_html(
+        lm.url,
+        wait_selector=".mapholder, .team1-gradient",
+        priority="live",
+    )
     if not html:
         await _fail(f"match:{lm.match_id}", "比赛页抓取失败")
         return
@@ -799,24 +883,45 @@ async def follow_match(lm: hltv.LiveMatch, now: float) -> None:
             _lineups = hltv.parse_lineup(mtree)
         return _lineups
 
-    if not match.maps or match.team1 == "Team 1" or match.team2 == "Team 2":
+    if match.team1 == "Team 1" or match.team2 == "Team 2":
         await _fail(f"match:{lm.match_id}:parse", "比赛页结构无法识别")
         return
     _ok(f"match:{lm.match_id}:parse")
     note_match_vrs(match)  # 顺路收下两队的实时 VRS 名次(赛果一出就变,零额外请求)
-    # 成功拉到比赛页也算「还活着」,避免仅依赖 /matches 列表导致误杀
-    _last_seen_live[lm.match_id] = now
     _followed_since.setdefault(lm.match_id, now)
 
-    fp = _match_score_fp(match)
-    prev = _score_fp.get(lm.match_id)
-    if prev is None:
-        _score_fp[lm.match_id] = fp
-    elif prev == fp:
-        _score_stable.add(lm.match_id)
+    if match.maps:
+        _pre_veto.discard(lm.match_id)
+        _pre_veto_start_unix.pop(lm.match_id, None)
+        # 成功拉到有效比赛图也算「还活着」,避免仅依赖 /matches 列表导致误杀
+        _last_seen_live[lm.match_id] = now
+
+        fp = _match_score_fp(match)
+        prev = _score_fp.get(lm.match_id)
+        if prev is None:
+            _score_fp[lm.match_id] = fp
+        elif prev == fp:
+            _score_stable.add(lm.match_id)
+        else:
+            _score_fp[lm.match_id] = fp
+            _score_stable.discard(lm.match_id)
     else:
-        _score_fp[lm.match_id] = fp
-        _score_stable.discard(lm.match_id)
+        was_pre_veto = lm.match_id in _pre_veto
+        _pre_veto.add(lm.match_id)
+        cd_upper = (match.countdown or "").strip().upper()
+        if match.start_unix and cd_upper != "LIVE" and match.start_unix > int(now * 1000):
+            _pre_veto_start_unix[lm.match_id] = match.start_unix
+        else:
+            _pre_veto_start_unix.pop(lm.match_id, None)
+        if cd_upper == "LIVE" or lm.match_id not in _pre_veto_start_unix:
+            _last_seen_live[lm.match_id] = now
+        if not was_pre_veto:
+            eta = (
+                f" (预计 {datetime.fromtimestamp(match.start_unix / 1000, CN).strftime('%H:%M')} CST)"
+                if lm.match_id in _pre_veto_start_unix
+                else ""
+            )
+            logger.info(f"[cs2] 比赛尚未选图(等待 BP):{match.team1} vs {match.team2}{eta}")
 
     await ensure_logos(match)
 
@@ -850,6 +955,10 @@ async def follow_match(lm: hltv.LiveMatch, now: float) -> None:
         if len(_no_recipient_matches) < 2000:
             _no_recipient_matches.add(lm.match_id)
         _drop_follow(lm.match_id, reason=f"无收件人(非顶级未命中订阅){match.team1} vs {match.team2}")
+        return
+
+    if not match.maps:
+        # 尚未完成选图前不提前推开赛提醒,避免延赛或赛前阶段提前误报
         return
 
     # 开赛提醒:仅在「刚开赛」(已完成图数低于阈值)且未发过时推送;发现得晚(已打了图)
@@ -920,6 +1029,15 @@ async def follow_match(lm: hltv.LiveMatch, now: float) -> None:
             return
         store.mark_done(lm.match_id)  # 补报去重:全部战报已生成入队；投递由 outbox 独立完成
         store.forget_old_pushed()
+        if match.event_id:
+            st = store.get_finale_state(match.event_id)
+            eu = int(st.get("end_unix") or 0) if st else 0
+            stage_l = (match.stage or "").lower()
+            is_final = "final" in stage_l and "semi" not in stage_l and "quarter" not in stage_l
+            if is_final or eu == 0 or now * 1000 >= eu:
+                store.note_watched_event(
+                    match.event_id, name=match.event_name, next_check_at=now + 120
+                )
         _drop_follow(
             lm.match_id,
             reason=f"系列赛结束 {match.team1} vs {match.team2}",
@@ -1084,6 +1202,255 @@ async def _push_start(
             f"[cs2] 开赛提醒已入队:{match.team1} vs {match.team2} → 群 {sorted(start_recipients)}"
         )
     store.mark_pushed(match.match_id, "start")
+
+
+# ————————————————————————— 赛事收官卡 (Event Finale) —————————————————————————
+_FINALE_INFLIGHT: set[str] = set()
+
+
+def resolve_event_finale_recipients(
+    event_id: str,
+    team_keys: set[str],
+    player_ids: set[str],
+    *,
+    mention_team_keys: set[str] | None = None,
+    mention_player_ids: set[str] | None = None,
+) -> dict[int, set[int]]:
+    """计算收官卡的 {收件群 -> 要 @ 的 QQ 集}。
+
+    - 收件群范围：顶级白名单赛事推送全部 full/concise 群；home 群及非白名单赛事仅在
+      群内有人订阅了任一参赛战队/选手时推送；
+    - @ 人范围：只 @ 订阅了本届「冠军战队」或「赛事 MVP」的成员（由 mention_* 指定），
+      不把早早淘汰队伍的粉丝一并 @ 刷屏；
+    - 夜间静音群保留在名单中（入队时按静音结束时刻自动顺延，避免错过整届收官）。
+    """
+    firehose = target_groups()
+    if not firehose:
+        return {}
+    subs = store.recipients_for(firehose, team_keys, player_ids)
+    m_tkeys = set(mention_team_keys or ())
+    m_pids = set(mention_player_ids or ())
+    mention_subs = (
+        store.recipients_for(firehose, m_tkeys, m_pids)
+        if (m_tkeys or m_pids)
+        else {}
+    )
+    top = _top_tier(event_id)
+    out: dict[int, set[int]] = {}
+    for g in firehose:
+        conf = store.get_group_subscription(g)
+        mode = conf.get("mode", "full") if conf else "full"
+        if mode == "home":
+            if g in subs:
+                out[g] = mention_subs.get(g, set())
+        elif top:
+            out[g] = mention_subs.get(g, set())
+        elif g in subs:
+            out[g] = mention_subs.get(g, set())
+    return out
+
+
+async def _download_finale_assets(
+    parsed: dict[str, Any], event_url: str
+) -> tuple[bytes | None, dict[str, bytes]]:
+    """补齐收官卡需要的赛事/战队 logo 与 MVP/最佳阵容头像，失败静默降级为首字母占位。"""
+    logo_urls: list[str] = []
+    ev_logo = (parsed.get("event") or {}).get("logo_url")
+    if ev_logo and not store.has_logo(ev_logo):
+        logo_urls.append(ev_logo)
+    champ = parsed.get("champion")
+    if champ and champ.get("logo_url") and not store.has_logo(champ["logo_url"]):
+        logo_urls.append(champ["logo_url"])
+    for row in parsed.get("placements") or []:
+        lu = row.get("logo_url")
+        if lu and not store.has_logo(lu) and lu not in logo_urls:
+            logo_urls.append(lu)
+    if logo_urls:
+        try:
+            await fetcher.get_logos(event_url, logo_urls, priority="scan")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[cs2] 收官卡 logo 下载异常(忽略降级): {e}")
+
+    mvp_bytes: bytes | None = None
+    mvp = parsed.get("mvp")
+    if mvp and mvp.get("avatar_url"):
+        try:
+            mvp_bytes = await fetcher.fetch_impersonated_bytes(
+                mvp["avatar_url"], priority="scan"
+            )
+        except Exception:  # noqa: BLE001
+            mvp_bytes = None
+
+    tote_avatars: dict[str, bytes] = {}
+    for p in (parsed.get("team_of_the_event") or [])[:5]:
+        av_url = p.get("avatar_url")
+        if not av_url:
+            continue
+        key = str(p.get("player_id") or p.get("nick") or "")
+        if not key or key in tote_avatars:
+            continue
+        try:
+            img = await fetcher.fetch_impersonated_bytes(av_url, priority="scan")
+            if img:
+                tote_avatars[key] = img
+        except Exception:  # noqa: BLE001
+            continue
+    return mvp_bytes, tote_avatars
+
+
+async def process_event_finale(row: dict[str, Any], now: float | None = None) -> bool:
+    """检查单场待观测赛事是否已在 HLTV 结束，按 2x30m 宽限或降级生成收官卡并入队。"""
+    ts = time.time() if now is None else float(now)
+    eid = str(row.get("event_id") or "").strip()
+    if not eid or eid in _FINALE_INFLIGHT:
+        return True
+    _FINALE_INFLIGHT.add(eid)
+    try:
+        wl_info = store.whitelist_view().get(eid) or {}
+        slug = str(row.get("slug") or wl_info.get("slug") or "").strip()
+        url = f"{hltv.BASE}/events/{eid}/{slug or 'x'}"
+        retry_count = int(row.get("retry_count") or 0)
+        end_unix = int(row.get("end_unix") or 0)
+
+        event_html = await fetcher.get_html(
+            url,
+            wait_selector=".event-hub-title, .placements, .event-header-component",
+            max_age=0 if retry_count > 0 else cfg.cs2_cache_event_page_ttl,
+            priority="scan",
+        )
+        if not event_html:
+            store.update_finale_state(eid, next_check_at=ts + 15 * 60)
+            return False
+
+        parsed = event_finale.parse_event_finale(
+            event_html, event_id=eid, event_url=url
+        )
+        ev_name = (parsed.get("event") or {}).get("name") or str(row.get("name") or "")
+        ev_url = (parsed.get("event") or {}).get("url") or url
+
+        if not parsed.get("ended"):
+            if end_unix and ts * 1000 > end_unix + 7 * 86_400_000:
+                store.update_finale_state(eid, name=ev_name, finalized_at=ts)
+            else:
+                delay = 30 * 60 if (not end_unix or ts * 1000 >= end_unix) else 4 * 3600
+                store.update_finale_state(eid, name=ev_name, next_check_at=ts + delay)
+            return True
+
+        if event_finale.needs_stats_fetch(parsed):
+            stats_url = f"{hltv.BASE}/stats?event={eid}"
+            stats_html = await fetcher.get_html(
+                stats_url,
+                wait_selector=".stats-section, .top-players, .player-ratings-table",
+                max_age=0 if retry_count > 0 else 600,
+                priority="scan",
+            )
+            if stats_html:
+                parsed = event_finale.parse_event_finale(
+                    event_html, stats_html=stats_html, event_id=eid, event_url=ev_url
+                )
+
+        team_keys = {
+            t["team_key"] for t in (parsed.get("teams") or []) if t.get("team_key")
+        }
+        player_ids = set(parsed.get("player_ids") or [])
+        champ_tkey = names.team_key(
+            (parsed.get("champion") or {}).get("team_name") or ""
+        )
+        mention_tkeys = {champ_tkey} if champ_tkey else set()
+        mvp_pid = str((parsed.get("mvp") or {}).get("player_id") or "").strip()
+        mention_pids = {mvp_pid} if mvp_pid else set()
+        recipients = resolve_event_finale_recipients(
+            eid,
+            team_keys,
+            player_ids,
+            mention_team_keys=mention_tkeys,
+            mention_player_ids=mention_pids,
+        )
+        unpushed = store.filter_unpushed_finale_groups(eid, recipients.keys())
+        if not recipients or not unpushed:
+            store.update_finale_state(eid, name=ev_name, finalized_at=ts)
+            return True
+
+        missing = list(parsed.get("missing_sections") or [])
+        max_retries = int(getattr(cfg, "cs2_event_finale_grace_retries", 2))
+        grace_sec = int(getattr(cfg, "cs2_event_finale_grace_interval_min", 30)) * 60
+        if missing and retry_count < max_retries:
+            first_ended = row.get("first_ended_at") or ts
+            new_retry = retry_count + 1
+            store.update_finale_state(
+                eid,
+                slug=slug,
+                name=ev_name,
+                first_ended_at=first_ended,
+                retry_count=new_retry,
+                next_check_at=ts + grace_sec,
+            )
+            logger.info(
+                f"[cs2] 赛事 {ev_name or eid} 已结束但暂缺 {missing}，"
+                f"进入第 {new_retry}/{max_retries} 次宽限等待 ({grace_sec // 60} 分钟后重抓)"
+            )
+            return True
+
+        mvp_bytes, tote_avatars = await _download_finale_assets(parsed, ev_url)
+        when = f"{_now()} 北京时间"
+        try:
+            png = await card.render_event_finale_card(
+                parsed,
+                when,
+                mvp_avatar_bytes=mvp_bytes,
+                tote_avatars=tote_avatars,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"[cs2] 收官卡渲染失败 {ev_name or eid}: {e}")
+            store.update_finale_state(eid, next_check_at=ts + 10 * 60)
+            return False
+
+        champ_name = ((parsed.get("champion") or {}).get("team_name") or "").strip()
+        champ_part = f" | 冠军：{champ_name}" if champ_name else ""
+        caption = f"🏆 {ev_name or f'Event {eid}'} 已收官{champ_part}\n{ev_url}"
+
+        unpushed = store.filter_unpushed_finale_groups(eid, recipients.keys())
+        if unpushed:
+            batch_id = f"event:{eid}"
+            mentions_map = {g: recipients[g] for g in unpushed if recipients.get(g)}
+            store.prepare_deliveries(batch_id, "finale", unpushed, mentions=mentions_map)
+            store.set_delivery_payload(batch_id, "finale", png, caption=caption)
+            for g in unpushed:
+                mute_end = store.group_mute_end_ts(g, now_ts=ts)
+                if mute_end is not None:
+                    store.defer_delivery(
+                        batch_id,
+                        "finale",
+                        g,
+                        mute_end,
+                        "群处于夜间免打扰时段，结束后投递",
+                    )
+            store.record_event_finale_pushed(eid, unpushed)
+            logger.info(
+                f"[cs2] 收官卡已进入投递队列: {ev_name or eid} → 群 {sorted(unpushed)}"
+                + (f" (降级缺失: {missing})" if missing else "")
+            )
+        store.update_finale_state(eid, slug=slug, name=ev_name, finalized_at=ts)
+        return True
+    finally:
+        _FINALE_INFLIGHT.discard(eid)
+
+
+async def check_due_event_finale(now: float) -> bool:
+    """每次轮询至多检查 1 场已到期的待收官赛事，避免抢占直播轮询额度。"""
+    if not getattr(cfg, "cs2_event_finale_enabled", True):
+        return False
+    due = store.list_due_finale_events(now=now, limit=5)
+    for row in due:
+        eid = str(row.get("event_id") or "")
+        if not eid or eid in _FINALE_INFLIGHT:
+            continue
+        if eid in set(cfg.cs2_force_exclude_events):
+            store.update_finale_state(eid, finalized_at=now)
+            continue
+        await process_event_finale(row, now=now)
+        return True
+    return False
 
 
 # ————————————————————————— 本地名录刷新 —————————————————————————
@@ -1436,23 +1803,17 @@ async def _poll_once() -> float:
 
     # 优先跟进活跃直播/新开赛:若有到期的直播场次,必须优先执行,绝不让兜底补报截胡
     if _followed:
-        due_matches = []
-        for candidate in _followed.values():
-            interval = _follow_poll_interval(candidate.match_id)
-            # 新开赛特权:从未抓取过比分指纹或未进 follow_last 的新比赛,立即到期优先执行
-            if candidate.match_id not in _follow_last or (
-                candidate.match_id not in _score_fp
-                and not store.already_pushed(candidate.match_id, "start")
-            ):
-                due_at = 0.0
-            else:
-                due_at = _follow_last[candidate.match_id] + interval
-            due_matches.append((due_at, candidate))
+        due_matches = [
+            (_follow_due_at(candidate.match_id, now), candidate)
+            for candidate in _followed.values()
+        ]
         due_at, lm = min(due_matches, key=lambda item: item[0])
         if due_at <= now:
             _follow_last[lm.match_id] = now
             await follow_match(lm, now)
-            if lm.match_id not in _followed:
+            if lm.match_id in _followed:
+                _follow_last[lm.match_id] = time.time()
+            else:
                 _follow_last.pop(lm.match_id, None)
             _stat["last_poll"] = _now()
             return 0.0
@@ -1474,14 +1835,14 @@ async def _poll_once() -> float:
         _stat["last_poll"] = _now()
         return 0.0
 
+    # 赛事收官检测置于直播与补报之后：不挤占实时赛果，空闲周期检查 1 场到期赛事
+    if getattr(cfg, "cs2_event_finale_enabled", True) and await check_due_event_finale(now):
+        _stat["last_poll"] = _now()
+        return 0.0
+
     due = [_next_scan_at, _next_backstop_at]
     for mid in _followed:
-        if mid not in _follow_last or (
-            mid not in _score_fp and not store.already_pushed(mid, "start")
-        ):
-            due.append(0.0)
-        else:
-            due.append(_follow_last[mid] + _follow_poll_interval(mid))
+        due.append(_follow_due_at(mid, now))
     return max(1.0, min(30.0, min(due) - time.time()))
 
 

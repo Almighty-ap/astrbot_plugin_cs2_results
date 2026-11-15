@@ -226,6 +226,7 @@ class DeliveryWorker:
         muted_this_run: set[int] = set()  # 每群每轮只播报一次禁言,别按卡刷屏
         active_groups = store.get_subscriptions()
         payloads: dict[tuple[str, str], bytes | None] = {}
+        batches: dict[tuple[str, str], store.DeliveryBatch | None] = {}
         payload_errors: dict[tuple[str, str], str] = {}
         images: dict[tuple[str, str], Any] = {}
         for delivery in deliveries:
@@ -254,6 +255,7 @@ class DeliveryWorker:
             key = (delivery.match_id, delivery.map_key)
             if key not in payloads:
                 try:
+                    batches[key] = store.get_delivery_batch(*key)
                     payloads[key] = store.get_delivery_payload(*key)
                 except Exception as exc:  # noqa: BLE001
                     payloads[key] = None
@@ -306,6 +308,9 @@ class DeliveryWorker:
                     images[key] = image
                 components = [At(qq=qq) for qq in delivery.mentions]
                 components.append(image)
+                batch = batches.get(key)
+                if batch and batch.caption:
+                    components.append(Plain(batch.caption))
                 sent_ok = await self._context.send_message(
                     umo, MessageChain(chain=components)
                 )

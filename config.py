@@ -174,6 +174,11 @@ class Config(BaseModel):
     cs2_morning_report_enabled: bool = True
     cs2_morning_report_time: str = Field(default="08:30")
 
+    # —— 赛事收官卡 ——
+    cs2_event_finale_enabled: bool = True
+    cs2_event_finale_grace_retries: int = Field(default=2, ge=0, le=5)
+    cs2_event_finale_grace_interval_min: int = Field(default=30, ge=1, le=240)
+
     # —— HLTV RSS 资讯推送 ——
     cs2_news_enabled: bool = True
     cs2_news_poll_interval: int = Field(default=15, ge=1, le=1440)
